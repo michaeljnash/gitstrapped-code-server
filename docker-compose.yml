@@ -2,18 +2,18 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     environment:
-      FILE__HASHED_PASSWORD: "/config/.gitstrap/password.hash"
+      FILE__HASHED_PASSWORD: /config/.gitstrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
       INSTALL_PACKAGES: argon2
-      PUID: ${PUID}
-      PGID: ${PGID}
-      TZ: ${TZ}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
       DEFAULT_PASSWORD: ${DEFAULT_PASSWORD}
-      GH_USERNAME: "${GH_USERNAME}"
-      GH_PAT: "${GH_PAT}"
-      GIT_NAME: "${GIT_NAME}"
-      GIT_EMAIL: "${GIT_EMAIL}"
-      GH_REPOS: "${GH_REPOS}"
+      GH_USERNAME: ${GH_USERNAME}
+      GH_PAT: ${GH_PAT}
+      GIT_NAME: ${GIT_NAME}
+      GIT_EMAIL: ${GIT_EMAIL}
+      GH_REPOS: ${GH_REPOS}
       GIT_BASE_DIR: ${GIT_BASE_DIR}
       GH_KEY_TITLE: ${GH_KEY_TITLE}
     volumes:
