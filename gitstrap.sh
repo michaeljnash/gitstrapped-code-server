@@ -41,7 +41,7 @@ LOCK_DIR="/run/gitstrap"
 LOCK_FILE="$LOCK_DIR/init-gitstrap.lock"; mkdir -p "$LOCK_DIR" 2>/dev/null || true
 
 # file that code-server reads on boot for auth (compose sets FILE__HASHED_PASSWORD)
-PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/codepass.hash}"
+PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 # first-boot restart marker (processed by restart gate service)
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
@@ -107,6 +107,26 @@ EOF
 
   log "installed restart gate service (Node) on 127.0.0.1:9000"
 }
+
+# ========= CLI shim: install /usr/local/bin/gitstrap =========
+install_cli_shim(){
+  mkdir -p /usr/local/bin
+  cat >/usr/local/bin/gitstrap <<'EOF'
+#!/usr/bin/env sh
+# gitstrap CLI shim → forwards to the real script (even if it's not +x)
+set -eu
+# Prefer direct exec if the target is executable; otherwise run via sh
+TARGET="/custom-cont-init.d/10-gitstrap.sh"
+if [ -x "$TARGET" ]; then
+  exec "$TARGET" "$@"
+else
+  exec sh "$TARGET" "$@"
+fi
+EOF
+  chmod 755 /usr/local/bin/gitstrap
+  log "installed gitstrap CLI at /usr/local/bin/gitstrap"
+}
+
 
 # ========= default password (first boot only) =========
 init_default_password(){
@@ -180,7 +200,7 @@ apply_password_hash(){
   trigger_restart_gate
   return 0
 }
-codepass_set(){ apply_password_hash "${1:-}" "${2:-}"; exit 0; }
+password_set(){ apply_password_hash "${1:-}" "${2:-}"; exit 0; }
 maybe_apply_password_from_env(){
   if [ -n "${NEW_PASSWORD:-}" ] || [ -n "${CONFIRM_PASSWORD:-}" ]; then
     apply_password_hash "${NEW_PASSWORD:-}" "${CONFIRM_PASSWORD:-}" || true
@@ -518,7 +538,7 @@ do_gitstrap(){
     "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
 
   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
-  TITLE="${GH_KEY_TITLE:-Docker SSH Key}"
+  TITLE="${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}"
   KEYS_JSON="$(curl -fsS -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
   if echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\""; then
     log "SSH key already on GitHub"
@@ -602,6 +622,7 @@ resolve_task_env_fallbacks(){
 
 init_all(){
   install_restart_gate
+  install_cli_shim
   init_default_password
   install_user_assets
   install_settings_from_repo
@@ -629,9 +650,9 @@ case "${1:-init}" in
     fi
     maybe_apply_password_from_env
     ;;
-  codepass)
-    shift; [ "${1:-}" = "set" ] || { echo "Usage: $0 codepass set NEW CONFIRM" >&2; exit 1; }
-    shift; codepass_set "${1:-}" "${2:-}"
+  password)
+    shift; [ "${1:-}" = "set" ] || { echo "Usage: $0 password set NEW CONFIRM" >&2; exit 1; }
+    shift; password_set "${1:-}" "${2:-}"
     ;;
   settings-merge)  install_settings_from_repo ;;
   gate-install)    install_restart_gate ;;
