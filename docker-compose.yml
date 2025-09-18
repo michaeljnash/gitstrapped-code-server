@@ -1,0 +1,30 @@
+services:
+  code:
+    image: lscr.io/linuxserver/code-server:4.101.1
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "America/Toronto"
+      FILE__HASHED_PASSWORD: "/config/.gitstrap/codepass.hash"
+      DOCKER_MODS: linuxserver/mods:universal-package-install
+      INSTALL_PACKAGES: argon2
+      DEFAULT_PASSWORD: ${DEFAULT_PASSWORD}
+      GH_USER: "${GH_USER}"
+      GH_PAT: "${GH_PAT}"
+      GIT_NAME: "${GIT_NAME}"
+      GIT_EMAIL: "${GIT_EMAIL}"
+      GH_REPOS: "${GH_REPOS}"
+      GIT_BASE_DIR: "/config/workspace"
+    volumes:
+      - code-config:/config
+      - projects:/config/workspace
+      - ./settings.json:/config/gitstrap/settings.json:ro
+      - ./gitstrap.sh:/custom-cont-init.d/10-gitstrap.sh:ro
+
+    ports:
+      - ":8443"
+    restart: always
+
+volumes:
+  code-config:
+  projects:
