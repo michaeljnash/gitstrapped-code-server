@@ -2,9 +2,9 @@
 
 > **One-command, github integrated bootstrap for code-server**
 >
-> Ships a ready-to-work VS Code-in-the-browser environment that can:
+> Ships a ready-to-work VS Code-in-the-browser environment that:
 >
-> * Bootstraps your workspace with GitHub: generates an SSH key if not exists, uploads it to GitHub via a PAT if not exists, authorize code-server workspace with GitHub and clone/pull specified repos.
+> * Bootstraps your workspace with GitHub: generates an SSH key if not exists, uploads it to GitHub via a PAT if not exists, authorizes code-server workspace with GitHub and clones/pulls specified repos.
 > * Installs a single, well‑behaved Task + Inputs and a single keybinding to run gitstrap (`ctrl+alt+g`) into your user profile without trampling your own edits and settings by using `__gitstrap_settings` and `gitstrap_preserve`.
 > * Set a first‑boot password hash automatically (and let you change or set password from inside code-server).
 > * Merges a predefined `settings.json` into your user `settings.json` with precise, reversible control using `__gitstrap_settings` and `gitstrap_preserve`.
