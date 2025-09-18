@@ -4,12 +4,12 @@
 >
 > Ships a ready-to-work VS Code-in-the-browser environment that can:
 >
-> * Set a first‑boot password hash automatically (and let you change it later from inside code-server).
-> * Bootstrap your workspace: generates an SSH key if not exists, uploads it to GitHub via a PAT if not exists, authorize code-server workspace with GitHub and clone/pull specified repos.
-> * Install a single, well‑behaved Task + Inputs and a single keybinding to run gitstrap (`ctrl+alt+g`) into your user profile without trampling your own edits and settings by using `__gitstrap_settings` and `gitstrap_preserve`.
-> * Merge a repository `settings.json` into your user `settings.json` with precise, reversible control using `__gitstrap_settings` and `gitstrap_preserve`.
+> * Bootstraps your workspace with GitHub: generates an SSH key if not exists, uploads it to GitHub via a PAT if not exists, authorize code-server workspace with GitHub and clone/pull specified repos.
+> * Installs a single, well‑behaved Task + Inputs and a single keybinding to run gitstrap (`ctrl+alt+g`) into your user profile without trampling your own edits and settings by using `__gitstrap_settings` and `gitstrap_preserve`.
+> * Set a first‑boot password hash automatically (and let you change or set password from inside code-server).
+> * Merges a predefined `settings.json` into your user `settings.json` with precise, reversible control using `__gitstrap_settings` and `gitstrap_preserve`.
 
-This repository wraps the official LinuxServer.io `code-server` image with a tiny init (`gitstrap.sh`) and a few conventions that make fresh environments productive in seconds.
+This repository wraps the official LinuxServer.io `code-server` image with `gitstrap.sh` and a few conventions and niceties that make fresh environments productive in seconds.
 
 ---
 
