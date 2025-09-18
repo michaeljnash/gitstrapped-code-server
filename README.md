@@ -29,7 +29,7 @@ This repository wraps the official LinuxServer.io `code-server` image with `gits
 
 ---
 
-## How it works (boot flow)
+## How it works
 
 1. **Restart gate** — `gitstrap.sh` installs a tiny supervised Node HTTP service at `127.0.0.1:9000` to request a *gentle container restart* after sensitive changes (like password updates).
 2. **First‑boot password hash** — If `DEFAULT_PASSWORD` is set and no hash exists at `FILE__HASHED_PASSWORD`, a secure Argon2 hash is generated and saved. A one‑time marker triggers a supervised restart so code‑server picks it up.
