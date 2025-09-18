@@ -15,7 +15,7 @@ This repository wraps the official LinuxServer.io `code-server` image with `gits
 
 ## Contents
 
-* [How it works (boot flow)](#how-it-works-boot-flow)
+* [How it works](#how-it-works)
 * [Quick start](#quick-start)
 * [Environment variables](#environment-variables)
 * [Ports & reverse proxy note](#ports--reverse-proxy-note)
