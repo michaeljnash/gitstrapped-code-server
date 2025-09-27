@@ -4,24 +4,29 @@ services:
     environment:
       FILE__HASHED_PASSWORD: /config/.gitstrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
-      INSTALL_PACKAGES: argon2
+      INSTALL_PACKAGES: argon2 jq curl git python3-venv
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
       TZ: ${TZ:-Etc/UTC}
+
+      # Optional: initial password (one-time)
       DEFAULT_PASSWORD: ${DEFAULT_PASSWORD}
+
+      # Env-driven bootstrap on first boot (if BOTH are set):
       GH_USERNAME: ${GH_USERNAME}
       GH_PAT: ${GH_PAT}
+
+      # Optional identity + clone behavior
       GIT_NAME: ${GIT_NAME}
       GIT_EMAIL: ${GIT_EMAIL}
       GH_REPOS: ${GH_REPOS}
-      GIT_BASE_DIR: ${GIT_BASE_DIR}
-      GH_KEY_TITLE: ${GH_KEY_TITLE}
+      PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS:-true}
+      GIT_BASE_DIR: ${GIT_BASE_DIR:-/config/workspace}
+      GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
     volumes:
       - code-config:/config
       - projects:/config/workspace
-      - ./settings.json:/config/gitstrap/settings.json:ro
       - ./gitstrap.sh:/custom-cont-init.d/10-gitstrap.sh:ro
-
     ports:
       - ":8443"
     restart: always
