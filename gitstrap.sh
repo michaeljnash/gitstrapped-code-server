@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# gitstrap — bootstrap GitHub + manage code-server auth (CLI-only)
+# gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
 # =========================
@@ -34,20 +34,34 @@ cat <<'HLP'
 gitstrap — bootstrap GitHub + manage code-server auth
 
 Usage:
-  gitstrap               # interactive bootstrap (prompts if TTY)
-  gitstrap --env         # bootstrap using environment variables only
-  gitstrap passwd        # interactive password change (secure prompts)
-  gitstrap -h | --help   # help
-  gitstrap -v | --version# version
+  gitstrap                     # interactive bootstrap (prompts if TTY)
+  gitstrap --env               # bootstrap using environment variables only
+  gitstrap [FLAGS...]          # non-interactive bootstrap using provided flags/env
+  gitstrap passwd              # interactive password change (secure prompts)
+  gitstrap -h | --help         # help
+  gitstrap -v | --version      # version
 
-Environment (used by --env or as defaults in prompts):
-  GH_USERNAME, GH_PAT (classic: user:email, admin:public_key)  [required to bootstrap]
-  GIT_NAME, GIT_EMAIL, GH_REPOS, PULL_EXISTING_REPOS=true|false
-  GIT_BASE_DIR=/config/workspace, GH_KEY_TITLE
+Bootstrap flags (power users):
+  --user <username>            GitHub username (GH_USERNAME)
+  --pat <token>                GitHub classic PAT with scopes: user:email, admin:public_key (GH_PAT)
+  --name <name>                Git commit name (GIT_NAME; defaults to GH_USERNAME)
+  --email <email>              Git commit email (GIT_EMAIL; auto-resolved if empty)
+  --repos "<specs>"            Comma-separated repos: owner/repo[, owner/repo#branch, https://github.com/owner/repo] (GH_REPOS)
+  --pull-existing <true|false> Pull existing clones (PULL_EXISTING_REPOS, default: true)
+  --base <dir>                 Workspace base dir (GIT_BASE_DIR, default: /config/workspace)
+  --key-title "<title>"        SSH key title when uploading to GitHub (GH_KEY_TITLE)
+  --env                        Use environment variables only (no prompts)
+
+Notes:
+  • With flags present, gitstrap runs non-interactively (scriptable).
+  • Without flags, if in a TTY it prompts; otherwise it expects envs.
+  • You can mix flags + envs; flags take precedence over envs.
 
 Examples:
   gitstrap
   gitstrap --env
+  gitstrap --user alice --pat ghp_xxx --repos "alice/app#main, org/infra"
+  gitstrap --user alice --pat ghp_xxx --pull-existing false
   gitstrap passwd
 HLP
 }
@@ -75,9 +89,21 @@ PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"
 PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
 # =========================
-# Restart gate (tiny HTTP)
+# Root guard for system installs
+# =========================
+require_root(){
+  if [ "$(id -u)" != "0" ]; then
+    warn "not root; skipping system install step"
+    return 1
+  fi
+  return 0
+}
+
+# =========================
+# Restart gate (tiny HTTP; root-only)
 # =========================
 install_restart_gate(){
+  require_root || return 0
   NODE_BIN=""
   for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do
     [ -x "$p" ] && { NODE_BIN="$p"; break; }
@@ -274,12 +300,18 @@ gitstrap_run(){
 # CLI implementation
 # =========================
 install_cli_shim(){
+  require_root || return 0
   mkdir -p /usr/local/bin
   cat >/usr/local/bin/gitstrap <<'EOF'
 #!/usr/bin/env sh
 set -eu
 TARGET="/custom-cont-init.d/10-gitstrap.sh"
-if [ -x "$TARGET" ]; then exec "$TARGET" "$@"; else exec sh "$TARGET" "$@"; fi
+# Always route through CLI sentinel so non-root usage never hits init path
+if [ -x "$TARGET" ]; then
+  exec "$TARGET" cli "$@"
+else
+  exec sh "$TARGET" cli "$@"
+fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
   # also expose version for external tools (optional)
@@ -287,7 +319,6 @@ EOF
 }
 
 bootstrap_interactive(){
-  # prompts fill envs if TTY
   GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
   [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
   GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-$GH_USERNAME}]: " "${GIT_NAME:-$GH_USERNAME}")"
@@ -310,6 +341,50 @@ bootstrap_env_only(){
   log "bootstrap complete (env)"
 }
 
+bootstrap_from_args(){
+  # Defaults come from env; flags override env.
+  USE_ENV=false
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --env)                USE_ENV=true;;
+      --user)               GH_USERNAME="${2:-}"; shift;;
+      --pat)                GH_PAT="${2:-}"; shift;;
+      --name)               GIT_NAME="${2:-}"; shift;;
+      --email)              GIT_EMAIL="${2:-}"; shift;;
+      --repos)              GH_REPOS="${2:-}"; shift;;
+      --pull-existing)      PULL_EXISTING_REPOS="${2:-true}"; shift;;
+      --base)               GIT_BASE_DIR="${2:-}"; BASE="${GIT_BASE_DIR:-$BASE}"; shift;;
+      --key-title)          GH_KEY_TITLE="${2:-}"; shift;;
+      -h|--help)            print_help; exit 0;;
+      -v|--version)         print_version; exit 0;;
+      passwd)               password_change_interactive; exit 0;;
+      *)                    warn "Unknown flag: $1"; print_help; exit 1;;
+    esac
+    shift || true
+  done
+
+  if [ "$USE_ENV" = "true" ]; then
+    : # env-only; no prompting
+  else
+    # If running in a TTY and --env not set, offer prompts (prefilled from env/flags)
+    if is_tty; then
+      GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
+      [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
+      GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-${GH_USERNAME:-}}]: " "${GIT_NAME:-${GH_USERNAME:-}}")"
+      GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
+      GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
+      PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
+    fi
+  fi
+
+  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT required (flag/env/prompt)." >&2; exit 2; }
+
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS GH_KEY_TITLE BASE GIT_BASE_DIR
+  gitstrap_run
+  log "bootstrap complete"
+}
+
 cli_entry(){
   # no args → default to bootstrap (interactive if TTY, else env-only)
   if [ $# -eq 0 ]; then
@@ -322,8 +397,10 @@ cli_entry(){
     -v|--version) print_version; exit 0;;
     --env)        bootstrap_env_only; exit 0;;
     passwd)       password_change_interactive; exit 0;;
-    *)            # allow flags like --user/--pat in future; for now just help
-                  warn "Unknown argument: $1"; print_help; exit 1;;
+    *)
+      # Flags present → parse and run (non-interactive unless TTY & no --env)
+      bootstrap_from_args "$@"
+      ;;
   esac
 }
 
@@ -352,20 +429,20 @@ case "${1:-init}" in
     autorun_env_if_present
     log "Gitstrap initialized. Use: gitstrap -h"
     ;;
-  -h|--help|--env|passwd|-v|--version)
+  cli)
+    shift
     cli_entry "$@"
     ;;
   *)
-    # If called with arbitrary args by user, treat as CLI
+    # If called directly:
+    # - with args → run CLI
+    # - without args → assume container init (root context)
     if [ $# -gt 0 ]; then
-      cli_entry "$@"
+      set -- cli "$@"
+      exec "$0" "$@"
     else
-      # Fallback: init
-      install_restart_gate
-      install_cli_shim
-      init_default_password
-      autorun_env_if_present
-      log "Gitstrap initialized. Use: gitstrap -h"
+      set -- init
+      exec "$0" "$@"
     fi
     ;;
 esac
