@@ -48,15 +48,10 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --gh-pat      | --gh_pat      <val>        → GH_PAT   (classic; scopes: user:email, admin:public_key)
   --git-name    | --git_name    <val>        → GIT_NAME
   --git-email   | --git_email   <val>        → GIT_EMAIL
-  --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo[, owner/repo#branch, https://github.com/owner/repo])
+  --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   --pull-existing-repos | --pull_existing_repos <true|false> → PULL_EXISTING_REPOS (default: true)
   --git-base-dir       | --git_base_dir <dir>               → GIT_BASE_DIR (default: /config/workspace)
   --env                                                Use environment variables only (no prompts)
-
-Env-only knobs (no flags):
-  GH_KEY_TITLE         SSH key title when uploading to GitHub (default: "gitstrapped-code-server SSH Key")
-  DEFAULT_PASSWORD     First-boot only: initial code-server password (argon2-hashed)
-  FILE__HASHED_PASSWORD  Path for the password hash file (default: /config/.gitstrap/password.hash)
 
 Notes:
   • Flags override environment. Unknown flags are rejected.
