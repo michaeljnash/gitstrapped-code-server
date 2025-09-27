@@ -15,15 +15,41 @@ warn(){ echo "[gitstrap][WARN] $*" >&2; }
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
-is_tty(){ [ -t 0 ] && [ -t 1 ]; }
-prompt(){ printf "%s" "$1"; read -r _ans || true; printf "%s" "${_ans:-}"; }
-prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
+
+# robust TTY checks (code-server sometimes gives odd stdio)
+has_tty(){ [ -c /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; }
+is_tty(){ [ -t 0 ] && [ -t 1 ] || has_tty; }
+
+# prompts that prefer /dev/tty for both IO (avoids hidden prompts / blocking)
+read_line(){
+  if has_tty; then
+    IFS= read -r _line </dev/tty || true
+  else
+    IFS= read -r _line || true
+  fi
+  printf "%s" "${_line:-}"
+}
+prompt(){
+  msg="$1"
+  if has_tty; then printf "%s" "$msg" >/dev/tty; else printf "%s" "$msg"; fi
+  read_line
+}
+prompt_def(){
+  v="$(prompt "$1")"
+  [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"
+}
 prompt_secret(){
-  printf "%s" "$1" >/dev/tty 2>/dev/null || printf "%s" "$1"
-  stty -echo 2>/dev/null || true
-  read -r s || true
-  stty echo 2>/dev/null || true
-  printf "\n" >/dev/tty 2>/dev/null || true
+  if has_tty; then
+    printf "%s" "$1" >/dev/tty
+    stty -echo </dev/tty >/dev/tty 2>/dev/null || true
+    IFS= read -r s </dev/tty || true
+    stty echo </dev/tty >/dev/tty 2>/dev/null || true
+    printf "\n" >/dev/tty 2>/dev/null || true
+  else
+    # fallback: no-tty environment (won't be hidden)
+    printf "%s" "$1"
+    IFS= read -r s || true
+  fi
   printf "%s" "${s:-}"
 }
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
@@ -54,7 +80,7 @@ Bootstrap flags (power users):
 
 Notes:
   • With flags present, gitstrap runs non-interactively (scriptable).
-  • Without flags, if in a TTY it prompts; otherwise it expects envs.
+  • Without flags, if in a TTY it prompts; otherwise it expects envs or exits with guidance.
   • You can mix flags + envs; flags take precedence over envs.
 
 Examples:
@@ -314,11 +340,19 @@ else
 fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  # also expose version for external tools (optional)
   echo "${GITSTRAP_VERSION:-0.1.0}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
+bootstrap_banner(){
+  if has_tty; then
+    printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort at any time.\n\n" >/dev/tty
+  else
+    log "No TTY detected; use flags or --env. Example: GH_USERNAME=... GH_PAT=... gitstrap --env"
+  fi
+}
+
 bootstrap_interactive(){
+  bootstrap_banner
   GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
   [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
   GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-$GH_USERNAME}]: " "${GIT_NAME:-$GH_USERNAME}")"
@@ -342,7 +376,6 @@ bootstrap_env_only(){
 }
 
 bootstrap_from_args(){
-  # Defaults come from env; flags override env.
   USE_ENV=false
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -366,15 +399,18 @@ bootstrap_from_args(){
   if [ "$USE_ENV" = "true" ]; then
     : # env-only; no prompting
   else
-    # If running in a TTY and --env not set, offer prompts (prefilled from env/flags)
-    if is_tty; then
-      GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
-      [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
-      GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-${GH_USERNAME:-}}]: " "${GIT_NAME:-${GH_USERNAME:-}}")"
-      GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
-      GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
-      PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
+    if ! is_tty; then
+      echo "No TTY available for prompts. Use flags or --env. Example:
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env" >&2
+      exit 3
     fi
+    bootstrap_banner
+    GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
+    [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
+    GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-${GH_USERNAME:-}}]: " "${GIT_NAME:-${GH_USERNAME:-}}")"
+    GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
+    GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
+    PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   fi
 
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required (flag/env/prompt)." >&2; exit 2; }
@@ -386,9 +422,13 @@ bootstrap_from_args(){
 }
 
 cli_entry(){
-  # no args → default to bootstrap (interactive if TTY, else env-only)
+  # no args → default to bootstrap (interactive if TTY, else error with guidance)
   if [ $# -eq 0 ]; then
-    if is_tty; then bootstrap_interactive; else bootstrap_env_only; fi
+    if is_tty; then bootstrap_interactive; else
+      echo "No TTY detected. Provide flags or use --env. Example:
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env" >&2
+      exit 3
+    fi
     exit 0
   fi
 
@@ -398,7 +438,6 @@ cli_entry(){
     --env)        bootstrap_env_only; exit 0;;
     passwd)       password_change_interactive; exit 0;;
     *)
-      # Flags present → parse and run (non-interactive unless TTY & no --env)
       bootstrap_from_args "$@"
       ;;
   esac
