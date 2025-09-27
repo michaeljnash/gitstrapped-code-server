@@ -253,7 +253,7 @@ bootstrap_interactive(){
   GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
   [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
   GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-$GH_USERNAME}]: " "${GIT_NAME:-$GH_USERNAME}")"
-  GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
+  GIT_EMAIL="$(prompt_def "Git email (blank=auto resolve GH email): " "${GIT_EMAIL:-}")"
   GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
   PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required." >&2; exit 2; }
