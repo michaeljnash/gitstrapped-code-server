@@ -24,7 +24,7 @@ services:
       GIT_BASE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
     volumes:
-      - code-config:/config1
+      - code-config:/config12
       - code-config:/config
       - projects:/config/workspace
       - ./gitstrap.sh:/custom-cont-init.d/10-gitstrap.sh:ro
