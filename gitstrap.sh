@@ -388,7 +388,7 @@ bootstrap_from_args(){
   USE_ENV=false
   while [ $# -gt 0 ]; do
     case "$1" in
-      -h|--help)     print_logo; print_help; exit 0;;
+      -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
       passwd)        print_logo; password_change_interactive; exit 0;;
@@ -448,7 +448,7 @@ cli_entry(){
     exit 0
   fi
   case "$1" in
-    -h|--help)    print_logo; print_help; exit 0;;
+    -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
     --env)        print_logo; bootstrap_env_only; exit 0;;
     passwd)       print_logo; password_change_interactive; exit 0;;
