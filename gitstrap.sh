@@ -256,14 +256,14 @@ bootstrap_interactive(){
   GIT_EMAIL="$(prompt_def "Git email (blank=auto resolve GH email): " "${GIT_EMAIL:-}")"
   GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
   PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT required." >&2; exit 2; }
+  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
+  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS
   gitstrap_run; log "bootstrap complete"
 }
 bootstrap_env_only(){
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required (env)." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT required (env)." >&2; exit 2; }
+  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (env)." >&2; exit 2; }
+  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (env)." >&2; exit 2; }
   gitstrap_run; log "bootstrap complete (env)"
 }
 
@@ -304,8 +304,10 @@ bootstrap_from_args(){
     : # env-only
   else
     if ! is_tty; then
-      echo "No TTY available for prompts. Use flags or --env. Example:
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env" >&2
+      echo "No TTY available for prompts. Use flags or --env. Examples:
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
+  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+" >&2
       exit 3
     fi
     bootstrap_banner
@@ -317,8 +319,8 @@ bootstrap_from_args(){
     PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   fi
 
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME required (flag/env/prompt)." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
 
   # Respect env-only overrides if set
   if [ -n "${FILE__HASHED_PASSWORD:-}" ]; then PASS_HASH_PATH="$FILE__HASHED_PASSWORD"; fi
@@ -332,8 +334,10 @@ bootstrap_from_args(){
 cli_entry(){
   if [ $# -eq 0 ]; then
     if is_tty; then bootstrap_interactive; else
-      echo "No TTY detected. Provide flags or use --env. Example:
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env" >&2
+      echo "No TTY detected. Provide flags or use --env. Examples:
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
+  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+" >&2
       exit 3
     fi
     exit 0

@@ -30,6 +30,7 @@ services:
       - ./gitstrap.sh:/custom-cont-init.d/10-gitstrap.sh:ro
     ports:
       - ":8443"
+      #- "8443:8443"
     restart: always
 
 volumes:
