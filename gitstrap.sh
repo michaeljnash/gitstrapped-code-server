@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.1.0}"
+VERSION="${GITSTRAP_VERSION:-0.2.0}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -69,6 +69,24 @@ HLP
 
 print_version(){ echo "gitstrap ${VERSION}"; }
 
+print_logo(){
+  is_tty || return 0
+  cat <<'LOGO'
+          $$\   $$\                 $$\                                  
+          \__|  $$ |                $$ |                                 
+ $$$$$$\  $$\ $$$$$$\    $$$$$$$\ $$$$$$\    $$$$$$\  $$$$$$\   $$$$$$\  
+$$  __$$\ $$ |\_$$  _|  $$  _____|\_$$  _|  $$  __$$\ \____$$\ $$  __$$\ 
+$$ /  $$ |$$ |  $$ |    \$$$$$$\    $$ |    $$ |  \__|$$$$$$$ |$$ /  $$ |
+$$ |  $$ |$$ |  $$ |$$\  \____$$\   $$ |$$\ $$ |     $$  __$$ |$$ |  $$ |
+\$$$$$$$ |$$ |  \$$$$  |$$$$$$$  |  \$$$$  |$$ |     \$$$$$$$ |$$$$$$$  |
+ \____$$ |\__|   \____/ \_______/    \____/ \__|      \_______|$$  ____/ 
+$$\   $$ |                                                     $$ |      
+\$$$$$$  |                                                     $$ |      
+ \______/                                                      \__|      
+LOGO
+  echo
+}
+
 # ===== paths / state =====
 export HOME="${HOME:-/config}"
 PUID="${PUID:-1000}"; PGID="${PGID:-1000}"
@@ -83,6 +101,12 @@ FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 BASE="${GIT_BASE_DIR:-$HOME/workspace}"; ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
+
+# VS Code settings merge
+USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
+SETTINGS_PATH="$USER_DIR/settings.json"
+REPO_SETTINGS_SRC="$HOME/gitstrap/settings.json"
+MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
@@ -124,7 +148,7 @@ fi
 exec "$NODE_BIN" /usr/local/bin/restartgate.js
 EOF
   chmod +x /etc/services.d/restartgate/run
-  echo '#!/usr/bin/env sh\nexit 0' >/etc/services.d/restartgate/finish && chmod +x /etc/services.d/restartgate/finish
+  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/restartgate/finish && chmod +x /etc/services.d/restartgate/finish
   log "installed restart gate service"
 }
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
@@ -232,6 +256,88 @@ gitstrap_run(){
   if [ -n "${GH_REPOS:-}" ]; then IFS=,; set -- $GH_REPOS; unset IFS; for spec in "$@"; do clone_one "$spec" "$PULL_EXISTING_REPOS"; done; else log "GH_REPOS empty; skip clone"; fi
 }
 
+# ===== settings.json merge (repo -> user) with preserve and comments =====
+strip_jsonc_to_json(){ # best-effort: strip // and /* */ comments
+  # shellcheck disable=SC2016
+  sed -e 's://.*$::' -e '/\/\*/,/\*\//d' "$1"
+}
+install_settings_from_repo(){
+  [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
+  command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping settings merge"; return 0; }
+
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+
+  # Ensure user settings exists; default to empty object
+  if [ ! -f "$SETTINGS_PATH" ]; then
+    printf '{}\n' >"$SETTINGS_PATH"
+    chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
+  fi
+
+  # Load repo JSON
+  if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
+    warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
+    return 0
+  fi
+
+  # Load/strip user JSONC → JSON
+  tmp_user_json="$(mktemp)"
+  if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+    cp "$SETTINGS_PATH" "$tmp_user_json"
+  else
+    strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
+  fi
+
+  if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+    warn "existing settings not valid JSON/JSONC; backing up and re-creating from scratch"
+    cp "$SETTINGS_PATH" "$SETTINGS_PATH.bak" 2>/dev/null || true
+    printf '{}\n' >"$tmp_user_json"
+  fi
+
+  # Determine preserve list and perform merge
+  RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
+  if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
+    OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
+  else
+    OLD_KEYS_JSON='[]'
+  fi
+
+  tmp_out_json="$(mktemp)"
+  jq \
+    --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
+    --argjson rskeys "$RS_KEYS_JSON" \
+    --argjson oldkeys "$OLD_KEYS_JSON" '
+      def arr(v): if (v|type)=="array" then v else [] end;
+      def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
+      def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
+      (. // {}) as $user
+      | ($user.gitstrap_preserve // []) as $pres
+      | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
+      | (delKeys($tmp_user; $rskeys)) as $user_without_repo
+      | reduce $rskeys[] as $k (
+          $user_without_repo;
+          .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
+        )
+      | .["__gitstrap_settings"] = true
+      | .["gitstrap_preserve"] = arr($pres)
+    ' "$tmp_user_json" > "$tmp_out_json"
+
+  # Build JSONC with header/footer comments around managed section note
+  # (We keep the whole object pretty-printed; comments live at the top.)
+  {
+    echo "//gitstrap settings start"
+    echo "//gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
+    echo "//gitstrap settings end"
+    jq '.' "$tmp_out_json"
+  } > "$SETTINGS_PATH"
+
+  chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"
+  chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
+
+  rm -f "$tmp_user_json" "$tmp_out_json" 2>/dev/null || true
+  log "merged settings.json → $SETTINGS_PATH"
+}
+
 # ===== CLI helpers =====
 install_cli_shim(){
   require_root || return 0
@@ -244,7 +350,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.1.0}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.2.0}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -267,12 +373,11 @@ bootstrap_env_only(){
   gitstrap_run; log "bootstrap complete (env)"
 }
 
-# ===== New: flag → env mapping (1:1, dash/underscore agnostic) =====
-# Whitelist of env vars we accept from flags (env-only vars excluded here)
+# ===== flag → env mapping (1:1, dash/underscore agnostic) =====
 ALLOWED_FLAG_VARS="GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS GIT_BASE_DIR"
 set_flag_env(){ # $1=flag key (already without leading --), $2=value
-  norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"  # dash OR underscore → underscore
-  envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"             # to ENVVAR
+  norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"
+  envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"
   case " $ALLOWED_FLAG_VARS " in
     *" $envname "*) eval "export $envname=\$2";;
     *) warn "Unknown or disallowed flag '--$1'"; print_help; exit 1;;
@@ -283,13 +388,12 @@ bootstrap_from_args(){
   USE_ENV=false
   while [ $# -gt 0 ]; do
     case "$1" in
-      -h|--help)     print_help; exit 0;;
+      -h|--help)     print_logo; print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
-      passwd)        password_change_interactive; exit 0;;
+      passwd)        print_logo; password_change_interactive; exit 0;;
       --*)
-        key="${1#--}"
-        shift || true
+        key="${1#--}"; shift || true
         val="${1:-}"
         [ -n "$val" ] && [ "${val#--}" = "$val" ] || { warn "Flag '--$key' requires a value."; exit 2; }
         set_flag_env "$key" "$val"
@@ -332,6 +436,7 @@ bootstrap_from_args(){
 }
 
 cli_entry(){
+  print_logo
   if [ $# -eq 0 ]; then
     if is_tty; then bootstrap_interactive; else
       echo "No TTY detected. Provide flags or use --env. Examples:
@@ -343,11 +448,11 @@ cli_entry(){
     exit 0
   fi
   case "$1" in
-    -h|--help)    print_help; exit 0;;
+    -h|--help)    print_logo; print_help; exit 0;;
     -v|--version) print_version; exit 0;;
-    --env)        bootstrap_env_only; exit 0;;
-    passwd)       password_change_interactive; exit 0;;
-    *)            bootstrap_from_args "$@";;
+    --env)        print_logo; bootstrap_env_only; exit 0;;
+    passwd)       print_logo; password_change_interactive; exit 0;;
+    *)            print_logo; bootstrap_from_args "$@";;
   esac
 }
 
@@ -369,6 +474,7 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
+    install_settings_from_repo
     autorun_env_if_present
     log "Gitstrap initialized. Use: gitstrap -h"
     ;;
