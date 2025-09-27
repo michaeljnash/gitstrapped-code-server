@@ -265,7 +265,7 @@ install_settings_from_repo(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Ensure user settings exists or normalize JSONC→JSON
+  # Normalize user settings to JSON
   tmp_user_json="$(mktemp)"
   if [ ! -f "$SETTINGS_PATH" ]; then
     printf '{}\n' >"$tmp_user_json"
@@ -280,8 +280,13 @@ install_settings_from_repo(){
   jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1 || { warn "repo settings JSON invalid; skipping"; rm -f "$tmp_user_json"; return 0; }
 
   RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
-  [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1 && OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")" || OLD_KEYS_JSON='[]'
+  if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
+    OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
+  else
+    OLD_KEYS_JSON='[]'
+  fi
 
+  # Merge with preserve semantics
   tmp_merged="$(mktemp)"
   jq \
     --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
@@ -301,51 +306,35 @@ install_settings_from_repo(){
       | .gitstrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # Split into managed keys (repo keys + gitstrap_preserve) and the rest
-  tmp_managed="$(mktemp)"
-  tmp_rest="$(mktemp)"
-  jq --argjson ks "$RS_KEYS_JSON" '
-      . as $m
-      | { managed: ( reduce ($ks + ["gitstrap_preserve"])[] as $k ({}; if $m[$k] != null then . + { ($k): $m[$k] } else . end)
-        ), rest: ( with_entries( select( ((($ks + ["gitstrap_preserve"]) | index(.key)) | not) ) ) )
-      }
-    ' "$tmp_merged" > "$tmp_managed"
+  # Build the "rest" object = merged minus (repo keys + gitstrap_preserve)
+  rest_json="$(jq --argjson ks "$RS_KEYS_JSON" '
+      def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
+      delKeys(.; ($ks + ["gitstrap_preserve"]))
+    ' "$tmp_merged")"
 
-  jq '.managed' "$tmp_managed" > "$tmp_rest" # reuse var just to have both
-  MANAGED_COUNT="$(jq 'keys|length' "$REPO_SETTINGS_SRC")"
-  # Build JSONC manually so comments are INSIDE the root object
+  # Emit JSONC with comments INSIDE the root object, managed group first
   {
     echo "{"
-    # Managed block first
     echo "  //gitstrap settings start"
-    # Print repo-managed keys preserving repo key order, then gitstrap_preserve
-    # repo keys:
+    # print managed repo keys in repo key order
     jq -r --argjson ks "$RS_KEYS_JSON" --argjson m "$(cat "$tmp_merged")" '
       ($ks)[] | select($m[.] != null)
       | "  " + @json + ": " + ($m[.] | tojson) + ","
     ' /dev/null
-    # comment + gitstrap_preserve
     echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
-    # gitstrap_preserve last in managed group
     jq -r --argjson m "$(cat "$tmp_merged")" '
       "  \"gitstrap_preserve\": " + (($m.gitstrap_preserve // []) | tojson)
     ' /dev/null
     echo "  //gitstrap settings end"
 
-    # Determine if there are user keys to follow (to manage comma between groups)
-    REST_HAS_KEYS="$(jq 'keys|length' "$tmp_managed" 2>/dev/null || echo 0)"
-    # Print remaining user keys (precede with comma if needed)
-    # Compute rest object:
-    jq 'with_entries(select(.key|IN("gitstrap_preserve")|not))' "$tmp_merged" > "$tmp_rest"
-    REST_KEYS_LEN="$(jq 'del(.gitstrap_preserve)|keys|length' "$tmp_rest")"
-    if [ "$REST_KEYS_LEN" -gt 0 ]; then
+    # Append remaining user keys, if any, with a comma separator
+    if [ "$(printf '%s' "$rest_json" | jq 'keys|length')" -gt 0 ]; then
       echo "  ,"
-      # Pretty-print remaining keys as top-level pairs
-      jq -r '
+      printf '%s' "$rest_json" | jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
-      ' "$tmp_rest"
+      '
       echo ""
     else
       echo ""
@@ -356,7 +345,7 @@ install_settings_from_repo(){
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_merged" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -377,7 +366,6 @@ EOF
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 bootstrap_interactive(){
-  print_logo
   bootstrap_banner
   GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
   [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
@@ -391,7 +379,6 @@ bootstrap_interactive(){
   gitstrap_run; log "bootstrap complete"
 }
 bootstrap_env_only(){
-  print_logo
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (env)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (env)." >&2; exit 2; }
   gitstrap_run; log "bootstrap complete (env)"
@@ -415,7 +402,7 @@ bootstrap_from_args(){
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
-      passwd)        print_logo; password_change_interactive; exit 0;;
+      passwd)        password_change_interactive; exit 0;;
       --*)
         key="${1#--}"; shift || true
         val="${1:-}"
@@ -429,7 +416,7 @@ bootstrap_from_args(){
   done
 
   if [ "$USE_ENV" = "true" ]; then
-    print_logo
+    : # env-only
   else
     if ! is_tty; then
       echo "No TTY available for prompts. Use flags or --env. Examples:
@@ -438,7 +425,6 @@ bootstrap_from_args(){
 " >&2
       exit 3
     fi
-    print_logo
     bootstrap_banner
     GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
     [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
@@ -451,8 +437,9 @@ bootstrap_from_args(){
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
 
-  [ -n "${FILE__HASHED_PASSWORD:-}" ] && PASS_HASH_PATH="$FILE__HASHED_PASSWORD"
-  [ -n "${GIT_BASE_DIR:-}" ] && { BASE="$GIT_BASE_DIR"; ensure_dir "$BASE"; }
+  # Respect env-only overrides if set
+  if [ -n "${FILE__HASHED_PASSWORD:-}" ]; then PASS_HASH_PATH="$FILE__HASHED_PASSWORD"; fi
+  if [ -n "${GIT_BASE_DIR:-}" ]; then BASE="$GIT_BASE_DIR"; ensure_dir "$BASE"; fi
 
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE GIT_BASE_DIR
   gitstrap_run
@@ -460,15 +447,22 @@ bootstrap_from_args(){
 }
 
 cli_entry(){
+  print_logo  # ensure ASCII art prints once for ANY invocation of gitstrap
   if [ $# -eq 0 ]; then
-    bootstrap_interactive
+    if is_tty; then bootstrap_interactive; else
+      echo "No TTY detected. Provide flags or use --env. Examples:
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
+  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+" >&2
+      exit 3
+    fi
     exit 0
   fi
   case "$1" in
     -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
     --env)        bootstrap_env_only; exit 0;;
-    passwd)       print_logo; password_change_interactive; exit 0;;
+    passwd)       password_change_interactive; exit 0;;
     *)            bootstrap_from_args "$@";;
   esac
 }
