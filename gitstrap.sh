@@ -200,9 +200,9 @@ init_default_password(){
 
 # ===== helpers for interactive -e/--env =====
 env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true; }
-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
@@ -492,24 +492,43 @@ install_config_shortcuts(){
 
 # ===== CLI helpers =====
 install_cli_shim(){
-  require_root || return 0
-  mkdir -p /usr/local/bin
-  cat >/usr/local/bin/gitstrap <<'EOF'
+  # System-wide install when root, else user-level install into ~/.local/bin
+  if require_root; then
+    mkdir -p /usr/local/bin
+    cat >/usr/local/bin/gitstrap <<'EOF'
 #!/usr/bin/env sh
 set -eu
 TARGET="/custom-cont-init.d/10-gitstrap.sh"
 # Always route through CLI sentinel so non-root usage never hits init path
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
-  chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
+    chmod 755 /usr/local/bin/gitstrap
+    echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
+    log "installed CLI shim → /usr/local/bin/gitstrap"
+  else
+    # Non-root fallback: user-level shim
+    mkdir -p "$HOME/.local/bin"
+    cat >"$HOME/.local/bin/gitstrap" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+TARGET="/custom-cont-init.d/10-gitstrap.sh"
+if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+EOF
+    chmod 755 "$HOME/.local/bin/gitstrap"
+    # Best-effort PATH hint for current shells that source ~/.profile; we can't modify the parent's env here.
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) : ;;
+      *) log "note: ensure \$HOME/.local/bin is on PATH to use 'gitstrap' command";;
+    esac
+    log "installed CLI shim → $HOME/.local/bin/gitstrap"
+  fi
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
-  # (banner shown in hub before the first main question)
+  bootstrap_banner
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
   GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
   GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
@@ -641,11 +660,7 @@ cli_entry(){
       exit 3
     fi
 
-    # Show banner BEFORE the first question
-    bootstrap_banner
-
     # 1) GitHub?
-    printf "\n"
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
       CTX_TAG="[Bootstrap GitHub]"
@@ -657,7 +672,6 @@ cli_entry(){
     fi
 
     # 2) Config?
-    printf "\n"
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
@@ -665,10 +679,9 @@ cli_entry(){
     fi
 
     # 3) Password?
-    printf "\n"
     PROMPT_TAG="[Change password] ? "
     CTX_TAG="[Change password]"
-    if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
       password_change_interactive
     else
       log "skipped password change"
@@ -724,7 +737,8 @@ autorun_env_if_present(){
     gitstrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
-    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_PAT missing → no autorun"
+    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_P
+AT missing → no autorun"
   fi
 }
 
