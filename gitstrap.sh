@@ -23,17 +23,17 @@ ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
-prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
+prompt(){ msg="$1"; if has_tty; then printf "\n%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "\n%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
 prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
 prompt_secret(){
   if has_tty; then
-    printf "%s%s" "$PROMPT_TAG" "$1" >/dev/tty
+    printf "\n%s%s" "$PROMPT_TAG" "$1" >/dev/tty
     stty -echo </dev/tty >/dev/tty 2>/dev/null || true
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
     printf "\n" >/dev/tty 2>/dev/null || true
   else
-    printf "%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
+    printf "\n%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
   fi; printf "%s" "${s:-}"
 }
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
@@ -509,7 +509,6 @@ bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap 
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
-  bootstrap_banner
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
   GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
   GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
@@ -610,6 +609,7 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
     fi
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
+    bootstrap_banner
     bootstrap_interactive
     PROMPT_TAG=""
     CTX_TAG=""
@@ -641,6 +641,9 @@ cli_entry(){
       exit 3
     fi
 
+    # Show banner BEFORE first interactive question
+    bootstrap_banner
+
     # 1) GitHub?
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
@@ -659,10 +662,10 @@ cli_entry(){
       CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
-    # 3) Password?
+    # 3) Password? (default = Yes)
     PROMPT_TAG="[Change password] ? "
     CTX_TAG="[Change password]"
-    if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
+    if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
       password_change_interactive
     else
       log "skipped password change"
@@ -682,6 +685,7 @@ cli_entry(){
         if is_tty; then
           PROMPT_TAG="[Bootstrap GitHub] ? "
           CTX_TAG="[Bootstrap GitHub]"
+          bootstrap_banner
           bootstrap_interactive
           PROMPT_TAG=""
           CTX_TAG=""
