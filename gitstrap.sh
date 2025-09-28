@@ -343,29 +343,38 @@ install_settings_from_repo(){
   {
     echo "{"
     echo "  // START gitstrap settings"
+
     if [ "$mcount" -gt 0 ]; then
       jq -r -j '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_managed"
-      echo ","
+      echo ","  # comma between last managed kv and the preserve key
     fi
+
     echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
-    printf '  "gitstrap_preserve": %s\n' "$preserve_json"
+    printf '  "gitstrap_preserve": %s' "$preserve_json"
+
     if [ "$rcount" -gt 0 ]; then
-      echo "  // END gitstrap settings,"
+      echo ","  # only add a comma if more user keys will follow
+    else
+      echo
+    fi
+
+    echo "  // END gitstrap settings"
+
+    if [ "$rcount" -gt 0 ]; then
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_rest"
-    else
-      echo "  // END gitstrap settings"
     fi
+
     echo "}"
   } > "$SETTINGS_PATH"
-
+  
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
