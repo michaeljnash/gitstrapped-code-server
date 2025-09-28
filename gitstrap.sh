@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.5}"
+VERSION="${GITSTRAP_VERSION:-0.3.6}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -26,13 +26,14 @@ prompt_secret(){
     stty -echo </dev/tty >/dev/tty 2>/dev/null || true
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
-    printf "\n" >/dev/tty 2>/dev/null || true
+    printf "\n" >/dev/tty 2>/dev/tty 2>/dev/null || true
   else
     printf "%s" "$1"; IFS= read -r s || true
   fi; printf "%s" "${s:-}"
 }
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
+prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
 
 # ---- banner ----
 print_logo(){
@@ -57,16 +58,18 @@ print_help(){
 cat <<'HLP'
 gitstrap — bootstrap GitHub + manage code-server auth
 
-Usage:
-  gitstrap                               # interactive bootstrap (prompts if TTY)
-  gitstrap --env                         # bootstrap using environment variables only
-  gitstrap [flags...]                    # non-interactive bootstrap using provided flags/env
-  gitstrap passwd                        # interactive password change (secure prompts)
-  gitstrap settings-merge                # merge gitstrap settings.json into user settings.json and exit
-  gitstrap -h | --help                   # help
-  gitstrap -v | --version                # version
+Usage (subcommands):
+  gitstrap                      # interactive hub: ask GitHub? Config? Change password?
+  gitstrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
+  gitstrap config               # Config hub (interactive) — merge strapped settings.json, etc
+  gitstrap passwd               # interactive password change (secure prompts)
+  gitstrap -h | --help          # help
+  gitstrap -v | --version       # version
 
-Power-user flags (1:1 with env vars; dash or underscore both accepted):
+(Back-compat)
+  gitstrap settings-merge       # DEPRECATED: now under 'gitstrap config' (still works)
+
+Power-user flags for 'github' (1:1 with env vars; dash or underscore both accepted):
   --gh-username | --gh_username <val>        → GH_USERNAME
   --gh-pat      | --gh_pat      <val>        → GH_PAT   (classic; scopes: user:email, admin:public_key)
   --git-name    | --git_name    <val>        → GIT_NAME
@@ -77,15 +80,15 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
   --env                                                Use environment variables only (no prompts)
 
-Interactive tip:
+Interactive tip (github):
   At any prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
 Examples:
   gitstrap
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
-  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  gitstrap --workspace-dir /config/workspace --repos-subdir /repos
-  gitstrap settings-merge
+  gitstrap github
+  gitstrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
+  gitstrap github --workspace-dir /config/workspace --repos-subdir /repos
+  gitstrap config
   gitstrap passwd
 HLP
 }
@@ -194,53 +197,10 @@ init_default_password(){
 }
 
 # ===== helpers for interactive -e/--env =====
-env_hint(){ # $1=ENVVAR
-  eval "tmp=\${$1:-}"
-  [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true
-}
-read_or_env(){ # $1=prompt_base, $2=envvar, $3=default
-  hint="$(env_hint "$2")"
-  val="$(prompt_def "$1$hint: " "$3")"
-  case "$val" in
-    -e|--env)
-      eval "tmp=\${$2:-}"
-      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
-      printf "%s" "$tmp"
-      ;;
-    *)
-      printf "%s" "$val"
-      ;;
-  esac
-}
-read_secret_or_env(){ # $1=prompt_base, $2=envvar
-  hint="$(env_hint "$2")"
-  val="$(prompt_secret "$1$hint: ")"
-  case "$val" in
-    -e|--env)
-      eval "tmp=\${$2:-}"
-      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
-      printf "%s" "$tmp"
-      ;;
-    *)
-      printf "%s" "$val"
-      ;;
-  esac
-}
-read_bool_or_env(){ # $1=prompt_base, $2=envvar, $3=default_y_or_n
-  def="$3"; [ -z "$def" ] && def="y"
-  hint="$(env_hint "$2")"
-  val="$(prompt_def "$1$hint " "$def")"
-  case "$val" in
-    -e|--env)
-      eval "tmp=\${$2:-}"
-      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
-      printf "%s" "$(normalize_bool "$tmp")"
-      ;;
-    *)
-      printf "%s" "$(yn_to_bool "$val")"
-      ;;
-  esac
-}
+env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
@@ -258,7 +218,6 @@ validate_github_username(){
 
 validate_github_pat(){
   [ -n "${GH_PAT:-}" ] || return 0
-  # (CHANGED) add User-Agent for reliability
   code="$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GH_PAT}" \
     -H "Accept: application/vnd.github+json" \
@@ -275,7 +234,6 @@ validate_github_pat(){
     err "Could not verify GH_PAT (${src}) (HTTP $code)."
     return 1
   fi
-  # (CHANGED) add User-Agent and only warn if header actually present
   headers="$(curl -fsS -D - -o /dev/null \
     -H "Authorization: token ${GH_PAT}" \
     -H "Accept: application/vnd.github+json" \
@@ -537,11 +495,12 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.5}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.6}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
+# --- interactive GitHub flow (unchanged content) ---
 bootstrap_interactive(){
   bootstrap_banner
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
@@ -567,7 +526,7 @@ bootstrap_env_only(){
 
 # ===== flag → env mapping (1:1, dash/underscore agnostic) =====
 ALLOWED_FLAG_VARS="GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS WORKSPACE_DIR REPOS_SUBDIR"
-set_flag_env(){ # $1=flag key (already without leading --), $2=value
+set_flag_env(){
   norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"
   envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"
   case " $ALLOWED_FLAG_VARS " in
@@ -595,6 +554,18 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
+# --- NEW: interactive config flow ---
+config_interactive(){
+  # future: extend with tasks.json, keybindings.json questions
+  if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+    install_settings_from_repo
+  else
+    log "skipped settings merge"
+  fi
+  install_config_shortcuts
+  log "config completed"
+}
+
 bootstrap_from_args(){
   USE_ENV=false
   while [ $# -gt 0 ]; do
@@ -602,7 +573,9 @@ bootstrap_from_args(){
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
-      settings-merge) install_settings_from_repo; install_config_shortcuts; exit 0;;
+      settings-merge) # back-compat
+        warn "The 'settings-merge' command is deprecated. Use 'gitstrap config' instead."
+        install_settings_from_repo; install_config_shortcuts; exit 0;;
       passwd)        password_change_interactive; exit 0;;
       --*)
         key="${1#--}"; shift || true
@@ -624,18 +597,13 @@ bootstrap_from_args(){
   else
     if ! is_tty; then
       echo "No TTY available for prompts. Use flags or --env. Examples:
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
-  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap github --env
+  gitstrap github --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
 " >&2
       exit 3
     fi
-    bootstrap_banner
-    GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
-    GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
-    GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
-    GIT_EMAIL="$(read_or_env "Git email (blank=auto)" GIT_EMAIL "")"
-    GH_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GH_REPOS "${GH_REPOS:-}")"
-    PULL_EXISTING_REPOS="$(read_bool_or_env "Pull existing repos? [Y/n]" PULL_EXISTING_REPOS "y")"
+    bootstrap_interactive
+    return 0
   fi
 
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
@@ -646,25 +614,77 @@ bootstrap_from_args(){
   log "bootstrap complete"
 }
 
+# ===== top-level CLI entry with subcommands =====
 cli_entry(){
   print_logo
+
   if [ $# -eq 0 ]; then
-    if is_tty; then bootstrap_interactive; else
-      echo "No TTY detected. Provide flags or use --env. Examples:
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
-  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+    # Hub flow
+    if ! is_tty; then
+      echo "No TTY detected. Run a subcommand or provide flags. Examples:
+  gitstrap github --env
+  gitstrap config
+  gitstrap passwd
 " >&2
       exit 3
     fi
+
+    # 1) GitHub?
+    if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
+      bootstrap_interactive
+    else
+      log "skipped GitHub bootstrap"
+    fi
+
+    # 2) Config?
+    if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
+      config_interactive
+    else
+      log "skipped config"
+    fi
+
+    # 3) Password?
+    if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
+      password_change_interactive
+    else
+      log "skipped password change"
+    fi
+
     exit 0
   fi
+
+  # Subcommands
   case "$1" in
     -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
-    --env)        bootstrap_env_only; exit 0;;
-    passwd)       password_change_interactive; exit 0;;
-    settings-merge) install_settings_from_repo; install_config_shortcuts; exit 0;;
-    *)            bootstrap_from_args "$@";;
+    github)
+      shift || true
+      if [ $# -eq 0 ]; then
+        if is_tty; then bootstrap_interactive; else echo "Use flags or --env for non-interactive github flow."; exit 3; fi
+      else
+        bootstrap_from_args "$@"
+      fi
+      ;;
+    config)
+      shift || true
+      # currently purely interactive
+      if is_tty; then config_interactive; else install_settings_from_repo; install_config_shortcuts; fi
+      ;;
+    settings-merge)
+      warn "The 'settings-merge' command is deprecated. Use 'gitstrap config' instead."
+      install_settings_from_repo; install_config_shortcuts; exit 0;;
+    --env)
+      bootstrap_env_only; exit 0;;
+    passwd)
+      password_change_interactive; exit 0;;
+    *)
+      # For legacy usage like: gitstrap --gh-username ... → treat as github flags flow
+      if echo "$1" | grep -q '^--'; then
+        bootstrap_from_args "$@"
+      else
+        warn "Unknown subcommand: $1"; print_help; exit 1
+      fi
+      ;;
   esac
 }
 
@@ -694,6 +714,6 @@ case "${1:-init}" in
   cli)
     shift; cli_entry "$@";;
   *)
-    if [ $# -gt 0 ]; then set -- cli "$@"; exec "$0" "$@"; else set -- init; exec "$0" "$@"; fi
+    if [ $# > 0 ]; then set -- cli "$@"; exec "$0" "$@"; else set -- init; exec "$0" "$@"; fi
     ;;
 esac
