@@ -512,22 +512,16 @@ merge_codestrap_keybindings(){
 
   # ---- Load USER keybindings (allow JSONC comments only) ----
   tmp_user_json="$(mktemp)"
-  tmp_user_stripped="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
-    strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_stripped" || true
-    if jq -e . "$tmp_user_stripped" >/dev/null 2>&1; then
-      cp "$tmp_user_stripped" "$tmp_user_json"
-    else
+    strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
+    if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
       CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
-      rm -f "$tmp_user_json" "$tmp_user_stripped" 2>/dev/null || true
+      rm -f "$tmp_user_json" 2>/dev/null || true
       return 1
     fi
   else
     printf '[]\n' >"$tmp_user_json"
   fi
-  rm -f "$tmp_user_stripped" 2>/dev/null || true
-
-  # Must be an array
   jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1 || {
     CTX_TAG="[Bootstrap config]"; err "user keybindings.json must be a JSON array."; CTX_TAG=""
     rm -f "$tmp_user_json" 2>/dev/null || true
@@ -543,66 +537,55 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # ---- Extract preserve list (array of strings) ----
-  preserve_json="$(jq -c '
-    ( [ .[]? | select(type=="object") | select(has("codestrap_preserve") and (.codestrap_preserve|type=="array")) ][0].codestrap_preserve )
-    // []
-    | map(select(type=="string"))
-  ' "$tmp_user_json")"
-
-  # ---- Build user map keyed by "key" (ensure OBJECT, even if user array is odd) ----
-  user_map_json="$(jq -c '
-    reduce ( .[]? | select(type=="object") | select(has("key") and (.key|type=="string")) ) as $it
-      ({}; .[$it.key] = $it)
-  ' "$tmp_user_json")"
-
-  # ---- Compute managed (repo) entries with preserve overrides safely ----
-  tmp_managed_arr="$(mktemp)"
-  jq --argjson preserve "$preserve_json" --argjson usermap "$user_map_json" '
-    def umap: if ($usermap|type)=="object" then $usermap else {} end;
-    [ .[]?
-      | select(type=="object")
-      | select(has("key") and (.key|type=="string"))
-      | if ( ($preserve|index(.key)) and ( (umap|has(.key)) ) )
-          then (umap[.key])
-          else .
-        end
-    ]
-  ' "$tmp_repo_json" > "$tmp_managed_arr"
-
-  # ---- Repo keys (to filter rest) ----
-  repo_keys_json="$(jq -c '
-    [ .[]? | select(type=="object") | select(has("key") and (.key|type=="string")) | .key ] | unique
-  ' "$tmp_repo_json")"
-
-  # ---- Rest = user entries minus preserve-object and any entry whose key is in repo ----
-  tmp_rest_arr="$(mktemp)"
-  jq --argjson repokeys "$repo_keys_json" '
-    [ .[]?
-      | if type=="object" then
-          if has("codestrap_preserve") then
-            empty
-          elif (has("key") and (.key|type=="string") and ($repokeys | index(.key))) then
-            empty
-          else
-            .
-          end
-        else
-          .
-        end
-    ]
-  ' "$tmp_user_json" > "$tmp_rest_arr"
-
-  # ---- Compose final array ----
+  # ---- Build merged array with jq (robust, no indexing on non-objects) ----
   tmp_final="$(mktemp)"
   jq -n \
-    --argjson managed "$(cat "$tmp_managed_arr")" \
-    --argjson preserve "$preserve_json" \
-    --argjson rest "$(cat "$tmp_rest_arr")" '
-      ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
+    --slurpfile u "$tmp_user_json" \
+    --slurpfile r "$tmp_repo_json" '
+      def arr(x): if (x|type)=="array" then x else [] end;
+
+      # Normalize inputs
+      $U := arr($u[0]);
+      $R := arr($r[0]);
+
+      # Preserve: array of strings from { "codestrap_preserve": [...] } object
+      $preserve := (
+        [ $U[]? | objects | .codestrap_preserve? | select(type=="array") ] | first
+      ) // [] | map(select(type=="string"));
+
+      # Index user bindings by .key
+      $uindex := ( INDEX( $U[]? | objects | select(has("key") and (.key|type=="string")); .key ) // {} );
+
+      # Set of repo keys (for filtering rest)
+      $rkeys := ( [ $R[]? | objects | select(has("key") and (.key|type=="string")) | .key ] | unique );
+
+      # Managed (repo) items with preserve overrides from user
+      $managed := [
+        $R[]? | objects | select(has("key") and (.key|type=="string")) as $r
+        | ($r.key) as $k
+        | if ( ($preserve | index($k)) and ($uindex | has($k)) )
+            then $uindex[$k]
+            else $r
+          end
+      ];
+
+      # Rest: user items excluding the preserve object and any whose key collides with repo keys
+      $rest := [
+        $U[]?
+        | if type=="object" then
+            if has("codestrap_preserve") then empty
+            elif (has("key") and (.key|type=="string") and ($rkeys | index(.key))) then empty
+            else .
+            end
+          else .
+          end
+      ];
+
+      # Final array
+      $managed + [ {codestrap_preserve: $preserve} ] + $rest
     ' | jq '.' > "$tmp_final"
 
-  # ---- Inject comments with correct END placement (after the preserve OBJECT) ----
+  # ---- Inject comments (END after the preserve OBJECT) ----
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
@@ -649,7 +632,7 @@ merge_codestrap_keybindings(){
   mv -f "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_managed_arr" "$tmp_rest_arr" "$tmp_final" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
 
