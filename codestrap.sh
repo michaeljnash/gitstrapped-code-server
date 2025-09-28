@@ -510,7 +510,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # USER keybindings (allow JSONC comments only)
+  # ---- Load USER keybindings (allow JSONC comments only) ----
   tmp_user_json="$(mktemp)"
   tmp_user_stripped="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
@@ -528,13 +528,13 @@ merge_codestrap_keybindings(){
   rm -f "$tmp_user_stripped" 2>/dev/null || true
 
   # Must be an array
-  if ! jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1; then
+  jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1 || {
     CTX_TAG="[Bootstrap config]"; err "user keybindings.json must be a JSON array."; CTX_TAG=""
     rm -f "$tmp_user_json" 2>/dev/null || true
     return 1
-  fi
+  }
 
-  # REPO keybindings (allow JSONC comments only)
+  # ---- Load REPO keybindings (allow JSONC comments only) ----
   tmp_repo_json="$(mktemp)"
   strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
   if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
@@ -543,36 +543,39 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # Extract preserve list from user (first object that has codestrap_preserve); default []
+  # ---- Extract preserve list (array of strings) ----
   preserve_json="$(jq -c '
-    ( [ .[]? | objects | select(has("codestrap_preserve") and (.codestrap_preserve|type=="array")) ][0].codestrap_preserve ) // []
+    ( [ .[]? | select(type=="object") | select(has("codestrap_preserve") and (.codestrap_preserve|type=="array")) ][0].codestrap_preserve )
+    // []
+    | map(select(type=="string"))
   ' "$tmp_user_json")"
 
-  # Build user map keyed by "key" (only objects with string "key")
+  # ---- Build user map keyed by "key" (ensure OBJECT, even if user array is odd) ----
   user_map_json="$(jq -c '
-    reduce ( .[]? | objects | select(has("key") and (.key|type=="string")) ) as $it
+    reduce ( .[]? | select(type=="object") | select(has("key") and (.key|type=="string")) ) as $it
       ({}; .[$it.key] = $it)
   ' "$tmp_user_json")"
 
-  # Managed = repo entries (objects w/ string "key"), overridden by user if preserved & present
+  # ---- Compute managed (repo) entries with preserve overrides safely ----
   tmp_managed_arr="$(mktemp)"
   jq --argjson preserve "$preserve_json" --argjson usermap "$user_map_json" '
+    def umap: if ($usermap|type)=="object" then $usermap else {} end;
     [ .[]?
-      | objects
+      | select(type=="object")
       | select(has("key") and (.key|type=="string"))
-      | if (($preserve | index(.key)) and ($usermap | has(.key)))
-          then $usermap[.key]
+      | if ( ($preserve|index(.key)) and ( (umap|has(.key)) ) )
+          then (umap[.key])
           else .
         end
     ]
   ' "$tmp_repo_json" > "$tmp_managed_arr"
 
-  # Repo keys for filtering rest
+  # ---- Repo keys (to filter rest) ----
   repo_keys_json="$(jq -c '
-    [ .[]? | objects | select(has("key") and (.key|type=="string")) | .key ] | unique
+    [ .[]? | select(type=="object") | select(has("key") and (.key|type=="string")) | .key ] | unique
   ' "$tmp_repo_json")"
 
-  # Rest = everything from user except preserve object and any item whose "key" appears in repo keys
+  # ---- Rest = user entries minus preserve-object and any entry whose key is in repo ----
   tmp_rest_arr="$(mktemp)"
   jq --argjson repokeys "$repo_keys_json" '
     [ .[]?
@@ -590,7 +593,7 @@ merge_codestrap_keybindings(){
     ]
   ' "$tmp_user_json" > "$tmp_rest_arr"
 
-  # Compose final array
+  # ---- Compose final array ----
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed_arr")" \
@@ -599,7 +602,7 @@ merge_codestrap_keybindings(){
       ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments with correct END placement (outside the preserve object)
+  # ---- Inject comments with correct END placement (after the preserve OBJECT) ----
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
@@ -615,7 +618,6 @@ merge_codestrap_keybindings(){
 
       if [ $in_preserve_obj -eq 1 ]; then
         echo "$line"
-        # Track braces of the { "codestrap_preserve": [...] } object
         inc=$(printf "%s" "$line" | tr -cd '{' | wc -c | tr -d ' ')
         dec=$(printf "%s" "$line" | tr -cd '}' | wc -c | tr -d ' ')
         depth_obj=$((depth_obj + inc - dec))
@@ -629,7 +631,6 @@ merge_codestrap_keybindings(){
       if echo "$line" | grep -q '^[[:space:]]*{[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
         echo "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         echo "$line"
-        # Initialize depth for the preserve OBJECT (not just the array)
         inc=$(printf "%s" "$line" | tr -cd '{' | wc -c | tr -d ' ')
         dec=$(printf "%s" "$line" | tr -cd '}' | wc -c | tr -d ' ')
         depth_obj=$((inc - dec))
