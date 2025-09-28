@@ -362,8 +362,40 @@ codestrap_run(){
   fi
 }
 
-# ===== settings.json merge (repo -> user) with preserve and inline JSONC comments =====
-strip_jsonc_to_json(){ sed -e 's://.*$::' -e '/\/\*/,/\*\//d' "$1"; }
+# ===== JSONC → JSON (repair-first) =====
+# - strips // and /* */ comments
+# - removes trailing commas before } or ]
+# - trims BOM if present
+sanitize_jsonc_to_json(){
+  in="$1"
+  awk 'NR==1{ sub(/^\xef\xbb\xbf/,"") } { print }' "$in" \
+  | sed -E '
+    s://[^\r\n]*$::g;                      # // comments
+    /\/\*/,/\*\// { s:/\*.*\*/::g }        # /* ... */ comments (single line)
+  ' \
+  | awk '                                    # /* ... */ (multi-line) remover
+      BEGIN{inblock=0}
+      {
+        line=$0
+        while (1) {
+          if (!inblock) {
+            start=index(line,"/*")
+            if (start==0) break
+            inblock=1
+            pre=substr(line,1,start-1)
+            line=pre substr(line,start+2)
+          } else {
+            stop=index(line,"*/")
+            if (stop==0) { line=""; break }
+            inblock=0
+            line=substr(line,stop+2)
+          }
+        }
+        if (length(line)>0) print line
+      }' \
+  | sed -E ':a; s/,([[:space:]]*[}\]])/\1/g; ta'   # trailing commas
+}
+
 
 install_settings_from_repo(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
@@ -372,13 +404,30 @@ install_settings_from_repo(){
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
   tmp_user_json="$(mktemp)"
-  if [ ! -f "$SETTINGS_PATH" ] || ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-    if [ -f "$SETTINGS_PATH" ]; then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
-  else
-    cp "$SETTINGS_PATH" "$tmp_user_json"
-  fi
-  jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
+  # Read and REPAIR user settings.json (non-destructive)
+  if [ -f "$SETTINGS_PATH" ]; then
+    # Try raw parse first
+    if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+      cp "$SETTINGS_PATH" "$tmp_user_json"
+    else
+      # Attempt repair (trailing commas, comments, BOM)
+      repaired="$(mktemp)"
+      sanitize_jsonc_to_json "$SETTINGS_PATH" >"$repaired" || true
+      if jq -e . "$repaired" >/dev/null 2>&1; then
+        cp "$repaired" "$tmp_user_json"
+      else
+        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed and could not be auto-repaired; aborting merge to avoid data loss."; CTX_TAG=""
+        rm -f "$repaired" "$tmp_user_json" 2>/dev/null || true
+        return 1
+      fi
+      rm -f "$repaired" 2>/dev/null || true
+    fi
+  else
+    printf '{}\n' >"$tmp_user_json"
+  fi
+
+  # Validate and load repo settings
   if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     err "repo settings JSON invalid → $REPO_SETTINGS_SRC"
     rm -f "$tmp_user_json" 2>/dev/null || true
@@ -426,11 +475,8 @@ install_settings_from_repo(){
   ' "$tmp_merged" > "$tmp_rest"
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
-  mcount="$(jq 'keys|length' "$tmp_managed")"
-  rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Build the final JSON (no comments) with stable key order:
-  # [managed keys...] + {"codestrap_preserve": ...} + [rest...]
+  # Build final JSON (proper commas), then inject comments without touching commas
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -439,10 +485,7 @@ install_settings_from_repo(){
       $managed + {codestrap_preserve: $preserve} + $rest
     ' | jq '.' > "$tmp_final"
 
-  # Now inject JSONC comments without disturbing commas/formatting.
-  # - Add START comment right after opening brace
-  # - Add the long preserve comment immediately before the codestrap_preserve line
-  # - Add END comment immediately after the codestrap_preserve line
+  tmp_with_comments="$(mktemp)"
   {
     first_brace_done=0
     while IFS= read -r line; do
@@ -452,18 +495,18 @@ install_settings_from_repo(){
         first_brace_done=1
         continue
       fi
-
       if echo "$line" | grep -q '^[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
         echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
         echo "$line"
         echo "  // END codestrap settings"
         continue
       fi
-
       echo "$line"
     done < "$tmp_final"
-  } > "$SETTINGS_PATH"
+  } > "$tmp_with_comments"
 
+  # Write atomically (no backups)
+  mv -f "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
