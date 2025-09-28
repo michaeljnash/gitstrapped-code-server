@@ -21,7 +21,7 @@ services:
       GIT_EMAIL: ${GIT_EMAIL}
       GH_REPOS: ${GH_REPOS}
       PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS:-true}
-      GIT_BASE_DIR: ${GIT_BASE_DIR:-/config/workspace}
+      GIT_BASE_DIR: ${GIT_BASE_DIR:-/config/workspace/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
     volumes:
       - code-config:/config12345678
