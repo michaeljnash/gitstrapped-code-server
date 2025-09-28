@@ -21,6 +21,7 @@ services:
       GIT_EMAIL: ${GIT_EMAIL}
       GH_REPOS: ${GH_REPOS}
       PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS}
+      INSTALL_EXTENSIONS: ${INSTALL_EXTENSIONS}
       WORKSPACE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
