@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.2.5}"
+VERSION="${GITSTRAP_VERSION:-0.3.0}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -31,6 +31,24 @@ prompt_secret(){
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
 
+print_logo(){
+  is_tty || return 0
+  cat <<'LOGO'
+          $$\   $$\                 $$\                                  
+          \__|  $$ |                $$ |                                 
+ $$$$$$\  $$\ $$$$$$\    $$$$$$$\ $$$$$$\    $$$$$$\  $$$$$$\   $$$$$$\  
+$$  __$$\ $$ |\_$$  _|  $$  _____|\_$$  _|  $$  __$$\ \____$$\ $$  __$$\ 
+$$ /  $$ |$$ |  $$ |    \$$$$$$\    $$ |    $$ |  \__|$$$$$$$ |$$ /  $$ |
+$$ |  $$ |$$ |  $$ |$$\  \____$$\   $$ |$$\ $$ |     $$  __$$ |$$ |  $$ |
+\$$$$$$$ |$$ |  \$$$$  |$$$$$$$  |  \$$$$  |$$ |     \$$$$$$$ |$$$$$$$  |
+ \____$$ |\__|   \____/ \_______/    \____/ \__|      \_______|$$  ____/ 
+$$\   $$ |                                                     $$ |      
+\$$$$$$  |                                                     $$ |      
+ \______/                                                      \__|      
+LOGO
+  echo
+}
+
 print_help(){
 cat <<'HLP'
 gitstrap — bootstrap GitHub + manage code-server auth
@@ -51,7 +69,8 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --git-email   | --git_email   <val>        → GIT_EMAIL
   --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   --pull-existing-repos | --pull_existing_repos <true|false> → PULL_EXISTING_REPOS (default: true)
-  --git-base-dir       | --git_base_dir <dir>               → GIT_BASE_DIR (default: /config/workspace)
+  --workspace-dir       | --workspace_dir <dir>              → WORKSPACE_DIR (default: /config/workspace)
+  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR (default: repos; relative to WORKSPACE_DIR)
   --env                                                Use environment variables only (no prompts)
 
 Notes:
@@ -64,29 +83,13 @@ Examples:
   GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
   gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   gitstrap --pull-existing-repos false
+  gitstrap --workspace-dir /config/workspace --repos-subdir repos
+  gitstrap settings-merge
   gitstrap passwd
 HLP
 }
 
 print_version(){ echo "gitstrap ${VERSION}"; }
-
-print_logo(){
-  is_tty || return 0
-  cat <<'LOGO'
-          $$\   $$\                 $$\                                  
-          \__|  $$ |                $$ |                                 
- $$$$$$\  $$\ $$$$$$\    $$$$$$$\ $$$$$$\    $$$$$$\  $$$$$$\   $$$$$$\  
-$$  __$$\ $$ |\_$$  _|  $$  _____|\_$$  _|  $$  __$$\ \____$$\ $$  __$$\ 
-$$ /  $$ |$$ |  $$ |    \$$$$$$\    $$ |    $$ |  \__|$$$$$$$ |$$ /  $$ |
-$$ |  $$ |$$ |  $$ |$$\  \____$$\   $$ |$$\ $$ |     $$  __$$ |$$ |  $$ |
-\$$$$$$$ |$$ |  \$$$$  |$$$$$$$  |  \$$$$  |$$ |     \$$$$$$$ |$$$$$$$  |
- \____$$ |\__|   \____/ \_______/    \____/ \__|      \_______|$$  ____/ 
-$$\   $$ |                                                     $$ |      
-\$$$$$$  |                                                     $$ |      
- \______/                                                      \__|      
-LOGO
-  echo
-}
 
 # ===== paths / state =====
 export HOME="${HOME:-/config}"
@@ -99,13 +102,25 @@ LOCK_FILE="$LOCK_DIR/init-gitstrap.lock"
 PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
-BASE="${GIT_BASE_DIR:-$HOME/workspace}"; ensure_dir "$BASE"
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"; ensure_dir "$WORKSPACE_DIR"
+REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
+# Enforce relative REPOS_SUBDIR (warn but allow absolute if provided)
+case "$REPOS_SUBDIR" in
+  /*) warn "REPOS_SUBDIR is absolute; will bypass WORKSPACE_DIR: $REPOS_SUBDIR"; BASE="$REPOS_SUBDIR" ;;
+  *) BASE="$WORKSPACE_DIR/$REPOS_SUBDIR" ;;
+esac
+ensure_dir "$BASE"
+
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# VS Code settings merge
+# VS Code settings paths
 USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
 SETTINGS_PATH="$USER_DIR/settings.json"
+TASKS_PATH="$USER_DIR/tasks.json"
+KEYB_PATH="$USER_DIR/keybindings.json"
+EXT_PATH="$USER_DIR/extensions.json"
+
 REPO_SETTINGS_SRC="$HOME/gitstrap/settings.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
@@ -275,20 +290,14 @@ install_settings_from_repo(){
   fi
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
-  # Load/normalize repo settings (support JSONC too)
-  tmp_repo_json="$(mktemp)"
-  if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
-    cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
-  else
-    strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || printf '{}\n' >"$tmp_repo_json"
-  fi
-  if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+  # Validate repo settings
+  if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
-    rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+    rm -f "$tmp_user_json" 2>/dev/null || true
     return 0
   fi
 
-  RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
+  RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
 
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
@@ -299,7 +308,7 @@ install_settings_from_repo(){
   # Merge with preserve semantics
   tmp_merged="$(mktemp)"
   jq \
-    --argjson repo "$(cat "$tmp_repo_json")" \
+    --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
     --argjson rskeys "$RS_KEYS_JSON" \
     --argjson oldkeys "$OLD_KEYS_JSON" '
       def arr(v): if (v|type)=="array" then v else [] end;
@@ -344,28 +353,29 @@ install_settings_from_repo(){
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Assemble JSONC output — comments inline at top block; comma placement correct
+  # Assemble JSONC output with tidy commas
   {
     echo "{"
     echo "  // START gitstrap settings"
     if [ "$mcount" -gt 0 ]; then
-      jq -r -j '
+      jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_managed"
-      printf ",\n"
+      echo ","
     fi
     echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
     printf '  "gitstrap_preserve": %s\n' "$preserve_json"
-    echo "  // END gitstrap settings"
     if [ "$rcount" -gt 0 ]; then
-      echo "  ,"
+      echo "  // END gitstrap settings,"
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_rest"
+    else
+      echo "  // END gitstrap settings"
     fi
     echo "}"
   } > "$SETTINGS_PATH"
@@ -373,42 +383,30 @@ install_settings_from_repo(){
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
-# ===== config-shortcuts in workspace (symlinks) =====
-create_config_shortcuts(){
-  SHORTCUTS_DIR="$BASE/config-shortcuts"
-  ensure_dir "$SHORTCUTS_DIR"
+# ===== workspace config-shortcuts (symlinks in WORKSPACE_DIR only) =====
+install_config_shortcuts(){
+  local d="$WORKSPACE_DIR/config-shortcuts"
+  ensure_dir "$d"
+  # Ensure targets exist
+  [ -f "$SETTINGS_PATH" ]   || printf '{}\n' >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH" ]      || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH" ]       || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH" ]        || printf '{}\n' >"$EXT_PATH"
 
-  # Ensure user files exist — DO NOT TRUNCATE if present
-  [ -f "$USER_DIR/settings.json" ]    || printf '{}\n' > "$USER_DIR/settings.json"
-  [ -f "$USER_DIR/keybindings.json" ] || printf '[]\n' > "$USER_DIR/keybindings.json"
-  [ -f "$USER_DIR/tasks.json" ]       || printf '{}\n' > "$USER_DIR/tasks.json"
+  # Helper: create/update symlink
+  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
-  # Workspace recommended extensions file
-  ensure_dir "$BASE/.vscode"
-  [ -f "$BASE/.vscode/extensions.json" ] || printf '{\n  "recommendations": []\n}\n' > "$BASE/.vscode/extensions.json"
+  mklink "$SETTINGS_PATH" "$d/settings.json"
+  mklink "$TASKS_PATH"    "$d/tasks.json"
+  mklink "$KEYB_PATH"     "$d/keybindings.json"
+  mklink "$EXT_PATH"      "$d/extensions.json"
 
-  # Symlink helper (force replace with symlink)
-  linkf(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || true; }
-
-  # Create/refresh symlinks (no snippets link anymore)
-  linkf "$USER_DIR/settings.json"       "$SHORTCUTS_DIR/settings.json"
-  linkf "$USER_DIR/keybindings.json"    "$SHORTCUTS_DIR/keybindings.json"
-  linkf "$USER_DIR/tasks.json"          "$SHORTCUTS_DIR/tasks.json"
-  linkf "$BASE/.vscode/extensions.json" "$SHORTCUTS_DIR/extensions.json"
-
-  # Ownership on symlinks (use -h)
-  chown -h "${PUID}:${PGID}" \
-    "$SHORTCUTS_DIR" \
-    "$SHORTCUTS_DIR/settings.json" \
-    "$SHORTCUTS_DIR/keybindings.json" \
-    "$SHORTCUTS_DIR/tasks.json" \
-    "$SHORTCUTS_DIR/extensions.json" 2>/dev/null || true
-
-  log "created workspace config-shortcuts at $SHORTCUTS_DIR"
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+  log "created config-shortcuts in workspace"
 }
 
 # ===== CLI helpers =====
@@ -423,7 +421,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.2.5}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.0}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -447,7 +445,7 @@ bootstrap_env_only(){
 }
 
 # ===== flag → env mapping (1:1, dash/underscore agnostic) =====
-ALLOWED_FLAG_VARS="GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS GIT_BASE_DIR"
+ALLOWED_FLAG_VARS="GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS WORKSPACE_DIR REPOS_SUBDIR"
 set_flag_env(){ # $1=flag key (already without leading --), $2=value
   norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"
   envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"
@@ -464,8 +462,8 @@ bootstrap_from_args(){
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
+      settings-merge) install_settings_from_repo; install_config_shortcuts; exit 0;;
       passwd)        password_change_interactive; exit 0;;
-      settings-merge) install_settings_from_repo; exit 0;;
       --*)
         key="${1#--}"; shift || true
         val="${1:-}"
@@ -477,6 +475,15 @@ bootstrap_from_args(){
     esac
     shift || true
   done
+
+  # Recompute BASE if flags changed WORKSPACE_DIR/REPOS_SUBDIR
+  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"; ensure_dir "$WORKSPACE_DIR"
+  REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
+  case "$REPOS_SUBDIR" in
+    /*) warn "REPOS_SUBDIR is absolute; will bypass WORKSPACE_DIR: $REPOS_SUBDIR"; BASE="$REPOS_SUBDIR" ;;
+    *) BASE="$WORKSPACE_DIR/$REPOS_SUBDIR" ;;
+  esac
+  ensure_dir "$BASE"
 
   if [ "$USE_ENV" = "true" ]; then
     : # env-only
@@ -500,11 +507,7 @@ bootstrap_from_args(){
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
 
-  # Respect env-only overrides if set
-  if [ -n "${FILE__HASHED_PASSWORD:-}" ]; then PASS_HASH_PATH="$FILE__HASHED_PASSWORD"; fi
-  if [ -n "${GIT_BASE_DIR:-}" ]; then BASE="$GIT_BASE_DIR"; ensure_dir "$BASE"; fi
-
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE GIT_BASE_DIR
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR
   gitstrap_run
   log "bootstrap complete"
 }
@@ -526,7 +529,7 @@ cli_entry(){
     -v|--version) print_version; exit 0;;
     --env)        bootstrap_env_only; exit 0;;
     passwd)       password_change_interactive; exit 0;;
-    settings-merge) install_settings_from_repo; exit 0;;
+    settings-merge) install_settings_from_repo; install_config_shortcuts; exit 0;;
     *)            bootstrap_from_args "$@";;
   esac
 }
@@ -550,7 +553,8 @@ case "${1:-init}" in
     install_cli_shim
     init_default_password
     install_settings_from_repo
-    create_config_shortcuts
+    install_config_shortcuts
+    autorun_env_if_present
     log "Gitstrap initialized. Use: gitstrap -h"
     ;;
   cli)
