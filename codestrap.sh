@@ -510,11 +510,17 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER keybindings (allow JSONC comments only) ----
+  # ---- Load USER keybindings (allow JSONC comments; empty => []) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
+    # Strip comments only
     strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-    if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+    # If empty/whitespace after stripping, treat as empty array
+    if [ ! -s "$tmp_user_json" ] || ! grep -q '[^[:space:]]' "$tmp_user_json"; then
+      printf '[]\n' >"$tmp_user_json"
+    fi
+    # Validate JSON and array type
+    if ! jq -e . "$tmp_user_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1; then
       CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
       rm -f "$tmp_user_json" 2>/dev/null || true
       return 1
@@ -522,16 +528,11 @@ merge_codestrap_keybindings(){
   else
     printf '[]\n' >"$tmp_user_json"
   fi
-  jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1 || {
-    CTX_TAG="[Bootstrap config]"; err "user keybindings.json must be a JSON array."; CTX_TAG=""
-    rm -f "$tmp_user_json" 2>/dev/null || true
-    return 1
-  }
 
   # ---- Load REPO keybindings (allow JSONC comments only) ----
   tmp_repo_json="$(mktemp)"
   strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
-  if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
+  if [ ! -s "$tmp_repo_json" ] || ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
     CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""
     rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
     return 1
@@ -545,44 +546,42 @@ merge_codestrap_keybindings(){
       def arr(x): if (x|type)=="array" then x else [] end;
 
       # Normalize inputs
-      $U := arr($u[0]);
-      $R := arr($r[0]);
+      (arr($u[0])) as $U |
+      (arr($r[0])) as $R |
 
-      # Preserve: array of strings from { "codestrap_preserve": [...] } object
-      $preserve := (
+      # Preserve list: from { "codestrap_preserve": [...] } object if present
+      (
         [ $U[]? | objects | .codestrap_preserve? | select(type=="array") ] | first
-      ) // [] | map(select(type=="string"));
+      ) as $pres_in |
+      ( ($pres_in // []) | map(select(type=="string")) | unique ) as $preserve |
 
-      # Index user bindings by .key
-      $uindex := ( INDEX( $U[]? | objects | select(has("key") and (.key|type=="string")); .key ) // {} );
+      # Index user bindings by .key (object; safe)
+      ( INDEX( $U[]? | objects | select(has("key") and (.key|type=="string")); .key ) // {} ) as $uindex |
 
-      # Set of repo keys (for filtering rest)
-      $rkeys := ( [ $R[]? | objects | select(has("key") and (.key|type=="string")) | .key ] | unique );
+      # Repo keys set
+      ( [ $R[]? | objects | select(has("key") and (.key|type=="string")) | .key ] | unique ) as $rkeys |
 
       # Managed (repo) items with preserve overrides from user
-      $managed := [
+      ([
         $R[]? | objects | select(has("key") and (.key|type=="string")) as $r
         | ($r.key) as $k
-        | if ( ($preserve | index($k)) and ($uindex | has($k)) )
+        | if ($preserve | index($k)) and ($uindex | has($k))
             then $uindex[$k]
             else $r
           end
-      ];
+      ]) as $managed |
 
-      # Rest: user items excluding the preserve object and any whose key collides with repo keys
-      $rest := [
+      # Rest: user items excluding codestrap_preserve object and any that collide with repo keys
+      ([
         $U[]?
-        | if type=="object" then
-            if has("codestrap_preserve") then empty
-            elif (has("key") and (.key|type=="string") and ($rkeys | index(.key))) then empty
-            else .
-            end
+        | if (type=="object" and has("codestrap_preserve")) then empty
+          elif (type=="object" and has("key") and (.key|type=="string") and ($rkeys | index(.key))) then empty
           else .
           end
-      ];
+      ]) as $rest |
 
       # Final array
-      $managed + [ {codestrap_preserve: $preserve} ] + $rest
+      $managed + [ { codestrap_preserve: $preserve } ] + $rest
     ' | jq '.' > "$tmp_final"
 
   # ---- Inject comments (END after the preserve OBJECT) ----
