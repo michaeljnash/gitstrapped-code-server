@@ -515,11 +515,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
     chmod 755 "$HOME/.local/bin/gitstrap"
-    # Best-effort PATH hint for current shells that source ~/.profile; we can't modify the parent's env here.
-    case ":$PATH:" in
-      *":$HOME/.local/bin:"*) : ;;
-      *) log "note: ensure \$HOME/.local/bin is on PATH to use 'gitstrap' command";;
-    esac
+    case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) log "note: ensure \$HOME/.local/bin is on PATH to use 'gitstrap' command";; esac
     log "installed CLI shim → $HOME/.local/bin/gitstrap"
   fi
 }
@@ -528,7 +524,7 @@ bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap 
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
-  bootstrap_banner
+  # (Banner now shown by callers so it appears before hub question)
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
   GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
   GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
@@ -627,6 +623,7 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
 " >&2
       exit 3
     fi
+    bootstrap_banner
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
     bootstrap_interactive
@@ -660,7 +657,11 @@ cli_entry(){
       exit 3
     fi
 
+    # Show banner BEFORE first hub question
+    bootstrap_banner
+
     # 1) GitHub?
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
       CTX_TAG="[Bootstrap GitHub]"
@@ -672,16 +673,17 @@ cli_entry(){
     fi
 
     # 2) Config?
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
       CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
-    # 3) Password?
-    PROMPT_TAG="[Change password] ? "
+    # 3) Password?  (no [Change password] ? prefix; default YES)
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     CTX_TAG="[Change password]"
-    if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
+    if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
       password_change_interactive
     else
       log "skipped password change"
@@ -699,6 +701,7 @@ cli_entry(){
       shift || true
       if [ $# -eq 0 ]; then
         if is_tty; then
+          bootstrap_banner
           PROMPT_TAG="[Bootstrap GitHub] ? "
           CTX_TAG="[Bootstrap GitHub]"
           bootstrap_interactive
@@ -718,10 +721,9 @@ cli_entry(){
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
-      PROMPT_TAG="[Change password] ? "
+      # No PROMPT_TAG for the direct subcommand; we run it immediately
       CTX_TAG="[Change password]"
       password_change_interactive
-      PROMPT_TAG=""
       CTX_TAG=""
       exit 0;;
     *)
@@ -737,8 +739,7 @@ autorun_env_if_present(){
     gitstrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
-    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_P
-AT missing → no autorun"
+    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_PAT missing → no autorun"
   fi
 }
 
