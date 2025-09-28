@@ -758,7 +758,7 @@ install_cli_shim(){
 set -eu
 for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
   if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ] then
+    if [ -x "$TARGET" ]; then
       exec "$TARGET" cli "$@"
     else
       exec sh "$TARGET" cli "$@"
