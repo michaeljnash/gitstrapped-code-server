@@ -237,12 +237,12 @@ validate_github_pat(){
 
 # ===== password change =====
 password_change_interactive(){
-  command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change Password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
+  command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
 
   _OLD_PROMPT_TAG="$PROMPT_TAG"
   _OLD_CTX_TAG="$CTX_TAG"
-  PROMPT_TAG="[Change Password] ? "
-  CTX_TAG="[Change Password]"
+  PROMPT_TAG="[Change password] ? "
+  CTX_TAG="[Change password]"
 
   NEW="$(prompt_secret "New code-server password: ")"
   CONF="$(prompt_secret "Confirm password: ")"
@@ -583,8 +583,8 @@ recompute_base(){
 
 # --- interactive config flow (kept for manual flow) ---
 config_interactive(){
-  PROMPT_TAG="[Bootstrap Config] ? "
-  CTX_TAG="[Bootstrap Config]"
+  PROMPT_TAG="[Bootstrap config] ? "
+  CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     install_settings_from_repo
   else
@@ -598,8 +598,8 @@ config_interactive(){
 
 # --- hybrid / flag-aware config flow ---
 config_hybrid(){
-  PROMPT_TAG="[Bootstrap Config] ? "
-  CTX_TAG="[Bootstrap Config]"
+  PROMPT_TAG="[Bootstrap config] ? "
+  CTX_TAG="[Bootstrap config]"
 
   if [ -n "${CFG_SETTINGS+x}" ]; then
     if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
@@ -708,12 +708,12 @@ cli_entry(){
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
-      CTX_TAG="[Bootstrap Config]"; log "skipped config"; CTX_TAG=""
+      CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
     # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
-    CTX_TAG="[Change Password]"
+    CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
       password_change_interactive
     else
@@ -755,13 +755,13 @@ cli_entry(){
           --settings)
             shift || true
             CFG_SETTINGS="${1:-}"
-            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap Config]"; warn "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; warn "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
           --settings=*)
             CFG_SETTINGS="${1#*=}"
             ;;
           *)
-            CTX_TAG="[Bootstrap Config]"; warn "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+            CTX_TAG="[Bootstrap config]"; warn "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
         shift || true
       done
@@ -770,7 +770,7 @@ cli_entry(){
         bootstrap_banner
         config_hybrid
       else
-        CTX_TAG="[Bootstrap Config]"
+        CTX_TAG="[Bootstrap config]"
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
             install_settings_from_repo
@@ -790,7 +790,7 @@ cli_entry(){
     passwd)
       # Interactive password flow should also show banner
       bootstrap_banner
-      CTX_TAG="[Change Password]"
+      CTX_TAG="[Change password]"
       password_change_interactive
       CTX_TAG=""
       exit 0;;
