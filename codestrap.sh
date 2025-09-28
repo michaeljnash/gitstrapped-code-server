@@ -566,18 +566,18 @@ merge_codestrap_keybindings(){
 
   # Managed list: repo entries, overridden by user when key is preserved
   tmp_managed_arr="$(mktemp)"
-  jq --argjson preserve "$preserve_json" --slurpfile usermap "$tmp_user_map" '
+  jq --argjson preserve "$preserve_json" --argjson usermap "$(cat "$tmp_user_map")" '
     . as $repo
     | [ $repo[]
         | select(type=="object" and has("key"))
-        | if ($preserve|index(.key)) and ($usermap[0]|has(.key))
-          then $usermap[0][.key]
+        | if ($preserve|index(.key)) and ($usermap|has(.key))
+          then $usermap[.key]
           else .
           end
       ]
   ' "$tmp_repo_json" > "$tmp_managed_arr"
 
-  # Repo keys as a REAL JSON array (fixes the error)
+  # Repo keys as a REAL JSON array (for filtering user “rest”)
   repo_keys_json="$(jq -c '[ .[] | select(type=="object" and has("key")) | .key ] | unique' "$tmp_repo_json")"
 
   # Rest: keep user items except the preserve object and any item whose key is in repo (to avoid dupes)
@@ -602,7 +602,7 @@ merge_codestrap_keybindings(){
       ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments and ensure END marker is after preserve object
+  # Inject comments and ensure END marker is after the preserve object (never inside)
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
