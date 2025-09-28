@@ -26,7 +26,7 @@ services:
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
 
     volumes:
-      - code-config:/config1
+      - code-config:/config12
       - code-config:/config
       - projects:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro

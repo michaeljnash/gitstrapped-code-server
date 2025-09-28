@@ -511,7 +511,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER keybindings (allow JSONC comments, no other repairs) ----
+  # ---- Load USER keybindings (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -532,7 +532,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO keybindings (allow JSONC comments, no other repairs) ----
+  # ---- Load REPO keybindings (allow JSONC comments; no other repairs) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -593,71 +593,85 @@ merge_codestrap_keybindings(){
       | ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
     ' > "$tmp_final"
 
-  # ---- Inject comments with correct placement ----
-  # Place:
-  #   - START banner right after the opening '['
-  #   - Guidance BEFORE the preserve object
-  #   - END banner immediately AFTER the closing '}' of the preserve object
+  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
   tmp_with_comments="$(mktemp)"
   awk '
-    function nchr(s, ch,   t) { t=s; gsub(ch,"",t); return length(s)-length(t) }
-
     BEGIN {
       seen_array_start=0
+      have_prev=0
       in_preserve=0
       preserve_level=-1
       depth=0
-      prev=""   # single-line lookbehind buffer (for a lone "{")
     }
 
-    # helper to actually print a line and update depth
-    function out(l,   opens,closes) {
+    # Print a line and update { } depth counters
+    function print_with_depth(l,   tmp,opens,closes) {
       print l
-      opens  = nchr(l,"{")
-      closes = nchr(l,"}")
+      tmp = l; opens  = gsub(/\{/, "", tmp)
+      tmp = l; closes = gsub(/\}/, "", tmp)
       depth += (opens - closes)
+    }
 
-      # If we just stepped OUT of the preserve object, print END banner now.
+    {
+      line = $0
+
+      # After opening "[" add START banner
+      if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
+        print_with_depth(line)
+        print "  // START codestrap keybindings"
+        seen_array_start=1
+        next
+      }
+
+      # If we buffered a "{", and current line is the preserve key, emit guidance BEFORE the "{"
+      if (have_prev && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
+        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
+        print_with_depth(prev)           # prints "{"
+        have_prev=0
+        print_with_depth(line)           # prints '"codestrap_preserve": ...'
+        in_preserve=1
+        preserve_level=depth             # object depth after the "{"
+        next
+      }
+
+      # If we have a buffered line but not entering preserve, flush it now
+      if (have_prev) {
+        print_with_depth(prev)
+        have_prev=0
+      }
+
+      # Buffer a lone "{" so we can detect if next line starts preserve key
+      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
+        prev=line
+        have_prev=1
+        next
+      }
+
+      # If preserve key appears on the same line as "{", print guidance first
+      if (line ~ /\{[[:space:]]*"codestrap_preserve"[[:space:]]*:/) {
+        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
+        print_with_depth(line)
+        in_preserve=1
+        preserve_level=depth
+        next
+      }
+
+      # Normal passthrough
+      print_with_depth(line)
+
+      # If we just closed the preserve object, place END banner immediately after it
       if (in_preserve && depth < preserve_level) {
         print "  // END codestrap keybindings"
         in_preserve=0
       }
     }
 
-    {
-      line=$0
-
-      # On first array bracket, print START banner
-      if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
-        out(line)
-        print "  // START codestrap keybindings"
-        seen_array_start=1
-        next
-      }
-
-      # If previous buffered line was a lone "{", and THIS line begins the preserve key,
-      # insert guidance BEFORE the "{", then print the "{", then the key line.
-      if (prev != "" && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
-        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        out(prev)               # prints the "{", depth++
-        prev=""
-        out(line)               # prints the '"codestrap_preserve": ...' line (depth usually unchanged)
-        in_preserve=1
-        preserve_level=depth    # record object depth right after "{"
-        next
-      }
-
-      # Normal flow:
-      if (prev != "") { out(prev); prev="" }
-      # Buffer a lone "{" to allow lookahead for preserve key line
-      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) { prev=line; next }
-
-      out(line)
-    }
-
     END {
-      if (prev != "") { out(prev) }  # flush any remaining buffered "{"
-      # If file ended while still flagged as in_preserve (malformed), do not add END.
+      if (have_prev) {
+        print_with_depth(prev)
+        have_prev=0
+      }
+      # Do NOT emit END here; must follow the preserve object, not array end.
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
