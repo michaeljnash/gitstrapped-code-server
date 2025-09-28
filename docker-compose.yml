@@ -20,7 +20,7 @@ services:
       GIT_NAME: ${GIT_NAME}
       GIT_EMAIL: ${GIT_EMAIL}
       GH_REPOS: ${GH_REPOS}
-      PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS:-true}
+      PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS}
       WORKSPACE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
