@@ -340,7 +340,7 @@ install_settings_from_repo(){
   # Assemble JSONC output
   {
     echo "{"
-    echo "  //gitstrap settings start"
+    echo "  // START gitstrap settings"
     if [ "$mcount" -gt 0 ]; then
       jq -r -j '
         to_entries
@@ -349,9 +349,9 @@ install_settings_from_repo(){
       ' "$tmp_managed"
       printf ",\n"
     fi
-    echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
+    echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
     printf '  "gitstrap_preserve": %s\n' "$preserve_json"
-    echo "  //gitstrap settings end"
+    echo "  // END gitstrap settings"
     if [ "$rcount" -gt 0 ]; then
       echo "  ,"
       jq -r '
