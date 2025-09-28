@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.3}"
+VERSION="${GITSTRAP_VERSION:-0.3.5}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -74,19 +74,16 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   --pull-existing-repos | --pull_existing_repos <true|false> → PULL_EXISTING_REPOS (default: true)
   --workspace-dir       | --workspace_dir <dir>              → WORKSPACE_DIR (default: /config/workspace)
-  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR (default: repos; treated RELATIVE to WORKSPACE_DIR, even if it starts with '/')
+  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
   --env                                                Use environment variables only (no prompts)
 
-Notes:
-  • Flags override environment. Unknown flags are rejected.
-  • Without flags, if in a TTY gitstrap prompts; otherwise use --env or flags.
-  • You can mix flags + envs; flags win.
+Interactive tip:
+  At any prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
 Examples:
   gitstrap
   GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
   gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  gitstrap --pull-existing-repos false
   gitstrap --workspace-dir /config/workspace --repos-subdir /repos
   gitstrap settings-merge
   gitstrap passwd
@@ -196,6 +193,55 @@ init_default_password(){
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
 }
 
+# ===== helpers for interactive -e/--env =====
+env_hint(){ # $1=ENVVAR
+  eval "tmp=\${$1:-}"
+  [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true
+}
+read_or_env(){ # $1=prompt_base, $2=envvar, $3=default
+  hint="$(env_hint "$2")"
+  val="$(prompt_def "$1$hint: " "$3")"
+  case "$val" in
+    -e|--env)
+      eval "tmp=\${$2:-}"
+      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
+      printf "%s" "$tmp"
+      ;;
+    *)
+      printf "%s" "$val"
+      ;;
+  esac
+}
+read_secret_or_env(){ # $1=prompt_base, $2=envvar
+  hint="$(env_hint "$2")"
+  val="$(prompt_secret "$1$hint: ")"
+  case "$val" in
+    -e|--env)
+      eval "tmp=\${$2:-}"
+      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
+      printf "%s" "$tmp"
+      ;;
+    *)
+      printf "%s" "$val"
+      ;;
+  esac
+}
+read_bool_or_env(){ # $1=prompt_base, $2=envvar, $3=default_y_or_n
+  def="$3"; [ -z "$def" ] && def="y"
+  hint="$(env_hint "$2")"
+  val="$(prompt_def "$1$hint " "$def")"
+  case "$val" in
+    -e|--env)
+      eval "tmp=\${$2:-}"
+      if [ -z "${tmp:-}" ]; then err "$2 requested via --env at prompt, but $2 is not set."; exit 2; fi
+      printf "%s" "$(normalize_bool "$tmp")"
+      ;;
+    *)
+      printf "%s" "$(yn_to_bool "$val")"
+      ;;
+  esac
+}
+
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
   [ -n "${GH_USERNAME:-}" ] || return 0
@@ -224,7 +270,6 @@ validate_github_pat(){
     err "Could not verify GH_PAT (${src}) (HTTP $code)."
     return 1
   fi
-  # Scope hint (best-effort)
   headers="$(curl -fsS -D - -o /dev/null -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user 2>/dev/null || true)"
   scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
   echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GH_PAT may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: ${scopes:-none}")"
@@ -312,7 +357,6 @@ gitstrap_run(){
   GIT_NAME="${GIT_NAME:-${GH_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
   GH_REPOS="${GH_REPOS:-}"; PULL_EXISTING_REPOS="${PULL_EXISTING_REPOS:-true}"
 
-  # Validate inputs early — fatal on failure
   validate_github_username
   validate_github_pat
 
@@ -481,19 +525,19 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.3}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.5}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
 bootstrap_interactive(){
   bootstrap_banner
-  GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
-  [ -n "${GH_PAT:-}" ] || { GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"; }
-  GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-$GH_USERNAME}]: " "${GIT_NAME:-$GH_USERNAME}")"
-  GIT_EMAIL="$(prompt_def "Git email (blank=auto resolve GH email): " "${GIT_EMAIL:-}")"
-  GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
-  PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
+  GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
+  GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
+  GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
+  GIT_EMAIL="$(read_or_env "Git email (blank=auto)" GIT_EMAIL "")"
+  GH_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GH_REPOS "${GH_REPOS:-}")"
+  PULL_EXISTING_REPOS="$(read_bool_or_env "Pull existing repos? [Y/n]" PULL_EXISTING_REPOS "y")"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS ORIGIN_GH_USERNAME ORIGIN_GH_PAT
@@ -574,12 +618,12 @@ bootstrap_from_args(){
       exit 3
     fi
     bootstrap_banner
-    GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
-    [ -n "${GH_PAT:-}" ] || { GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"; }
-    GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-${GH_USERNAME:-}}]: " "${GIT_NAME:-${GH_USERNAME:-}}")"
-    GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
-    GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
-    PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
+    GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
+    GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
+    GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
+    GIT_EMAIL="$(read_or_env "Git email (blank=auto)" GIT_EMAIL "")"
+    GH_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GH_REPOS "${GH_REPOS:-}")"
+    PULL_EXISTING_REPOS="$(read_bool_or_env "Pull existing repos? [Y/n]" PULL_EXISTING_REPOS "y")"
   fi
 
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
