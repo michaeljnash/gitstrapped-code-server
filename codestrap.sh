@@ -66,6 +66,7 @@ Flags for 'codestrap github' (map 1:1 to env vars; dash/underscore both accepted
 Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
   --settings <true|false>       Merge strapped settings.json into user settings.json
   --keybindings <true|false>    Merge strapped keybindings.json into user keybindings.json
+  --extensions <true|false>     Merge strapped extensions.json into user extensions.json
                                 (Interactive default: ask; Non-interactive default: true)
 
 Interactive tip (github):
@@ -77,7 +78,7 @@ Examples:
   codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   codestrap github --workspace-dir /config/workspace --repos-subdir /repos
   codestrap config
-  codestrap config --settings false --keybindings true
+  codestrap config --settings false --keybindings true --extensions true
   codestrap passwd
 HLP
 }
@@ -122,6 +123,7 @@ EXT_PATH="$USER_DIR/extensions.json"
 
 REPO_SETTINGS_SRC="$HOME/codestrap/settings.json"
 REPO_KEYB_SRC="$HOME/codestrap/keybindings.json"
+REPO_EXT_SRC="$HOME/codestrap/extensions.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # Track origins for nicer errors
@@ -300,7 +302,7 @@ clone_one(){
   dest="${BASE}/${name}"
   safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
   if [ -d "$dest/.git" ]; then
-    if [ "$(normalize_bool "$PULL")" = "true" ]; then
+    if [ "$(normalize_bool "$PULL")" = "true" ] && command -v git >/dev/null 2>&1; then
       log "pull: ${name}"
       git -C "$dest" fetch --all -p || warn "fetch failed for ${name}"
       if [ -n "$branch" ]; then
@@ -641,6 +643,87 @@ JQ
   log "merged keybindings.json → $KEYB_PATH"
 }
 
+# ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
+merge_codestrap_extensions(){
+  REPO_EXT_SRC="${REPO_EXT_SRC:-$HOME/codestrap/extensions.json}"
+  [ -f "$REPO_EXT_SRC" ] || { log "no repo extensions.json; skipping extensions merge"; return 0; }
+  command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping extensions merge"; return 0; }
+
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+
+  # Load USER (allow comments only; no other repairs)
+  tmp_user_json="$(mktemp)"
+  if [ -f "$EXT_PATH" ]; then
+    if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
+      cp "$EXT_PATH" "$tmp_user_json"
+    else
+      strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
+      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+    fi
+  else
+    printf '{ "recommendations": [] }\n' > "$tmp_user_json"
+  fi
+
+  # Load REPO (allow comments only)
+  tmp_repo_json="$(mktemp)"
+  if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
+    cp "$REPO_EXT_SRC" "$tmp_repo_json"
+  else
+    strip_jsonc_to_json "$REPO_EXT_SRC" >"$tmp_repo_json" || true
+    jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo extensions JSON invalid → $REPO_EXT_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
+  fi
+
+  # Extract repo list (de-dup preserving order)
+  tmp_repo_list="$(mktemp)"
+  jq -r '.recommendations // [] | .[] | @json' "$tmp_repo_json" | awk '!seen[$0]++' > "$tmp_repo_list"
+
+  # Extract user extras (those NOT in repo list, preserving order)
+  tmp_user_extras="$(mktemp)"
+  jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" '
+    def arr(v): if (v|type)=="array" then v else [] end;
+    ( $r[0].recommendations // [] ) as $RR
+    | ( $u[0].recommendations // [] ) as $UR
+    | [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ]
+  ' | jq -r '.[] | @json' > "$tmp_user_extras"
+
+  # Compose final with inline comments around repo segment (no preserve needed)
+  tmp_with_comments="$(mktemp)"
+  {
+    echo "{"
+    echo '  "recommendations": ['
+    # START comment
+    echo '    // START codestrap extensions'
+    # repo items
+    REPO_COUNT=0
+    while IFS= read -r item; do
+      [ -n "$item" ] || continue
+      echo "    $item,"
+      REPO_COUNT=$((REPO_COUNT+1))
+    done < "$tmp_repo_list"
+    # END comment just after repo segment
+    echo '    // END codestrap extensions'
+    # user extras (no trailing comma on last)
+    EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
+    idx=0
+    while IFS= read -r item; do
+      [ -n "$item" ] || { idx=$((idx+1)); continue; }
+      idx=$((idx+1))
+      if [ "$idx" -lt "$EXTRAS_COUNT" ]; then
+        echo "    $item,"
+      else
+        echo "    $item"
+      fi
+    done < "$tmp_user_extras"
+    echo "  ]"
+    echo "}"
+  } > "$tmp_with_comments"
+
+  mv -f "$tmp_with_comments" "$EXT_PATH"
+  chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" 2>/dev/null || true
+  log "merged extensions.json → $EXT_PATH"
+}
+
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config"
@@ -651,7 +734,7 @@ install_config_shortcuts(){
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH"    ]   || printf '{}\n' >"$EXT_PATH"
+  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
 
   mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
@@ -675,7 +758,7 @@ install_cli_shim(){
 set -eu
 for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
   if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ]; then
+    if [ -x "$TARGET" ] then
       exec "$TARGET" cli "$@"
     else
       exec sh "$TARGET" cli "$@"
@@ -783,6 +866,12 @@ config_interactive(){
     log "skipped keybindings merge"
   fi
 
+  if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
+    merge_codestrap_extensions
+  else
+    log "skipped extensions merge"
+  fi
+
   install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
@@ -821,6 +910,21 @@ config_hybrid(){
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
+    fi
+  fi
+
+  # --extensions
+  if [ -n "${CFG_EXT+x}" ]; then
+    if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then
+      merge_codestrap_extensions
+    else
+      log "skipped extensions merge"
+    fi
+  else
+    if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
+      merge_codestrap_extensions
+    else
+      log "skipped extensions merge"
     fi
   fi
 
@@ -959,6 +1063,7 @@ cli_entry(){
       # Parse config flags
       unset CFG_SETTINGS
       unset CFG_KEYB
+      unset CFG_EXT
       while [ $# -gt 0 ]; do
         case "$1" in
           -h|--help) print_help; exit 0;;
@@ -978,6 +1083,14 @@ cli_entry(){
           --keybindings=*)
             CFG_KEYB="${1#*=}"
             ;;
+          --extensions)
+            shift || true
+            CFG_EXT="${1:-}"
+            [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --extensions=*)
+            CFG_EXT="${1#*=}"
+            ;;
           *)
             CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
@@ -995,13 +1108,16 @@ cli_entry(){
         else
           merge_codestrap_settings
         fi
-
         if [ -n "${CFG_KEYB+x}" ]; then
           if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
         else
           merge_codestrap_keybindings
         fi
-
+        if [ -n "${CFG_EXT+x}" ]; then
+          if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
+        else
+          merge_codestrap_extensions
+        fi
         install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
@@ -1040,6 +1156,7 @@ case "${1:-init}" in
     init_default_password
     merge_codestrap_settings
     merge_codestrap_keybindings
+    merge_codestrap_extensions
     install_config_shortcuts
     autorun_env_if_present
     log "Codestrap initialized. Use: codestrap -h"
