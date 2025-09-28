@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.2.2}"
+VERSION="${GITSTRAP_VERSION:-0.2.3}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -40,6 +40,7 @@ Usage:
   gitstrap --env                         # bootstrap using environment variables only
   gitstrap [flags...]                    # non-interactive bootstrap using provided flags/env
   gitstrap passwd                        # interactive password change (secure prompts)
+  gitstrap settings-merge                # merge gitstrap settings.json into user settings.json and exit
   gitstrap -h | --help                   # help
   gitstrap -v | --version                # version
 
@@ -64,6 +65,7 @@ Examples:
   gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   gitstrap --pull-existing-repos false
   gitstrap passwd
+  gitstrap settings-merge
 HLP
 }
 
@@ -337,41 +339,30 @@ install_settings_from_repo(){
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Assemble JSONC output
+  # Assemble JSONC output with tidy commas
   {
     echo "{"
     echo "  // START gitstrap settings"
-
-    # Managed (repo) keys
     if [ "$mcount" -gt 0 ]; then
       jq -r -j '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_managed"
-      printf ",\n"
+      echo ","
     fi
-
-    # gitstrap_preserve (append comma here iff there are rest keys)
     echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
-    printf '  "gitstrap_preserve": %s' "$preserve_json"
+    printf '  "gitstrap_preserve": %s\n' "$preserve_json"
     if [ "$rcount" -gt 0 ]; then
-      printf ',\n'
-    else
-      printf '\n'
-    fi
-
-    echo "  // END gitstrap settings"
-
-    # Rest of user settings (no leading comma line; we already emitted it after gitstrap_preserve when needed)
-    if [ "$rcount" -gt 0 ]; then
+      echo "  // END gitstrap settings,"
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_rest"
+    else
+      echo "  // END gitstrap settings"
     fi
-
     echo "}"
   } > "$SETTINGS_PATH"
 
@@ -394,7 +385,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.2.2}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.2.3}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -436,6 +427,7 @@ bootstrap_from_args(){
       -v|--version)  print_version; exit 0;;
       --env)         USE_ENV=true;;
       passwd)        password_change_interactive; exit 0;;
+      settings-merge) install_settings_from_repo; exit 0;;
       --*)
         key="${1#--}"; shift || true
         val="${1:-}"
@@ -496,6 +488,7 @@ cli_entry(){
     -v|--version) print_version; exit 0;;
     --env)        bootstrap_env_only; exit 0;;
     passwd)       password_change_interactive; exit 0;;
+    settings-merge) install_settings_from_repo; exit 0;;
     *)            bootstrap_from_args "$@";;
   esac
 }
