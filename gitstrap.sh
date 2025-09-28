@@ -265,7 +265,7 @@ install_settings_from_repo(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Normalize user settings to JSON
+  # Normalize user settings to JSON (handle JSONC)
   tmp_user_json="$(mktemp)"
   if [ ! -f "$SETTINGS_PATH" ]; then
     printf '{}\n' >"$tmp_user_json"
@@ -277,9 +277,14 @@ install_settings_from_repo(){
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
   # Validate repo settings
-  jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1 || { warn "repo settings JSON invalid; skipping"; rm -f "$tmp_user_json"; return 0; }
+  if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
+    warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
+    rm -f "$tmp_user_json" 2>/dev/null || true
+    return 0;
+  fi
 
   RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
+
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
   else
@@ -295,46 +300,67 @@ install_settings_from_repo(){
       def arr(v): if (v|type)=="array" then v else [] end;
       def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
+
       (. // {}) as $user
       | ($user.gitstrap_preserve // []) as $pres
+
+      # remove keys previously managed but no longer in repo
       | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
+
+      # remove current repo keys so we can re-add them
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
+
+      # re-add repo keys, keep user values for preserved ones
       | reduce $rskeys[] as $k (
           $user_without_repo;
           .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
         )
+
+      # ensure gitstrap_preserve exists
       | .gitstrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # Build the "rest" object = merged minus (repo keys + gitstrap_preserve)
-  rest_json="$(jq --argjson ks "$RS_KEYS_JSON" '
-      def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
-      delKeys(.; ($ks + ["gitstrap_preserve"]))
-    ' "$tmp_merged")"
+  # Managed-only object (repo keys only)
+  tmp_managed="$(mktemp)"
+  jq \
+    --argjson ks "$RS_KEYS_JSON" '
+      reduce $ks[] as $k ({}; .[$k] = (.[$k]))
+    ' "$tmp_merged" > "$tmp_managed"
 
-  # Emit JSONC with comments INSIDE the root object, managed group first
+  # Rest object = merged minus (repo keys + gitstrap_preserve)
+  tmp_rest="$(mktemp)"
+  jq --argjson ks "$RS_KEYS_JSON" '
+    def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
+    delKeys(.; ($ks + ["gitstrap_preserve"]))
+  ' "$tmp_merged" > "$tmp_rest"
+
+  preserve_json="$(jq -c '.gitstrap_preserve // []' "$tmp_merged")"
+
+  # Assemble JSONC output: single root, inline gitstrap section, then other keys
   {
     echo "{"
     echo "  //gitstrap settings start"
-    # print managed repo keys in repo key order
-    jq -r --argjson ks "$RS_KEYS_JSON" --argjson m "$(cat "$tmp_merged")" '
-      ($ks)[] | select($m[.] != null)
-      | "  " + @json + ": " + ($m[.] | tojson) + ","
-    ' /dev/null
-    echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
-    jq -r --argjson m "$(cat "$tmp_merged")" '
-      "  \"gitstrap_preserve\": " + (($m.gitstrap_preserve // []) | tojson)
-    ' /dev/null
-    echo "  //gitstrap settings end"
 
-    # Append remaining user keys, if any, with a comma separator
-    if [ "$(printf '%s' "$rest_json" | jq 'keys|length')" -gt 0 ]; then
-      echo "  ,"
-      printf '%s' "$rest_json" | jq -r '
+    if [ "$(jq 'length' "$tmp_managed")" -gt 0 ]; then
+      jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
-      '
+      ' "$tmp_managed"
+      echo ","
+    fi
+
+    echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
+    printf '  "gitstrap_preserve": %s\n' "$preserve_json"
+    echo "  //gitstrap settings end"
+
+    if [ "$(jq 'keys|length' "$tmp_rest")" -gt 0 ]; then
+      echo "  ,"
+      jq -r '
+        to_entries
+        | map("  " + (.key|@json) + ": " + (.value|tojson))
+        | join(",\n")
+      ' "$tmp_rest"
       echo ""
     else
       echo ""
@@ -345,7 +371,7 @@ install_settings_from_repo(){
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_merged" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -375,7 +401,7 @@ bootstrap_interactive(){
   PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REOS PULL_EXISTING_REPOS
   gitstrap_run; log "bootstrap complete"
 }
 bootstrap_env_only(){
@@ -447,7 +473,7 @@ bootstrap_from_args(){
 }
 
 cli_entry(){
-  print_logo  # ensure ASCII art prints once for ANY invocation of gitstrap
+  print_logo
   if [ $# -eq 0 ]; then
     if is_tty; then bootstrap_interactive; else
       echo "No TTY detected. Provide flags or use --env. Examples:
