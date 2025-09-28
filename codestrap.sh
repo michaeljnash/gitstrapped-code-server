@@ -515,7 +515,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Load USER keybindings (allow JSONC comments)
+  # Load USER keybindings (allow JSONC comments only)
   tmp_user_json="$(mktemp)"
   tmp_user_stripped="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
@@ -538,7 +538,7 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # Load REPO keybindings (allow JSONC comments)
+  # Load REPO keybindings (allow JSONC comments only)
   tmp_repo_json="$(mktemp)"
   strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
   if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
@@ -577,16 +577,19 @@ merge_codestrap_keybindings(){
       ]
   ' "$tmp_repo_json" > "$tmp_managed_arr"
 
-  # Repo keys set
-  tmp_repo_keys="$(mktemp)"
-  jq -r '[ .[] | select(type=="object" and has("key")) | .key ] | unique | .[]' "$tmp_repo_json" > "$tmp_repo_keys"
+  # Repo keys as a REAL JSON array (fixes the error)
+  repo_keys_json="$(jq -c '[ .[] | select(type=="object" and has("key")) | .key ] | unique' "$tmp_repo_json")"
 
-  # Rest: keep user items except the preserve object and any item whose key is also in repo (avoid duplicates)
+  # Rest: keep user items except the preserve object and any item whose key is in repo (to avoid dupes)
   tmp_rest_arr="$(mktemp)"
-  jq --slurpfile repokeys "$tmp_repo_keys" '
+  jq --argjson repokeys "$repo_keys_json" '
     [ .[]
       | select( (type=="object" and has("codestrap_preserve")) | not )
-      | select( (type=="object" and has("key")) | not or ((.key as $k | ($repokeys[] | contains([$k])) | not)) )
+      | select(
+          (type=="object" and has("key"))
+          | not
+          or ( .key as $k | ($repokeys | index($k)) | not )
+        )
     ]
   ' "$tmp_user_json" > "$tmp_rest_arr"
 
@@ -599,7 +602,7 @@ merge_codestrap_keybindings(){
       ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments and ensure END marker is after the preserve object (even if array is multi-line)
+  # Inject comments and ensure END marker is after preserve object
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
@@ -646,7 +649,7 @@ merge_codestrap_keybindings(){
   mv -f "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_user_map" "$tmp_managed_arr" "$tmp_repo_keys" "$tmp_rest_arr" "$tmp_final" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_user_map" "$tmp_managed_arr" "$tmp_rest_arr" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
 
