@@ -2,10 +2,13 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.1}"
+VERSION="${GITSTRAP_VERSION:-0.3.2}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
+red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
+ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
+err(){ printf "%s\n" "$(red "[gitstrap][ERROR] $*")" >&2; }
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
@@ -105,12 +108,10 @@ FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
 # Workspace + repos path joining (REPOS_SUBDIR always relative)
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
-# normalize: remove trailing slashes
 WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
 ensure_dir "$WORKSPACE_DIR"
 
 REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
-# normalize: strip leading/trailing slashes to force relative
 REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
 
 if [ -n "$REPOS_SUBDIR" ]; then
@@ -132,6 +133,10 @@ EXT_PATH="$USER_DIR/extensions.json"
 
 REPO_SETTINGS_SRC="$HOME/gitstrap/settings.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
+
+# Track origins for nicer errors
+ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-}"
+ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-}"
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
@@ -191,6 +196,40 @@ init_default_password(){
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
 }
 
+# ===== GitHub validation =====
+validate_github_username(){
+  [ -n "${GH_USERNAME:-}" ] || return 0
+  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GH_USERNAME}" || echo "000")"
+  if [ "$code" = "404" ]; then
+    src="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
+    err "GitHub username '${GH_USERNAME}' appears invalid (HTTP 404). Check ${src}."
+  elif [ "$code" != "200" ]; then
+    warn "Could not verify GitHub username '${GH_USERNAME}' (HTTP $code)."
+  fi
+}
+
+validate_github_pat(){
+  [ -n "${GH_PAT:-}" ] || return 0
+  # Check token validity
+  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user || echo "000")"
+  src="${ORIGIN_GH_PAT:-env GH_PAT}"
+  if [ "$code" = "401" ]; then
+    err "Provided GH_PAT (${src}) is invalid or expired (HTTP 401). Please provide a valid classic PAT with scopes: user:email, admin:public_key."
+    return 1
+  elif [ "$code" = "403" ]; then
+    err "Provided GH_PAT (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
+    return 1
+  elif [ "$code" != "200" ]; then
+    warn "Could not verify GH_PAT (${src}) (HTTP $code)."
+    return 0
+  fi
+  # Scope hint (best-effort)
+  headers="$(curl -fsS -D - -o /dev/null -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user 2>/dev/null || true)"
+  scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
+  echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GH_PAT may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: ${scopes:-none}")"
+  echo "$scopes" | grep -q 'user:email' || warn "$(ylw "GH_PAT may be missing 'user:email' (needed to resolve your primary email). Current scopes: ${scopes:-none}")"
+}
+
 # ===== password change =====
 password_change_interactive(){
   command -v argon2 >/dev/null 2>&1 || { echo "argon2 not found." >&2; return 1; }
@@ -239,7 +278,7 @@ clone_one(){
     *"git@github.com:"*) url="$repo"; name="$(basename "$repo" .git)";;
     http*://github.com/*|ssh://git@github.com/*) name="$(basename "$repo" .git)"; owner_repo="$(echo "$repo" | sed -E 's#^https?://github\.com/##; s#^ssh://git@github\.com/##')"; owner_repo="${owner_repo%.git}"; url="git@github.com:${owner_repo}.git";;
     */*) name="$(basename "$repo")"; url="git@github.com:${repo}.git";;
-    *) log "skip invalid spec: $spec"; return 0;;
+    *) err "Invalid repo spec: '$spec'. Use owner/repo, owner/repo#branch, or a GitHub URL."; return 0;;
   esac
   dest="${BASE}/${name}"
   safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
@@ -254,8 +293,8 @@ clone_one(){
     fi
   else
     log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
-    if [ -n "$branch" ]; then git clone --branch "$branch" --single-branch "$url" "$dest" || { warn "clone failed: $spec"; return 0; }
-    else git clone "$url" "$dest" || { warn "clone failed: $spec"; return 0; }
+    if [ -n "$branch" ]; then git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 0; }
+    else git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 0; }
     fi
   fi
   chown -R "$PUID:$PGID" "$dest" || true
@@ -264,6 +303,11 @@ gitstrap_run(){
   GH_USERNAME="${GH_USERNAME:-}"; GH_PAT="${GH_PAT:-}"
   GIT_NAME="${GIT_NAME:-${GH_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
   GH_REPOS="${GH_REPOS:-}"; PULL_EXISTING_REPOS="${PULL_EXISTING_REPOS:-true}"
+
+  # Validate inputs early for clearer UX
+  validate_github_username || true
+  validate_github_pat || true
+
   git config --global init.defaultBranch main || true
   git config --global pull.ff only || true
   git config --global advice.detachedHead false || true
@@ -290,7 +334,6 @@ install_settings_from_repo(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Normalize user settings to JSON (handle JSONC)
   tmp_user_json="$(mktemp)"
   if [ ! -f "$SETTINGS_PATH" ] || ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
     if [ -f "$SETTINGS_PATH" ]; then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
@@ -299,7 +342,6 @@ install_settings_from_repo(){
   fi
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
-  # Validate repo settings
   if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
     rm -f "$tmp_user_json" 2>/dev/null || true
@@ -307,14 +349,12 @@ install_settings_from_repo(){
   fi
 
   RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
-
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
   else
     OLD_KEYS_JSON='[]'
   fi
 
-  # Merge with preserve semantics
   tmp_merged="$(mktemp)"
   jq \
     --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
@@ -326,24 +366,15 @@ install_settings_from_repo(){
 
       (. // {}) as $user
       | ($user.gitstrap_preserve // []) as $pres
-
-      # remove keys previously managed but no longer in repo
       | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
-
-      # remove current repo keys so we can re-add them
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
-
-      # re-add repo keys, keep user values for preserved ones
       | reduce $rskeys[] as $k (
           $user_without_repo;
           .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
         )
-
-      # ensure gitstrap_preserve exists
       | .gitstrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # Managed-only object (repo keys only)
   tmp_managed="$(mktemp)"
   jq \
     --argjson ks "$RS_KEYS_JSON" '
@@ -351,7 +382,6 @@ install_settings_from_repo(){
       | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
     ' "$tmp_merged" > "$tmp_managed"
 
-  # Rest object = merged minus (repo keys + gitstrap_preserve)
   tmp_rest="$(mktemp)"
   jq --argjson ks "$RS_KEYS_JSON" '
     def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
@@ -362,7 +392,6 @@ install_settings_from_repo(){
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Assemble JSONC output with tidy commas
   {
     echo "{"
     echo "  // START gitstrap settings"
@@ -400,13 +429,11 @@ install_settings_from_repo(){
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config-shortcuts"
   ensure_dir "$d"
-  # Ensure targets exist
   [ -f "$SETTINGS_PATH" ]   || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH" ]      || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH" ]       || printf '[]\n' >"$KEYB_PATH"
   [ -f "$EXT_PATH" ]        || printf '{}\n' >"$EXT_PATH"
 
-  # Helper: create/update symlink
   mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
   mklink "$SETTINGS_PATH" "$d/settings.json"
@@ -430,26 +457,31 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.1}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.2}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
+
 bootstrap_interactive(){
   bootstrap_banner
-  GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
-  [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
+  GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
+  [ -n "${GH_PAT:-}" ] || { GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"; }
   GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-$GH_USERNAME}]: " "${GIT_NAME:-$GH_USERNAME}")"
   GIT_EMAIL="$(prompt_def "Git email (blank=auto resolve GH email): " "${GIT_EMAIL:-}")"
   GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
   PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS ORIGIN_GH_USERNAME ORIGIN_GH_PAT
   gitstrap_run; log "bootstrap complete"
 }
+
 bootstrap_env_only(){
+  ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
+  ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-env GH_PAT}"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (env)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (env)." >&2; exit 2; }
+  export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
   gitstrap_run; log "bootstrap complete (env)"
 }
 
@@ -459,7 +491,12 @@ set_flag_env(){ # $1=flag key (already without leading --), $2=value
   norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"
   envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"
   case " $ALLOWED_FLAG_VARS " in
-    *" $envname "*) eval "export $envname=\$2";;
+    *" $envname "*)
+      eval "export $envname=\$2"
+      [ "$envname" = "GH_USERNAME" ] && ORIGIN_GH_USERNAME="--gh-username"
+      [ "$envname" = "GH_PAT" ] && ORIGIN_GH_PAT="--gh-pat"
+      export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
+      ;;
     *) warn "Unknown or disallowed flag '--$1'"; print_help; exit 1;;
   esac
 }
@@ -499,11 +536,11 @@ bootstrap_from_args(){
     shift || true
   done
 
-  # Recompute BASE if flags changed WORKSPACE_DIR/REPOS_SUBDIR
   recompute_base
 
   if [ "$USE_ENV" = "true" ]; then
-    : # env-only
+    ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
+    ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-env GH_PAT}"
   else
     if ! is_tty; then
       echo "No TTY available for prompts. Use flags or --env. Examples:
@@ -513,8 +550,8 @@ bootstrap_from_args(){
       exit 3
     fi
     bootstrap_banner
-    GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"
-    [ -n "${GH_PAT:-}" ] || GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"
+    GH_USERNAME="${GH_USERNAME:-$(prompt_def "GitHub username: " "")}"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
+    [ -n "${GH_PAT:-}" ] || { GH_PAT="$(prompt_secret "GitHub PAT (classic: user:email, admin:public_key): ")"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"; }
     GIT_NAME="$(prompt_def "Git name [${GIT_NAME:-${GH_USERNAME:-}}]: " "${GIT_NAME:-${GH_USERNAME:-}}")"
     GIT_EMAIL="$(prompt_def "Git email (blank=auto): " "${GIT_EMAIL:-}")"
     GH_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]): " "${GH_REPOS:-}")"
@@ -524,7 +561,7 @@ bootstrap_from_args(){
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
 
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GH_USERNAME ORIGIN_GH_PAT
   gitstrap_run
   log "bootstrap complete"
 }
