@@ -362,8 +362,8 @@ codestrap_run(){
   fi
 }
 
-# ===== JSONC → JSON =====
-strip_jsonc_to_json(){ sed -e 's://.*$::' -e '/\/\*/,/\*\//d' "$1"; }
+# ===== JSONC → JSON (comments only) =====
+strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
 install_settings_from_repo(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
@@ -373,14 +373,18 @@ install_settings_from_repo(){
 
   tmp_user_json="$(mktemp)"
 
-  # Read user settings.json (STRICT JSON ONLY; do not auto-repair)
+  # Read user settings.json — allow JSONC comments (strip first), but NO other repairs.
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
-      CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed and could not be auto-repaired; aborting merge to avoid data loss."; CTX_TAG=""
-      rm -f "$tmp_user_json" 2>/dev/null || true
-      return 1
+      # Try stripping ONLY comments; still fail if malformed (e.g., trailing commas).
+      strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
+      if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+        rm -f "$tmp_user_json" 2>/dev/null || true
+        return 1
+      fi
     fi
   else
     printf '{}\n' >"$tmp_user_json"
