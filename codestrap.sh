@@ -4,6 +4,15 @@ set -eu
 
 VERSION="${CODESTRAP_VERSION:-0.3.8}"
 
+# Resolve absolute path to this script for the CLI shim
+case "$0" in
+  /*) SELF_PATH="$0" ;;
+  *)
+    _d="$(dirname "$0")"
+    SELF_PATH="$(cd "${_d:-.}" 2>/dev/null && pwd -P)/$(basename "$0")"
+    ;;
+esac
+
 # ===== context-aware logging =====
 PROMPT_TAG=""     # shown before interactive questions
 CTX_TAG=""        # shown before status/warn/error lines
@@ -41,14 +50,14 @@ normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:
 prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
 
 print_help(){
-cat <<'HLP'
+cat <<HLP
 codestrap — bootstrap GitHub + manage code-server auth
 
 Usage (subcommands):
   codestrap                      # Interactive hub: ask GitHub? Config? Change password?
   codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
-  codestrap extensions [flags]   # Install/upgrade extensions from extensions.json
+  codestrap extensions [flags...]# Install/update VS Code extensions from merged extensions.json
   codestrap passwd               # Interactive password change (secure prompts)
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
@@ -70,18 +79,14 @@ Flags for 'codestrap config' (booleans; supply only the ones you want to skip pr
   --extensions <true|false>     Merge strapped extensions.json into user extensions.json
                                 (Interactive default: ask; Non-interactive default: true)
 
-Flags for 'codestrap extensions':
-  --install all|missing         Install from merged extensions.json:
-                                  all     → install missing + update already-installed
-                                  missing → install only those not already installed
+Subcommand 'codestrap extensions':
+  --install all       Install/upgrade ALL recommendations
+  --install missing   Install only recommendations not yet installed
+  (no flags)          Interactive picker (TTY only)
 
-Environment (init-time):
-  INSTALL_EXTENSIONS=all|missing|none  # During 'init', post-merge extension action
-                                       # all/missing → install as above
-                                       # none or blank → do not install anything
-
-Interactive tip (github):
-  At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
+Env (init-time):
+  INSTALL_EXTENSIONS=all|missing|none      Install extensions automatically during 'init'
+                                           (default: none if unset)
 
 Examples:
   codestrap
@@ -202,9 +207,9 @@ init_default_password(){
 
 # ===== helpers for interactive -e/--env =====
 env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true; }
-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
@@ -704,11 +709,9 @@ merge_codestrap_extensions(){
     echo "{"
     echo '  "recommendations": ['
     echo '    // START codestrap extensions'
-    REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
-      REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
     echo '    // END codestrap extensions'
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
@@ -732,67 +735,114 @@ merge_codestrap_extensions(){
   log "merged extensions.json → $EXT_PATH"
 }
 
-# ===== Extensions install/update helpers =====
-find_vscode_cli(){
-  for b in code-server code; do
-    if command -v "$b" >/dev/null 2>&1; then echo "$b"; return 0; fi
-  done
-  return 1
-}
-
-list_installed_extensions(){
-  CLI="$(find_vscode_cli || true)" || return 0
-  "$CLI" --list-extensions 2>/dev/null || true
-}
-
-get_merged_recommendations(){
-  # prints newline-separated list from merged $EXT_PATH
-  if [ ! -f "$EXT_PATH" ]; then return 0; fi
-  # strip comments and extract array
-  awk '
-    BEGIN{ inArr=0 }
-    /"recommendations"[[:space:]]*:/ { inObj=1 }
-    inObj && /\[/ { inArr=1 }
-    inArr {
-      if ($0 ~ /^\s*\/\//) next
-      print $0
-      if ($0 ~ /\]/) { exit }
-    }
-  ' "$EXT_PATH" | sed '1,/"recommendations"/d' | tr -d '\r' | \
-  sed 's://.*$::' | tr -d ' ' | tr -d '\t' | tr -d '\n' | \
-  sed 's/^\[//; s/\]$//' | tr ',' '\n' | sed 's/^"//; s/"$//' | sed '/^$/d' || true
-}
-
-install_extension_id(){
-  id="$1"; mode="${2:-missing}" # mode=all (use --force), missing (no --force)
-  CLI="$(find_vscode_cli || true)" || { warn "code/code-server CLI not found; cannot install '$id'"; return 1; }
-  if [ "$mode" = "all" ]; then
-    "$CLI" --install-extension "$id" --force >/dev/null 2>&1 && log "extension updated/installed: $id" || warn "failed to install/update: $id"
+# ===== extensions installer helpers =====
+_code_cli(){
+  if command -v code-server >/dev/null 2>&1; then
+    echo "code-server"
+  elif command -v code >/dev/null 2>&1; then
+    echo "code"
   else
-    "$CLI" --install-extension "$id" >/dev/null 2>&1 && log "extension installed: $id" || warn "failed to install: $id"
+    echo ""
   fi
 }
 
-extensions_cmd(){
-  MODE=""
+_extensions_read_recs(){ # prints list of IDs (one per line)
+  if [ ! -f "$EXT_PATH" ]; then return 0; fi
+  tmp="$(mktemp)"
+  if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
+    cp "$EXT_PATH" "$tmp"
+  else
+    strip_jsonc_to_json "$EXT_PATH" >"$tmp" || true
+    jq -e . "$tmp" >/dev/null 2>&1 || { err "extensions.json not parseable for installer"; rm -f "$tmp"; return 1; }
+  fi
+  jq -r '.recommendations // [] | .[] | strings' "$tmp" | sed '/^[[:space:]]*$/d'
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+_extensions_installed(){ # prints installed IDs (one per line)
+  cli="$(_code_cli)"; [ -n "$cli" ] || { err "code(-server) CLI not found; cannot manage extensions"; return 1; }
+  "$cli" --list-extensions 2>/dev/null | sed '/^[[:space:]]*$/d' || true
+}
+
+_extensions_install_one(){
+  id="$1"
+  cli="$(_code_cli)"; [ -n "$cli" ] || return 1
+  "$cli" --install-extension "$id" >/dev/null 2>&1 && { log "extension installed/updated: $id"; return 0; }
+  warn "failed to install: $id"; return 1
+}
+
+extensions_install_mode(){ # $1: all|missing
+  mode="${1:-missing}"
+  recs="$(mktemp)"; _extensions_read_recs >"$recs" || { rm -f "$recs"; return 1; }
+  inst="$(mktemp)"; _extensions_installed >"$inst" || true
+
+  rc=0
+  if [ "$mode" = "all" ]; then
+    while IFS= read -r id; do [ -n "$id" ] || continue; _extensions_install_one "$id" || rc=1; done < "$recs"
+  else
+    # missing
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      if ! grep -qx "$id" "$inst" 2>/dev/null; then _extensions_install_one "$id" || rc=1; else log "already installed: $id"; fi
+    done < "$recs"
+  fi
+
+  rm -f "$recs" "$inst" 2>/dev/null || true
+  return $rc
+}
+
+extensions_interactive(){
+  if ! is_tty; then
+    err "No TTY for interactive extensions flow. Use: codestrap extensions --install all|missing"
+    return 2
+  fi
+
+  PROMPT_TAG="[Extensions] ? "
+  CTX_TAG="[Extensions]"
+
+  # Show summary
+  recs="$(mktemp)"; _extensions_read_recs >"$recs" || { rm -f "$recs"; CTX_TAG=""; PROMPT_TAG=""; return 1; }
+  inst="$(mktemp)"; _extensions_installed >"$inst" || true
+
+  total_recs=$(wc -l < "$recs" | tr -d ' ')
+  total_inst=$(wc -l < "$inst" | tr -d ' ')
+  missing=$(comm -23 <(sort "$recs") <(sort "$inst") | wc -l | tr -d ' ' || echo 0)
+
+  log "recommendations: $total_recs, installed: $total_inst, missing: $missing"
+  echo "Recommended extensions:"; cat "$recs" | sed 's/^/  - /'
+
+  ans="$(prompt_def "Install (A)ll, (M)issing only, or (S)kip? [A/m/s]" "A")"
+  case "$(echo "$ans" | tr '[:upper:]' '[:lower:]')" in
+    a|all) extensions_install_mode all ;;
+    m|missing) extensions_install_mode missing ;;
+    s|skip|n|no) log "skipped extensions install" ;;
+    *) log "unrecognized choice; skipping" ;;
+  esac
+
+  rm -f "$recs" "$inst" 2>/dev/null || true
+  CTX_TAG=""; PROMPT_TAG=""
+}
+
+extensions_from_flags(){ # parse flags for extensions subcommand
+  install_mode=""
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)
-        cat <<'E'
-codestrap extensions:
-  --install all|missing   Install extensions from merged extensions.json
-                          all     → install missing + update installed
-                          missing → install only those not installed
-  (no flags)              Interactive: prompt for missing and optional updates
-E
+        cat <<'EH'
+Usage: codestrap extensions [--install all|missing]
+
+  --install all       Install/upgrade ALL recommended extensions
+  --install missing   Install only recommendations not yet installed
+  (no flags)          Interactive chooser (TTY)
+EH
         return 0;;
       --install)
         shift || true
-        MODE="${1:-}"
-        [ -n "$MODE" ] || { err "Flag '--install' requires 'all' or 'missing'"; return 2; }
+        install_mode="${1:-}"
+        [ -n "$install_mode" ] || { err "Flag '--install' requires 'all' or 'missing'"; return 2; }
         ;;
       --install=*)
-        MODE="${1#*=}"
+        install_mode="${1#*=}"
         ;;
       *)
         err "Unknown flag for 'extensions': $1"; return 2;;
@@ -800,52 +850,14 @@ E
     shift || true
   done
 
-  RECS="$(get_merged_recommendations || true)"
-  [ -n "${RECS:-}" ] || { log "no recommendations in $EXT_PATH"; return 0; }
-
-  INSTALLED="$(list_installed_extensions || true)"
-  # normalize into grep-friendly forms
-  missing_list=""
-  for id in $RECS; do
-    echo "$INSTALLED" | grep -qx "$id" || missing_list="${missing_list}${id}\n"
-  done
-
-  if [ -n "$MODE" ]; then
-    case "$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')" in
-      all)
-        for id in $RECS; do install_extension_id "$id" all; done
-        ;;
-      missing)
-        # shellcheck disable=SC1003
-        printf "%b" "${missing_list:-}" | while IFS= read -r id; do [ -n "$id" ] && install_extension_id "$id" missing; done
-        ;;
-      *)
-        err "Invalid mode '$MODE' (use all|missing)"; return 2;;
+  if [ -n "$install_mode" ]; then
+    case "$install_mode" in
+      all|missing) extensions_install_mode "$install_mode" ;;
+      *) err "Invalid value for --install: $install_mode (use 'all' or 'missing')"; return 2;;
     esac
-    return 0
-  fi
-
-  # Interactive
-  PROMPT_TAG="[Extensions] ? "
-  CTX_TAG="[Extensions]"
-  if [ -n "$missing_list" ]; then
-    if [ "$(prompt_yn "Install missing extensions now? (Y/n)" "y")" = "true" ]; then
-      printf "%b" "$missing_list" | while IFS= read -r id; do [ -n "$id" ] && install_extension_id "$id" missing; done
-    else
-      log "skipped install of missing"
-    fi
   else
-    log "no missing extensions"
+    extensions_interactive
   fi
-  if [ -n "$INSTALLED" ]; then
-    if [ "$(prompt_yn "Update already-installed extensions to latest? (y/N)" "n")" = "true" ]; then
-      for id in $INSTALLED; do install_extension_id "$id" all; done
-    else
-      log "skipped updates"
-    fi
-  fi
-  PROMPT_TAG=""
-  CTX_TAG=""
 }
 
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
@@ -874,44 +886,23 @@ install_config_shortcuts(){
 
 # ===== CLI helpers =====
 install_cli_shim(){
-  # System-wide install when root, else user-level install into ~/.local/bin
+  # Install a launcher that calls THIS script directly (no hard-coded paths)
   if require_root; then
     mkdir -p /usr/local/bin
-    cat >/usr/local/bin/codestrap <<'EOF'
+    cat >/usr/local/bin/codestrap <<EOF
 #!/usr/bin/env sh
 set -eu
-for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
-  if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ]; then
-      exec "$TARGET" cli "$@"
-    else
-      exec sh "$TARGET" cli "$@"
-    fi
-  fi
-done
-echo "[codestrap][ERROR] launcher script not found." >&2
-exit 127
+exec "$SELF_PATH" cli "\$@"
 EOF
     chmod 755 /usr/local/bin/codestrap
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
-    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
-    cat >"$HOME/.local/bin/codestrap" <<'EOF'
+    cat >"$HOME/.local/bin/codestrap" <<EOF
 #!/usr/bin/env sh
 set -eu
-for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
-  if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ]; then
-      exec "$TARGET" cli "$@"
-    else
-      exec sh "$TARGET" cli "$@"
-    fi
-  fi
-done
-echo "[codestrap][ERROR] launcher script not found." >&2
-exit 127
+exec "$SELF_PATH" cli "\$@"
 EOF
     chmod 755 "$HOME/.local/bin/codestrap"
     case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) log "note: ensure \$HOME/.local/bin is on PATH to use 'codestrap' command";; esac
@@ -1020,7 +1011,6 @@ config_hybrid(){
     else
       log "skipped settings merge"
     fi
-  end
   fi
 
   # --keybindings
@@ -1126,7 +1116,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner()
+    bootstrap_banner
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -1250,7 +1240,7 @@ cli_entry(){
       ;;
     extensions)
       shift || true
-      extensions_cmd "$@"
+      extensions_from_flags "$@"
       ;;
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
@@ -1277,22 +1267,15 @@ autorun_env_if_present(){
   fi
 }
 
-autorun_extensions_if_env(){
-  MODE_RAW="${INSTALL_EXTENSIONS:-}"
-  [ -n "$MODE_RAW" ] || { log "INSTALL_EXTENSIONS not set → skip extension install"; return 0; }
-  MODE="$(printf '%s' "$MODE_RAW" | tr '[:upper:]' '[:lower:]')"
-  case "$MODE" in
-    all|missing)
-      CTX_TAG="[Extensions]"
-      log "INIT: installing extensions (mode=${MODE})"
-      extensions_cmd --install "$MODE" || true
-      CTX_TAG=""
-      ;;
-    none|"")
-      log "INIT: extensions install disabled (INSTALL_EXTENSIONS=none)"
-      ;;
+# ===== init-time extensions auto-install via env =====
+autorun_install_extensions(){
+  mode="$(printf "%s" "${INSTALL_EXTENSIONS:-none}" | tr '[:upper:]' '[:lower:]')"
+  case "$mode" in
+    all)     log "INSTALL_EXTENSIONS=all → installing/updating all recommendations"; extensions_install_mode all || true ;;
+    missing) log "INSTALL_EXTENSIONS=missing → installing missing recommendations"; extensions_install_mode missing || true ;;
+    none|"") log "INSTALL_EXTENSIONS=none (or unset) → not installing extensions" ;;
     *)
-      warn "INSTALL_EXTENSIONS must be 'all', 'missing', or 'none' (got '${MODE_RAW}')"
+      warn "INSTALL_EXTENSIONS has invalid value: '$mode' (use all|missing|none); skipping"
       ;;
   esac
 }
@@ -1308,7 +1291,7 @@ case "${1:-init}" in
     merge_codestrap_extensions
     install_config_shortcuts
     autorun_env_if_present
-    autorun_extensions_if_env
+    autorun_install_extensions
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
