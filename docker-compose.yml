@@ -24,9 +24,9 @@ services:
       WORKSPACE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
-      
+
     volumes:
-      - code-config:/config12345
+      - code-config:/config1234
       - code-config:/config
       - projects:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
