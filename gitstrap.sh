@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.0}"
+VERSION="${GITSTRAP_VERSION:-0.3.1}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -31,6 +31,7 @@ prompt_secret(){
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
 
+# ---- banner ----
 print_logo(){
   is_tty || return 0
   cat <<'LOGO'
@@ -70,7 +71,7 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   --pull-existing-repos | --pull_existing_repos <true|false> → PULL_EXISTING_REPOS (default: true)
   --workspace-dir       | --workspace_dir <dir>              → WORKSPACE_DIR (default: /config/workspace)
-  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR (default: repos; relative to WORKSPACE_DIR)
+  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR (default: repos; treated RELATIVE to WORKSPACE_DIR, even if it starts with '/')
   --env                                                Use environment variables only (no prompts)
 
 Notes:
@@ -83,7 +84,7 @@ Examples:
   GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
   gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   gitstrap --pull-existing-repos false
-  gitstrap --workspace-dir /config/workspace --repos-subdir repos
+  gitstrap --workspace-dir /config/workspace --repos-subdir /repos
   gitstrap settings-merge
   gitstrap passwd
 HLP
@@ -102,13 +103,21 @@ LOCK_FILE="$LOCK_DIR/init-gitstrap.lock"
 PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
-WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"; ensure_dir "$WORKSPACE_DIR"
+# Workspace + repos path joining (REPOS_SUBDIR always relative)
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+# normalize: remove trailing slashes
+WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
+ensure_dir "$WORKSPACE_DIR"
+
 REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
-# Enforce relative REPOS_SUBDIR (warn but allow absolute if provided)
-case "$REPOS_SUBDIR" in
-  /*) warn "REPOS_SUBDIR is absolute; will bypass WORKSPACE_DIR: $REPOS_SUBDIR"; BASE="$REPOS_SUBDIR" ;;
-  *) BASE="$WORKSPACE_DIR/$REPOS_SUBDIR" ;;
-esac
+# normalize: strip leading/trailing slashes to force relative
+REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
+
+if [ -n "$REPOS_SUBDIR" ]; then
+  BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
+else
+  BASE="${WORKSPACE_DIR}"
+fi
 ensure_dir "$BASE"
 
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
@@ -421,7 +430,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.0}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.1}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -455,6 +464,20 @@ set_flag_env(){ # $1=flag key (already without leading --), $2=value
   esac
 }
 
+recompute_base(){
+  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+  WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
+  ensure_dir "$WORKSPACE_DIR"
+  REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
+  REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
+  if [ -n "$REPOS_SUBDIR" ]; then
+    BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
+  else
+    BASE="${WORKSPACE_DIR}"
+  fi
+  ensure_dir "$BASE"
+}
+
 bootstrap_from_args(){
   USE_ENV=false
   while [ $# -gt 0 ]; do
@@ -477,13 +500,7 @@ bootstrap_from_args(){
   done
 
   # Recompute BASE if flags changed WORKSPACE_DIR/REPOS_SUBDIR
-  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"; ensure_dir "$WORKSPACE_DIR"
-  REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
-  case "$REPOS_SUBDIR" in
-    /*) warn "REPOS_SUBDIR is absolute; will bypass WORKSPACE_DIR: $REPOS_SUBDIR"; BASE="$REPOS_SUBDIR" ;;
-    *) BASE="$WORKSPACE_DIR/$REPOS_SUBDIR" ;;
-  esac
-  ensure_dir "$BASE"
+  recompute_base
 
   if [ "$USE_ENV" = "true" ]; then
     : # env-only
