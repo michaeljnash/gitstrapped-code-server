@@ -4,22 +4,24 @@ set -eu
 
 VERSION="${GITSTRAP_VERSION:-0.3.8}"
 
-log(){ echo "[gitstrap] $*"; }
-warn(){ echo "[gitstrap][WARN] $*" >&2; }
-red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
-ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
-err(){ printf "%s\n" "$(red "[gitstrap][ERROR] $*")" >&2; }
-redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
-ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
+# ===== context-aware logging =====
+PROMPT_TAG=""     # shown before interactive questions
+CTX_TAG=""        # shown before status/warn/error lines
 
-# robust TTY checks
 has_tty(){ [ -c /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; }
 is_tty(){ [ -t 0 ] && [ -t 1 ] || has_tty; }
 
-# ===== prompt section tag (shown before each interactive prompt) =====
-PROMPT_TAG=""
+red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
+ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
 
-# prompts via /dev/tty when possible
+log(){  printf "%s %s\n" "${CTX_TAG:-[gitstrap]}" "$*"; }
+warn(){ printf "%s %s\n" "${CTX_TAG:-[gitstrap]}[WARN]" "$*" >&2; }
+err(){  printf "%s\n" "$(red "${CTX_TAG:-[gitstrap]}[ERROR] $*")" >&2; }
+
+redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
+ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
+
+# ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
 prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
 prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
@@ -466,11 +468,14 @@ install_settings_from_repo(){
 # ===== workspace config-shortcuts (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config-shortcuts"
+  local pre_exists="0"
+  [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
-  [ -f "$SETTINGS_PATH" ]   || printf '{}\n' >"$SETTINGS_PATH"
-  [ -f "$TASKS_PATH" ]      || printf '{}\n' >"$TASKS_PATH"
-  [ -f "$KEYB_PATH" ]       || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH" ]        || printf '{}\n' >"$EXT_PATH"
+
+  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH"    ]   || printf '{}\n' >"$EXT_PATH"
 
   mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
@@ -480,7 +485,9 @@ install_config_shortcuts(){
   mklink "$EXT_PATH"      "$d/extensions.json"
 
   chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
-  log "created config-shortcuts in workspace"
+
+  # Only announce creation if the folder didn't already exist
+  [ "$pre_exists" = "0" ] && log "created config-shortcuts in workspace" || true
 }
 
 # ===== CLI helpers =====
@@ -557,14 +564,16 @@ recompute_base(){
 # --- interactive config flow ---
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] "
+  CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     install_settings_from_repo
   else
     log "skipped settings merge"
   fi
   install_config_shortcuts
+  log "Bootstrap config completed"
   PROMPT_TAG=""
-  log "config completed"
+  CTX_TAG=""
 }
 
 bootstrap_from_args(){ # used by: gitstrap github [flags...]
@@ -600,17 +609,21 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
       exit 3
     fi
     PROMPT_TAG="[Bootstrap GitHub] "
+    CTX_TAG="[Bootstrap GitHub]"
     bootstrap_interactive
     PROMPT_TAG=""
+    CTX_TAG=""
     return 0
   fi
 
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
 
+  CTX_TAG="[Bootstrap GitHub]"
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GH_USERNAME ORIGIN_GH_PAT
   gitstrap_run
   log "bootstrap complete"
+  CTX_TAG=""
 }
 
 # ===== top-level CLI entry with subcommands =====
@@ -631,8 +644,10 @@ cli_entry(){
     # 1) GitHub?
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] "
+      CTX_TAG="[Bootstrap GitHub]"
       bootstrap_interactive
       PROMPT_TAG=""
+      CTX_TAG=""
     else
       log "skipped GitHub bootstrap"
     fi
@@ -641,17 +656,19 @@ cli_entry(){
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
-      log "skipped config"
+      CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
     # 3) Password?
     PROMPT_TAG="[Change password] "
+    CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
       password_change_interactive
     else
       log "skipped password change"
     fi
     PROMPT_TAG=""
+    CTX_TAG=""
     exit 0
   fi
 
@@ -664,8 +681,10 @@ cli_entry(){
       if [ $# -eq 0 ]; then
         if is_tty; then
           PROMPT_TAG="[Bootstrap GitHub] "
+          CTX_TAG="[Bootstrap GitHub]"
           bootstrap_interactive
           PROMPT_TAG=""
+          CTX_TAG=""
         else
           echo "Use flags or --env for non-interactive github flow."; exit 3
         fi
@@ -675,14 +694,16 @@ cli_entry(){
       ;;
     config)
       shift || true
-      if is_tty; then config_interactive; else install_settings_from_repo; install_config_shortcuts; fi
+      if is_tty; then config_interactive; else CTX_TAG="[Bootstrap config]"; install_settings_from_repo; install_config_shortcuts; log "Bootstrap config completed"; CTX_TAG=""; fi
       ;;
     --env)
-      bootstrap_env_only; exit 0;;
+      CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
       PROMPT_TAG="[Change password] "
+      CTX_TAG="[Change password]"
       password_change_interactive
       PROMPT_TAG=""
+      CTX_TAG=""
       exit 0;;
     *)
       warn "Unknown subcommand: $1"; print_help; exit 1;;

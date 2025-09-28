@@ -25,7 +25,7 @@ services:
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
     volumes:
-      - code-config:/config1234567
+      - code-config:/config12345678
       - code-config:/config
       - projects:/config/workspace
       - ./settings.json:/config/gitstrap/settings.json:ro
