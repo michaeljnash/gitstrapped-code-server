@@ -485,9 +485,9 @@ install_settings_from_repo(){
   log "merged settings.json → $SETTINGS_PATH"
 }
 
-# ===== workspace config-shortcuts (symlinks in WORKSPACE_DIR only) =====
+# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
-  local d="$WORKSPACE_DIR/config-shortcuts"
+  local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
@@ -507,7 +507,7 @@ install_config_shortcuts(){
   chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
 
   # Only announce creation if the folder didn't already exist
-  [ "$pre_exists" = "0" ] && log "created config-shortcuts in workspace" || true
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
 }
 
 # ===== CLI helpers =====
