@@ -250,29 +250,34 @@ validate_github_pat(){
 
 # ===== password change =====
 password_change_interactive(){
-  command -v argon2 >/dev/null 2>&1 || { echo "argon2 not found." >&2; return 1; }
+  command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
 
-  # Temporarily prefix prompts for this section
+  # Temporarily prefix prompts + context for this section
   _OLD_PROMPT_TAG="$PROMPT_TAG"
+  _OLD_CTX_TAG="$CTX_TAG"
   PROMPT_TAG="[Change password] ? "
+  CTX_TAG="[Change password]"
 
   NEW="$(prompt_secret "New code-server password: ")"
   CONF="$(prompt_secret "Confirm password: ")"
 
-  # Restore original prompt tag
-  PROMPT_TAG="$_OLD_PROMPT_TAG"
-
-  [ -n "$NEW" ] || { echo "Error: password required." >&2; return 1; }
-  [ -n "$CONF" ] || { echo "Error: confirmation required." >&2; return 1; }
-  [ "$NEW" = "$CONF" ] || { echo "Error: passwords do not match." >&2; return 1; }
-  [ ${#NEW} -ge 8 ] || { echo "Error: minimum length 8." >&2; return 1; }
+  # Validate with standardized error format
+  [ -n "$NEW" ]  || { err "password required!";  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
 
   salt="$(head -c16 /dev/urandom | base64)"
   hash="$(printf '%s' "$NEW" | argon2 "$salt" -id -e)"
   printf '%s' "$hash" > "$PASS_HASH_PATH"; chmod 644 "$PASS_HASH_PATH" || true; chown "${PUID}:${PGID}" "$PASS_HASH_PATH" 2>/dev/null || true
   printf "\n\033[1;33m*** CODE-SERVER PASSWORD CHANGED ***\n*** REFRESH PAGE TO LOGIN ***\033[0m\n\n"
   trigger_restart_gate
+
+  # Restore tags
+  PROMPT_TAG="$_OLD_PROMPT_TAG"
+  CTX_TAG="$_OLD_CTX_TAG"
 }
+
 
 # ===== github bootstrap internals =====
 resolve_email(){
