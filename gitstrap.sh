@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.2}"
+VERSION="${GITSTRAP_VERSION:-0.3.3}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -196,21 +196,22 @@ init_default_password(){
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
 }
 
-# ===== GitHub validation =====
+# ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
   [ -n "${GH_USERNAME:-}" ] || return 0
   code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GH_USERNAME}" || echo "000")"
   if [ "$code" = "404" ]; then
     src="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
     err "GitHub username '${GH_USERNAME}' appears invalid (HTTP 404). Check ${src}."
+    return 1
   elif [ "$code" != "200" ]; then
-    warn "Could not verify GitHub username '${GH_USERNAME}' (HTTP $code)."
+    err "Could not verify GitHub username '${GH_USERNAME}' (HTTP $code)."
+    return 1
   fi
 }
 
 validate_github_pat(){
   [ -n "${GH_PAT:-}" ] || return 0
-  # Check token validity
   code="$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user || echo "000")"
   src="${ORIGIN_GH_PAT:-env GH_PAT}"
   if [ "$code" = "401" ]; then
@@ -220,8 +221,8 @@ validate_github_pat(){
     err "Provided GH_PAT (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
     return 1
   elif [ "$code" != "200" ]; then
-    warn "Could not verify GH_PAT (${src}) (HTTP $code)."
-    return 0
+    err "Could not verify GH_PAT (${src}) (HTTP $code)."
+    return 1
   fi
   # Scope hint (best-effort)
   headers="$(curl -fsS -D - -o /dev/null -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user 2>/dev/null || true)"
@@ -278,35 +279,42 @@ clone_one(){
     *"git@github.com:"*) url="$repo"; name="$(basename "$repo" .git)";;
     http*://github.com/*|ssh://git@github.com/*) name="$(basename "$repo" .git)"; owner_repo="$(echo "$repo" | sed -E 's#^https?://github\.com/##; s#^ssh://git@github\.com/##')"; owner_repo="${owner_repo%.git}"; url="git@github.com:${owner_repo}.git";;
     */*) name="$(basename "$repo")"; url="git@github.com:${repo}.git";;
-    *) err "Invalid repo spec: '$spec'. Use owner/repo, owner/repo#branch, or a GitHub URL."; return 0;;
+    *) err "Invalid repo spec: '$spec'. Use owner/repo, owner/repo#branch, or a GitHub URL."; return 1;;
   esac
   dest="${BASE}/${name}"
   safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
   if [ -d "$dest/.git" ]; then
     if [ "$(normalize_bool "$PULL")" = "true" ]; then
       log "pull: ${name}"
-      git -C "$dest" fetch --all -p || true
-      if [ -n "$branch" ]; then git -C "$dest" checkout "$branch" || true; git -C "$dest" reset --hard "origin/${branch}" || true
-      else git -C "$dest" pull --ff-only || true; fi
+      git -C "$dest" fetch --all -p || warn "fetch failed for ${name}"
+      if [ -n "$branch" ]; then
+        git -C "$dest" checkout "$branch" || warn "checkout ${branch} failed for ${name}"
+        git -C "$dest" reset --hard "origin/${branch}" || warn "hard reset origin/${branch} failed for ${name}"
+      else
+        git -C "$dest" pull --ff-only || warn "pull --ff-only failed for ${name}"
+      fi
     else
       log "skip pull: ${name}"
     fi
   else
     log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
-    if [ -n "$branch" ]; then git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 0; }
-    else git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 0; }
+    if [ -n "$branch" ]; then
+      git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
+    else
+      git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
     fi
   fi
   chown -R "$PUID:$PGID" "$dest" || true
 }
+
 gitstrap_run(){
   GH_USERNAME="${GH_USERNAME:-}"; GH_PAT="${GH_PAT:-}"
   GIT_NAME="${GIT_NAME:-${GH_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
   GH_REPOS="${GH_REPOS:-}"; PULL_EXISTING_REPOS="${PULL_EXISTING_REPOS:-true}"
 
-  # Validate inputs early for clearer UX
-  validate_github_username || true
-  validate_github_pat || true
+  # Validate inputs early — fatal on failure
+  validate_github_username
+  validate_github_pat
 
   git config --global init.defaultBranch main || true
   git config --global pull.ff only || true
@@ -322,7 +330,22 @@ gitstrap_run(){
   if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
   git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
   git_upload_key || true
-  if [ -n "${GH_REPOS:-}" ]; then IFS=,; set -- $GH_REPOS; unset IFS; for spec in "$@"; do clone_one "$spec" "$PULL_EXISTING_REPOS"; done; else log "GH_REPOS empty; skip clone"; fi
+
+  if [ -n "${GH_REPOS:-}" ]; then
+    IFS=,; set -- $GH_REPOS; unset IFS
+    CLONE_ERRORS=0
+    for spec in "$@"; do
+      if ! clone_one "$spec" "$PULL_EXISTING_REPOS"; then
+        CLONE_ERRORS=$((CLONE_ERRORS+1))
+      fi
+    done
+    if [ "$CLONE_ERRORS" -gt 0 ]; then
+      err "One or more repositories failed to clone ($CLONE_ERRORS failure(s)). Aborting."
+      exit 5
+    fi
+  else
+    log "GH_REPOS empty; skip clone"
+  fi
 }
 
 # ===== settings.json merge (repo -> user) with preserve and inline JSONC comments =====
@@ -343,9 +366,9 @@ install_settings_from_repo(){
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
   if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
-    warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
+    err "repo settings JSON invalid → $REPO_SETTINGS_SRC"
     rm -f "$tmp_user_json" 2>/dev/null || true
-    return 0
+    exit 6
   fi
 
   RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
@@ -406,7 +429,8 @@ install_settings_from_repo(){
     echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
     printf '  "gitstrap_preserve": %s\n' "$preserve_json"
     if [ "$rcount" -gt 0 ]; then
-      echo "  // END gitstrap settings,"
+      echo "  // END gitstrap settings"
+      echo "  ,"
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
@@ -457,7 +481,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.3.2}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.3.3}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -593,7 +617,7 @@ autorun_env_if_present(){
   if [ -n "${GH_USERNAME:-}" ] && [ -n "${GH_PAT:-}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
     log "env present and no lock → running bootstrap"
-    gitstrap_run || true
+    gitstrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
     { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ]; } && log "GH_USERNAME/GH_PAT missing → no autorun"
