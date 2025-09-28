@@ -499,7 +499,7 @@ install_cli_shim(){
 set -eu
 TARGET="/custom-cont-init.d/10-gitstrap.sh"
 # Always route through CLI sentinel so non-root usage never hits init path
-if [ -x "$TARGET" ] then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
   echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
