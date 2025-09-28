@@ -511,7 +511,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER keybindings (allow JSONC comments; no other repairs) ----
+  # ---- Load USER (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -521,31 +521,23 @@ merge_codestrap_keybindings(){
         cp "$KEYB_PATH" "$tmp_user_json"
       else
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-          CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
-          rm -f "$tmp_user_json" 2>/dev/null || true
-          return 1
-        fi
+        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
       fi
     fi
   else
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO keybindings (allow JSONC comments; no other repairs) ----
+  # ---- Load REPO (allow JSONC comments; no other repairs) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
   else
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
-    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
-      CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""
-      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-      return 1
-    fi
+    jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
-  # ---- Merge: repo array into user array, honoring codestrap_preserve ----
+  # ---- Merge arrays (honor codestrap_preserve) ----
   tmp_final="$(mktemp)"
   jq -n \
     --slurpfile u "$tmp_user_json" \
@@ -557,6 +549,7 @@ merge_codestrap_keybindings(){
       ($u[0] | arr(.)) as $U
       | ($r[0] | arr(.)) as $R
 
+      # find last codestrap_preserve in user (or [])
       | ($U
           | map(select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve)
           | last // []
@@ -565,35 +558,27 @@ merge_codestrap_keybindings(){
       | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
       | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
 
+      # managed (repo) respecting preserve list
       | ($R
-          | map(
-              select(is_kb) as $o
-              | (kstr($o)) as $k
-              | if ( ($pres | index($k)) and ($u_by_key[$k]? != null) )
-                  then $u_by_key[$k]
-                  else $o
-                end
-            )
+          | map(select(is_kb) as $o
+                | (kstr($o)) as $k
+                | if (($pres | index($k)) and ($u_by_key[$k]? != null))
+                    then $u_by_key[$k]
+                    else $o
+                  end))
         ) as $managed
 
-      | ($managed
-          | map(kstr(.))
-          | map({(.): true}) | add // {}
-        ) as $seen
+      # seen keys from managed
+      | ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
 
-      | ($U
-          | map(
-              select(is_kb) as $o
-              | (kstr($o)) as $k
-              | select( ($seen[$k]? // false) | not )
-              | $o
-            )
-        ) as $extras
+      # user extras not overridden
+      | ($U | map(select(is_kb) as $o | (kstr($o)) as $k | select(($seen[$k]? // false)|not) | $o)) as $extras
 
+      # final merged array: managed + preserve object + extras
       | ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
     ' > "$tmp_final"
 
-  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
+  # ---- Inject comments with correct placement (mawk/busybox-safe) ----
   tmp_with_comments="$(mktemp)"
   awk '
     BEGIN {
@@ -604,62 +589,64 @@ merge_codestrap_keybindings(){
       depth=0
     }
 
-    # Print a line and update { } depth counters
-    function print_with_depth(l,   tmp,opens,closes) {
-      print l
-      tmp = l; opens  = gsub(/\{/, "", tmp)
-      tmp = l; closes = gsub(/\}/, "", tmp)
-      depth += (opens - closes)
-    }
-
+    # helper: update depth counters for a printed line (no user-defined functions)
     {
       line = $0
 
-      # After opening "[" add START banner
+      # If we havent printed the opening "[" yet, do it and add START banner
       if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
-        print_with_depth(line)
+        print line
+        # update depth for this line
+        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         print "  // START codestrap keybindings"
         seen_array_start=1
         next
       }
 
-      # If we buffered a "{", and current line is the preserve key, emit guidance BEFORE the "{"
+      # If we buffered a lone "{", decide whether next line is the preserve key
       if (have_prev && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        print_with_depth(prev)           # prints "{"
-        have_prev=0
-        print_with_depth(line)           # prints '"codestrap_preserve": ...'
+        # print prev and update depth
+        print prev
+        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
+        # print current line and update depth
+        print line
+        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         in_preserve=1
-        preserve_level=depth             # object depth after the "{"
+        preserve_level=depth
+        have_prev=0
         next
       }
 
-      # If we have a buffered line but not entering preserve, flush it now
+      # If we had buffered prev but it wasn’t preserve, flush prev now
       if (have_prev) {
-        print_with_depth(prev)
+        print prev
+        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         have_prev=0
       }
 
-      # Buffer a lone "{" so we can detect if next line starts preserve key
+      # Buffer a lone "{" so we can check the next line for preserve key
       if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
         prev=line
         have_prev=1
         next
       }
 
-      # If preserve key appears on the same line as "{", print guidance first
+      # If the preserve key appears inline with the "{", emit guidance first
       if (line ~ /\{[[:space:]]*"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        print_with_depth(line)
+        print line
+        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         in_preserve=1
         preserve_level=depth
         next
       }
 
       # Normal passthrough
-      print_with_depth(line)
+      print line
+      tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
 
-      # If we just closed the preserve object, place END banner immediately after it
+      # If we just closed the preserve object, drop END banner immediately
       if (in_preserve && depth < preserve_level) {
         print "  // END codestrap keybindings"
         in_preserve=0
@@ -667,17 +654,15 @@ merge_codestrap_keybindings(){
     }
 
     END {
+      # If something left in buffer (should not happen), flush it
       if (have_prev) {
-        print_with_depth(prev)
-        have_prev=0
+        print prev
       }
-      # Do NOT emit END here; must follow the preserve object, not array end.
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
   mv -f "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
-
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
