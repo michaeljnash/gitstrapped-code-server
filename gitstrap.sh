@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.2.3}"
+VERSION="${GITSTRAP_VERSION:-0.2.5}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -275,14 +275,20 @@ install_settings_from_repo(){
   fi
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
-  # Validate repo settings
-  if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
+  # Load/normalize repo settings (support JSONC too)
+  tmp_repo_json="$(mktemp)"
+  if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
+    cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
+  else
+    strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || printf '{}\n' >"$tmp_repo_json"
+  fi
+  if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
     warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
-    rm -f "$tmp_user_json" 2>/dev/null || true
+    rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
     return 0
   fi
 
-  RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
+  RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
 
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
@@ -293,7 +299,7 @@ install_settings_from_repo(){
   # Merge with preserve semantics
   tmp_merged="$(mktemp)"
   jq \
-    --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
+    --argjson repo "$(cat "$tmp_repo_json")" \
     --argjson rskeys "$RS_KEYS_JSON" \
     --argjson oldkeys "$OLD_KEYS_JSON" '
       def arr(v): if (v|type)=="array" then v else [] end;
@@ -367,7 +373,7 @@ install_settings_from_repo(){
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -376,11 +382,10 @@ create_config_shortcuts(){
   SHORTCUTS_DIR="$BASE/config-shortcuts"
   ensure_dir "$SHORTCUTS_DIR"
 
-  # Ensure user files/dirs exist
-  : > "$USER_DIR/settings.json"
-  : > "$USER_DIR/keybindings.json"
-  : > "$USER_DIR/tasks.json"
-  ensure_dir "$USER_DIR/snippets"
+  # Ensure user files exist — DO NOT TRUNCATE if present
+  [ -f "$USER_DIR/settings.json" ]    || printf '{}\n' > "$USER_DIR/settings.json"
+  [ -f "$USER_DIR/keybindings.json" ] || printf '[]\n' > "$USER_DIR/keybindings.json"
+  [ -f "$USER_DIR/tasks.json" ]       || printf '{}\n' > "$USER_DIR/tasks.json"
 
   # Workspace recommended extensions file
   ensure_dir "$BASE/.vscode"
@@ -389,11 +394,10 @@ create_config_shortcuts(){
   # Symlink helper (force replace with symlink)
   linkf(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || true; }
 
-  # Create/refresh symlinks
+  # Create/refresh symlinks (no snippets link anymore)
   linkf "$USER_DIR/settings.json"       "$SHORTCUTS_DIR/settings.json"
   linkf "$USER_DIR/keybindings.json"    "$SHORTCUTS_DIR/keybindings.json"
   linkf "$USER_DIR/tasks.json"          "$SHORTCUTS_DIR/tasks.json"
-  rm -f "$SHORTCUTS_DIR/snippets" 2>/dev/null || true; ln -s "$USER_DIR/snippets" "$SHORTCUTS_DIR/snippets" 2>/dev/null || true
   linkf "$BASE/.vscode/extensions.json" "$SHORTCUTS_DIR/extensions.json"
 
   # Ownership on symlinks (use -h)
@@ -402,7 +406,6 @@ create_config_shortcuts(){
     "$SHORTCUTS_DIR/settings.json" \
     "$SHORTCUTS_DIR/keybindings.json" \
     "$SHORTCUTS_DIR/tasks.json" \
-    "$SHORTCUTS_DIR/snippets" \
     "$SHORTCUTS_DIR/extensions.json" 2>/dev/null || true
 
   log "created workspace config-shortcuts at $SHORTCUTS_DIR"
@@ -420,7 +423,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.2.3}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.2.5}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -548,7 +551,6 @@ case "${1:-init}" in
     init_default_password
     install_settings_from_repo
     create_config_shortcuts
-    autorun_env_if_present
     log "Gitstrap initialized. Use: gitstrap -h"
     ;;
   cli)
