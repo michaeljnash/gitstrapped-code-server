@@ -429,37 +429,45 @@ install_settings_from_repo(){
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
+  # Build the final JSON (no comments) with stable key order:
+  # [managed keys...] + {"codestrap_preserve": ...} + [rest...]
+  tmp_final="$(mktemp)"
+  jq -n \
+    --argjson managed "$(cat "$tmp_managed")" \
+    --argjson preserve "$preserve_json" \
+    --argjson rest "$(cat "$tmp_rest")" '
+      $managed + {codestrap_preserve: $preserve} + $rest
+    ' | jq '.' > "$tmp_final"
+
+  # Now inject JSONC comments without disturbing commas/formatting.
+  # - Add START comment right after opening brace
+  # - Add the long preserve comment immediately before the codestrap_preserve line
+  # - Add END comment immediately after the codestrap_preserve line
   {
-    echo "{"
-    echo "  // START codestrap settings"
-    if [ "$mcount" -gt 0 ]; then
-      jq -r '
-        to_entries
-        | map("  " + (.key|@json) + ": " + (.value|tojson))
-        | join(",\n")
-      ' "$tmp_managed"
-      echo ","
-    fi
-    echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
-    printf '  "codestrap_preserve": %s\n' "$preserve_json"
-    if [ "$rcount" -gt 0 ]; then
-      echo "  // END codestrap settings"
-      echo "  ,"
-      jq -r '
-        to_entries
-        | map("  " + (.key|@json) + ": " + (.value|tojson))
-        | join(",\n")
-      ' "$tmp_rest"
-    else
-      echo "  // END codestrap settings"
-    fi
-    echo "}"
+    first_brace_done=0
+    while IFS= read -r line; do
+      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
+        echo "$line"
+        echo "  // START codestrap settings"
+        first_brace_done=1
+        continue
+      fi
+
+      if echo "$line" | grep -q '^[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
+        echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
+        echo "$line"
+        echo "  // END codestrap settings"
+        continue
+      fi
+
+      echo "$line"
+    done < "$tmp_final"
   } > "$SETTINGS_PATH"
 
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
