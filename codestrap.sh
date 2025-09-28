@@ -675,7 +675,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 
 # ===== top-level CLI entry with subcommands =====
 cli_entry(){
-  
+
   if [ $# -eq 0 ]; then
     # Hub flow
     if ! is_tty; then
@@ -699,9 +699,10 @@ cli_entry(){
       PROMPT_TAG=""
       CTX_TAG=""
     else
+      CTX_TAG="[Bootstrap GitHub]"
       log "skipped GitHub bootstrap"
+      CTX_TAG=""
     fi
-
     # 2) Config?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
