@@ -44,42 +44,17 @@ prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool
 print_logo(){
   is_tty || return 0
   cat <<'LOGO'
-            $$\                                                            $$\ 
-            $$ |                                                           $$ |
- $$$$$$$\ $$$$$$\    $$$$$$\  $$$$$$\   $$$$$$\   $$$$$$\   $$$$$$\   $$$$$$$ |
-$$  _____|\_$$  _|  $$  __$$\ \____$$\ $$  __$$\ $$  __$$\ $$  __$$\ $$  __$$ |
-\$$$$$$\    $$ |    $$ |  \__|$$$$$$$ |$$ /  $$ |$$ /  $$ |$$$$$$$$ |$$ /  $$ |
- \____$$\   $$ |$$\ $$ |     $$  __$$ |$$ |  $$ |$$ |  $$ |$$   ____|$$ |  $$ |
-$$$$$$$  |  \$$$$  |$$ |     \$$$$$$$ |$$$$$$$  |$$$$$$$  |\$$$$$$$\ \$$$$$$$ |
-\_______/    \____/ \__|      \_______|$$  ____/ $$  ____/  \_______| \_______|
-                                       $$ |      $$ |                          
-                                       $$ |      $$ |                          
-                                       \__|      \__|                          
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⢶⣶⣶⠼⣦⣤⣼⣼⡆⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠖⣯⠿⠟⠛⠻⢶⣿⣯⣿⣿⣃⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⣖⣺⡿⠿⠷⠶⠒⢶⣶⠖⠀⠉⡻⢻⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⣴⢻⣭⣫⣿⠁⠀⠀⠀⠀⠀⠀⠀⢀⣾⠃⢀⡏⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⢀⣖⡿⠋⢙⣿⠿⢿⠿⣿⡦⠄⠀⠀⠀⣠⣾⠟⠀⠀⣼⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⢀⣰⣿⣴⣿⡿⠿⠿⠿⢿⣦⣄⠀⠀⠀⣠⣾⣿⠃⠀⢀⣸⡿⣳⣶⣲⡄⠀⠀⠀⠀⠀⠀
-⠀⠀⣾⣽⡿⣛⣵⠾⠿⠿⠷⣦⣌⠻⣷⣄⢰⣿⠟⠁⠀⢠⣾⠿⢡⣯⠸⠧⢽⣄⠀⠀⠀⠀⠀
-⠀⢸⡇⡟⣴⡿⢟⣽⣾⣿⣶⣌⠻⣧⣹⣿⡿⠋⠀⠀⠀⣾⠿⡇⣽⣿⣄⠀⠀⠉⠳⣄⢀⡀⠀
-⠀⢸⠇⢳⣿⢳⣿⣿⣿⣿⣿⣿⡆⢹⡇⣿⡇⠀⡆⣠⣼⡏⢰⣿⣿⣿⣿⣦⠀⠀⠀⠈⠳⣅⠀
-⠀⣸⡀⢸⣿⢸⣿⣿⣿⣿⣿⣿⡇⣸⡇⣿⡇⠀⡟⣻⢳⣷⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠘⣧
-⢰⡟⡿⡆⠹⣧⡙⢿⣿⣿⠿⡟⢡⣿⢷⣿⣧⠾⢠⣿⣾⣿⣿⣿⣿⣿⣿⠁⠀⠀⠀⠀⠀⠀⠘
-⠀⠻⡽⣦⠀⠈⠙⠳⢶⣦⡶⠞⢻⡟⡸⠟⠁⢠⠟⠉⠉⠙⠿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⡴
-⠀⠀⢸⣿⡇⠀⠀⣀⣠⠀⢀⡀⠸⣹⠇⠀⣰⡟⡀⠀⠈⠛⠻⢿⣻⣿⡿⠀⠀⠀⠀⠀⠀⡠⠁
-⠀⠀⢸⣿⣇⣴⢿⣿⣿⣿⣮⣿⣷⡟⠀⣰⣿⢰⠀⣀⠀⠀⠀⢀⣉⣿⡇⠀⠀⠀⠀⠀⣸⠃⠀
-⠀⠀⢸⣿⡟⣯⠸⣿⣿⣿⣿⢈⣿⡇⣼⣿⠇⣸⡦⣙⣷⣦⣴⣯⠿⠛⢷⡀⠀⠀⠀⣰⡟⠀⠀
-⠀⠀⠘⣿⣿⡸⣷⣝⠻⠟⢋⣾⣟⣰⡏⣠⣤⡟⠀⠀⠈⠉⠁⠀⠀⠀⠀⢻⣶⠀⢀⣿⠁⠀⠀
-⠀⠀⠀⢸⡿⣿⣦⣽⣛⣛⣛⣭⣾⣷⡶⠞⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣼⣿⣿⡟⠀⠀⠀⠀
-⠀⠀⠀⠀⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⡀⠁⢸⢻⠁⠀⠀⠀⠀
-⠀⠀⠀⠀⡿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⣤⣤⣀⣀⣀⣀⣀⣠⣤⠶⠛⠁⢀⣾⡟⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⢿⣻⣿⣿⣿⣿⣿⣿⣎⣿⡅⠀⠈⠉⠉⠉⠉⠉⠁⠀⠀⠀⠀⣼⣿⠁⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠈⢻⣿⣿⣿⣿⣿⣿⣿⣿⣇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣠⡷⠟⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⠻⢿⣿⣿⣟⣂⣀⣀⣀⣀⣀⣀⣤⠴⠋⠁⣾⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠈⢻⣿⣷⣷⡄⠀⠀⠀⠉⠉⠉⠉⠉⠀⠀⠀⢀⡞⠁⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠻⣿⣿⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⠟⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
-⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⣿⣷⣤⣤⣤⣤⣄⣤⣤⡤⠴⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+          $$\   $$\                 $$\                                  
+          \__|  $$ |                $$ |                                 
+ $$$$$$\  $$\ $$$$$$\    $$$$$$$\ $$$$$$\    $$$$$$\  $$$$$$\   $$$$$$\  
+$$  __$$\ $$ |\_$$  _|  $$  _____|\_$$  _|  $$  __$$\ \____$$\ $$  __$$\ 
+$$ /  $$ |$$ |  $$ |    \$$$$$$\    $$ |    $$ |  \__|$$$$$$$ |$$ /  $$ |
+$$ |  $$ |$$ |  $$ |$$\  \____$$\   $$ |$$\ $$ |     $$  __$$ |$$ |  $$ |
+\$$$$$$$ |$$ |  \$$$$  |$$$$$$$  |  \$$$$  |$$ |     \$$$$$$$ |$$$$$$$  |
+ \____$$ |\__|   \____/ \_______/    \____/ \__|      \_______|$$  ____/ 
+$$\   $$ |                                                     $$ |      
+\$$$$$$  |                                                     $$ |      
+ \______/                                                      \__|      
 LOGO
   echo
 }
@@ -91,7 +66,7 @@ gitstrap — bootstrap GitHub + manage code-server auth
 Usage (subcommands):
   gitstrap                      # Interactive hub: ask GitHub? Config? Change password?
   gitstrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
-  gitstrap config               # Config hub (interactive) — merge strapped settings.json, etc
+  gitstrap config [flags...]    # Config hub (interactive + flags to skip prompts)
   gitstrap passwd               # Interactive password change (secure prompts)
   gitstrap -h | --help          # Help
   gitstrap -v | --version       # Version
@@ -107,6 +82,10 @@ Flags for 'gitstrap github' (map 1:1 to env vars; dash/underscore both accepted)
   --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
   --env                                                Use environment variables only (no prompts)
 
+Flags for 'gitstrap config' (booleans; supply only the ones you want to skip prompts for):
+  --settings <true|false>     Merge strapped settings.json into user settings.json
+                              (Interactive default: ask; Non-interactive default: true)
+
 Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
@@ -116,6 +95,7 @@ Examples:
   gitstrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   gitstrap github --workspace-dir /config/workspace --repos-subdir /repos
   gitstrap config
+  gitstrap config --settings false
   gitstrap passwd
 HLP
 }
@@ -631,6 +611,32 @@ config_interactive(){
   CTX_TAG=""
 }
 
+# --- hybrid / flag-aware config flow ---
+config_hybrid(){
+  PROMPT_TAG="[Bootstrap config] ? "
+  CTX_TAG="[Bootstrap config]"
+
+  # If CFG_SETTINGS is set, use it; otherwise, prompt.
+  if [ -n "${CFG_SETTINGS+x}" ]; then
+    if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
+      install_settings_from_repo
+    else
+      log "skipped settings merge"
+    fi
+  else
+    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+      install_settings_from_repo
+    else
+      log "skipped settings merge"
+    fi
+  fi
+
+  install_config_shortcuts
+  log "Bootstrap config completed"
+  PROMPT_TAG=""
+  CTX_TAG=""
+}
+
 bootstrap_from_args(){ # used by: gitstrap github [flags...]
   USE_ENV=false
   while [ $# -gt 0 ]; do
@@ -756,7 +762,44 @@ cli_entry(){
       ;;
     config)
       shift || true
-      if is_tty; then config_interactive; else CTX_TAG="[Bootstrap config]"; install_settings_from_repo; install_config_shortcuts; log "Bootstrap config completed"; CTX_TAG=""; fi
+      # Parse config flags (currently only --settings <true|false>)
+      unset CFG_SETTINGS
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          -h|--help) print_help; exit 0;;
+          --settings)
+            shift || true
+            CFG_SETTINGS="${1:-}"
+            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; warn "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --settings=*)
+            CFG_SETTINGS="${1#*=}"
+            ;;
+          *)
+            CTX_TAG="[Bootstrap config]"; warn "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+        esac
+        shift || true
+      done
+
+      if is_tty; then
+        # Hybrid: use flags to skip prompts for provided options, prompt for the rest
+        config_hybrid
+      else
+        # Non-interactive: respect flags; default to merge when unset (preserve old behavior)
+        CTX_TAG="[Bootstrap config]"
+        if [ -n "${CFG_SETTINGS+x}" ]; then
+          if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
+            install_settings_from_repo
+          else
+            log "skipped settings merge"
+          fi
+        else
+          install_settings_from_repo
+        fi
+        install_config_shortcuts
+        log "Bootstrap config completed"
+        CTX_TAG=""
+      fi
       ;;
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
