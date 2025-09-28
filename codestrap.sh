@@ -375,7 +375,7 @@ merge_codestrap_settings(){
 
   tmp_user_json="$(mktemp)"
 
-  # Read user settings.json — allow JSONC comments only, no other repairs
+  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -391,7 +391,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Load repo settings (allow JSONC comments only)
+  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -446,7 +446,7 @@ merge_codestrap_settings(){
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
 
-  # Build final JSON (proper commas), then inject comments without touching commas
+  # Build final JSON, then inject comments with correct END placement
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -542,36 +542,40 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # Preserve keys (from user)
+  # Extract preserve list from user (first object that has codestrap_preserve)
   preserve_json="$(jq -c '
-    [ .[] | select(type=="object" and has("codestrap_preserve")) ]
-    | (.[0].codestrap_preserve // [])
+    ( [ .[] | select((type=="object") and has("codestrap_preserve")) ][0].codestrap_preserve ) // []
   ' "$tmp_user_json")"
 
-  # Managed array: repo entries; if preserved, take the user's binding for that key
+  # Build a map of user entries keyed by "key"
+  user_map_json="$(jq -c '
+    reduce ( .[] | select((type=="object") and has("key")) ) as $it
+      ({}; .[$it.key] = $it)
+  ' "$tmp_user_json")"
+
+  # Managed: repo entries, overridden by user if key preserved and present in user_map
   tmp_managed_arr="$(mktemp)"
-  jq --argjson preserve "$preserve_json" --argjson user "$(cat "$tmp_user_json")" '
-    . as $repo
-    | [ $repo[]
-        | select(type=="object" and has("key"))
-        | . as $r
-        | if ($preserve | index($r.key))
-          then ( ($user[] | select(type=="object" and has("key") and .key == $r.key)) // $r )
-          else $r
-          end
-      ]
+  jq --argjson preserve "$preserve_json" --argjson usermap "$user_map_json" '
+    [ .[]
+      | select((type=="object") and has("key"))
+      | . as $r
+      | if (($preserve | index($r.key)) and ($usermap | has($r.key)))
+        then $usermap[$r.key]
+        else $r
+        end
+    ]
   ' "$tmp_repo_json" > "$tmp_managed_arr"
 
   # Repo keys for filtering "rest"
-  repo_keys_json="$(jq -c '[ .[] | select(type=="object" and has("key")) | .key ] | unique' "$tmp_repo_json")"
+  repo_keys_json="$(jq -c '[ .[] | select((type=="object") and has("key")) | .key ] | unique' "$tmp_repo_json")"
 
-  # Rest: user items except the preserve object and any item whose key appears in repo keys
+  # Rest: user items except the preserve object and any item whose key is in repo keys
   tmp_rest_arr="$(mktemp)"
   jq --argjson repokeys "$repo_keys_json" '
     [ .[]
-      | select( (type=="object" and has("codestrap_preserve")) | not )
+      | select( ( (type=="object") and has("codestrap_preserve") ) | not )
       | select(
-          (type=="object" and has("key"))
+          ( (type=="object") and has("key") )
           | not
           or ( .key as $k | ($repokeys | index($k)) | not )
         )
@@ -587,7 +591,7 @@ merge_codestrap_keybindings(){
       ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments; END marker always after the preserve object
+  # Inject comments with correct END placement
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
@@ -683,7 +687,7 @@ EOF
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
-    # Non-root fallback: user-level shim
+    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
