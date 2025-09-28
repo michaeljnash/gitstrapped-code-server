@@ -362,40 +362,8 @@ codestrap_run(){
   fi
 }
 
-# ===== JSONC → JSON (repair-first) =====
-# - strips // and /* */ comments
-# - removes trailing commas before } or ]
-# - trims BOM if present
-sanitize_jsonc_to_json(){
-  in="$1"
-  awk 'NR==1{ sub(/^\xef\xbb\xbf/,"") } { print }' "$in" \
-  | sed -E '
-    s://[^\r\n]*$::g;                      # // comments
-    /\/\*/,/\*\// { s:/\*.*\*/::g }        # /* ... */ comments (single line)
-  ' \
-  | awk '                                    # /* ... */ (multi-line) remover
-      BEGIN{inblock=0}
-      {
-        line=$0
-        while (1) {
-          if (!inblock) {
-            start=index(line,"/*")
-            if (start==0) break
-            inblock=1
-            pre=substr(line,1,start-1)
-            line=pre substr(line,start+2)
-          } else {
-            stop=index(line,"*/")
-            if (stop==0) { line=""; break }
-            inblock=0
-            line=substr(line,stop+2)
-          }
-        }
-        if (length(line)>0) print line
-      }' \
-  | sed -E ':a; s/,([[:space:]]*[}\]])/\1/g; ta'   # trailing commas
-}
-
+# ===== JSONC → JSON =====
+strip_jsonc_to_json(){ sed -e 's://.*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
 install_settings_from_repo(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
@@ -405,36 +373,35 @@ install_settings_from_repo(){
 
   tmp_user_json="$(mktemp)"
 
-  # Read and REPAIR user settings.json (non-destructive)
+  # Read user settings.json (STRICT JSON ONLY; do not auto-repair)
   if [ -f "$SETTINGS_PATH" ]; then
-    # Try raw parse first
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
-      # Attempt repair (trailing commas, comments, BOM)
-      repaired="$(mktemp)"
-      sanitize_jsonc_to_json "$SETTINGS_PATH" >"$repaired" || true
-      if jq -e . "$repaired" >/dev/null 2>&1; then
-        cp "$repaired" "$tmp_user_json"
-      else
-        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed and could not be auto-repaired; aborting merge to avoid data loss."; CTX_TAG=""
-        rm -f "$repaired" "$tmp_user_json" 2>/dev/null || true
-        return 1
-      fi
-      rm -f "$repaired" 2>/dev/null || true
+      CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed and could not be auto-repaired; aborting merge to avoid data loss."; CTX_TAG=""
+      rm -f "$tmp_user_json" 2>/dev/null || true
+      return 1
     fi
   else
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Validate and load repo settings
-  if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
-    err "repo settings JSON invalid → $REPO_SETTINGS_SRC"
-    rm -f "$tmp_user_json" 2>/dev/null || true
-    exit 6
+  # Validate and load repo settings:
+  # 1) Try strict JSON
+  # 2) If that fails, allow JSONC (strip comments only) and re-validate
+  tmp_repo_json="$(mktemp)"
+  if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
+    cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
+  else
+    strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || true
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      CTX_TAG="[Bootstrap config]"; err "repo settings JSON invalid → $REPO_SETTINGS_SRC"; CTX_TAG=""
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+      exit 6
+    fi
   fi
 
-  RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
+  RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
   else
@@ -443,7 +410,7 @@ install_settings_from_repo(){
 
   tmp_merged="$(mktemp)"
   jq \
-    --argjson repo "$(cat "$REPO_SETTINGS_SRC")" \
+    --argjson repo "$(cat "$tmp_repo_json")" \
     --argjson rskeys "$RS_KEYS_JSON" \
     --argjson oldkeys "$OLD_KEYS_JSON" '
       def arr(v): if (v|type)=="array" then v else [] end;
@@ -510,7 +477,7 @@ install_settings_from_repo(){
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
