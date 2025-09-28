@@ -31,7 +31,7 @@ prompt_secret(){
     stty -echo </dev/tty >/dev/tty 2>/dev/null || true
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
-    printf "\n" >/dev/tty 2>/dev/tty 2>/dev/null || true
+    printf "\n" >/dev/tty 2>/dev/null || true
   else
     printf "%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
   fi; printf "%s" "${s:-}"
@@ -200,9 +200,9 @@ init_default_password(){
 
 # ===== helpers for interactive -e/--env =====
 env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true; }
-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."); exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
@@ -375,7 +375,7 @@ install_settings_from_repo(){
 
   tmp_user_json="$(mktemp)"
   if [ ! -f "$SETTINGS_PATH" ] || ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-    if [ -f "$SETTINGS_PATH" ] then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
+    if [ -f "$SETTINGS_PATH" ]; then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
   else
     cp "$SETTINGS_PATH" "$tmp_user_json"
   fi
@@ -509,6 +509,7 @@ bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap 
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
+  # (banner shown in hub before the first main question)
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
   GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
   GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
@@ -609,7 +610,6 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
     fi
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
-    bootstrap_banner
     bootstrap_interactive
     PROMPT_TAG=""
     CTX_TAG=""
@@ -641,11 +641,11 @@ cli_entry(){
       exit 3
     fi
 
-    # Show banner BEFORE first interactive question
+    # Show banner BEFORE the first question
     bootstrap_banner
 
-    # 1) GitHub? (add a blank line before the question)
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
+    # 1) GitHub?
+    printf "\n"
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
       CTX_TAG="[Bootstrap GitHub]"
@@ -656,16 +656,16 @@ cli_entry(){
       log "skipped GitHub bootstrap"
     fi
 
-    # 2) Config? (add a blank line before the question)
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
+    # 2) Config?
+    printf "\n"
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
       CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
-    # 3) Password? default Yes (add a blank line before the question)
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
+    # 3) Password?
+    printf "\n"
     PROMPT_TAG="[Change password] ? "
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
@@ -688,7 +688,6 @@ cli_entry(){
         if is_tty; then
           PROMPT_TAG="[Bootstrap GitHub] ? "
           CTX_TAG="[Bootstrap GitHub]"
-          bootstrap_banner
           bootstrap_interactive
           PROMPT_TAG=""
           CTX_TAG=""
