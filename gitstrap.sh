@@ -65,7 +65,6 @@ Examples:
   gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
   gitstrap --pull-existing-repos false
   gitstrap passwd
-  gitstrap settings-merge
 HLP
 }
 
@@ -320,7 +319,7 @@ install_settings_from_repo(){
       | .gitstrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # Managed-only object (repo keys only) — capture from source ($src), not accumulator
+  # Managed-only object (repo keys only)
   tmp_managed="$(mktemp)"
   jq \
     --argjson ks "$RS_KEYS_JSON" '
@@ -339,47 +338,74 @@ install_settings_from_repo(){
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Assemble JSONC output with tidy commas
+  # Assemble JSONC output — comments inline at top block; comma placement correct
   {
     echo "{"
     echo "  // START gitstrap settings"
-
     if [ "$mcount" -gt 0 ]; then
       jq -r -j '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_managed"
-      echo ","  # comma between last managed kv and the preserve key
+      printf ",\n"
     fi
-
     echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
-    printf '  "gitstrap_preserve": %s' "$preserve_json"
-
-    if [ "$rcount" -gt 0 ]; then
-      echo ","  # only add a comma if more user keys will follow
-    else
-      echo
-    fi
-
+    printf '  "gitstrap_preserve": %s\n' "$preserve_json"
     echo "  // END gitstrap settings"
-
     if [ "$rcount" -gt 0 ]; then
+      echo "  ,"
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_rest"
     fi
-
     echo "}"
   } > "$SETTINGS_PATH"
-  
+
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
   rm -f "$tmp_user_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
+}
+
+# ===== config-shortcuts in workspace (symlinks) =====
+create_config_shortcuts(){
+  SHORTCUTS_DIR="$BASE/config-shortcuts"
+  ensure_dir "$SHORTCUTS_DIR"
+
+  # Ensure user files/dirs exist
+  : > "$USER_DIR/settings.json"
+  : > "$USER_DIR/keybindings.json"
+  : > "$USER_DIR/tasks.json"
+  ensure_dir "$USER_DIR/snippets"
+
+  # Workspace recommended extensions file
+  ensure_dir "$BASE/.vscode"
+  [ -f "$BASE/.vscode/extensions.json" ] || printf '{\n  "recommendations": []\n}\n' > "$BASE/.vscode/extensions.json"
+
+  # Symlink helper (force replace with symlink)
+  linkf(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || true; }
+
+  # Create/refresh symlinks
+  linkf "$USER_DIR/settings.json"       "$SHORTCUTS_DIR/settings.json"
+  linkf "$USER_DIR/keybindings.json"    "$SHORTCUTS_DIR/keybindings.json"
+  linkf "$USER_DIR/tasks.json"          "$SHORTCUTS_DIR/tasks.json"
+  rm -f "$SHORTCUTS_DIR/snippets" 2>/dev/null || true; ln -s "$USER_DIR/snippets" "$SHORTCUTS_DIR/snippets" 2>/dev/null || true
+  linkf "$BASE/.vscode/extensions.json" "$SHORTCUTS_DIR/extensions.json"
+
+  # Ownership on symlinks (use -h)
+  chown -h "${PUID}:${PGID}" \
+    "$SHORTCUTS_DIR" \
+    "$SHORTCUTS_DIR/settings.json" \
+    "$SHORTCUTS_DIR/keybindings.json" \
+    "$SHORTCUTS_DIR/tasks.json" \
+    "$SHORTCUTS_DIR/snippets" \
+    "$SHORTCUTS_DIR/extensions.json" 2>/dev/null || true
+
+  log "created workspace config-shortcuts at $SHORTCUTS_DIR"
 }
 
 # ===== CLI helpers =====
@@ -521,6 +547,7 @@ case "${1:-init}" in
     install_cli_shim
     init_default_password
     install_settings_from_repo
+    create_config_shortcuts
     autorun_env_if_present
     log "Gitstrap initialized. Use: gitstrap -h"
     ;;
