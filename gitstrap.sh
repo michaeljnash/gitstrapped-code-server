@@ -342,12 +342,12 @@ install_settings_from_repo(){
     echo "{"
     echo "  //gitstrap settings start"
     if [ "$mcount" -gt 0 ]; then
-      jq -r '
+      jq -r -j '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_managed"
-      echo ","
+      printf ",\n"
     fi
     echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
     printf '  "gitstrap_preserve": %s\n' "$preserve_json"
