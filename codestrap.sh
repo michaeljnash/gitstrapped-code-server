@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
-# gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
+# codestrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.3.8}"
+VERSION="${CODESTRAP_VERSION:-0.3.8}"
 
 # ===== context-aware logging =====
 PROMPT_TAG=""     # shown before interactive questions
@@ -14,9 +14,9 @@ is_tty(){ [ -t 0 ] && [ -t 1 ] || has_tty; }
 red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
 ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
 
-log(){  printf "%s %s\n" "${CTX_TAG:-[gitstrap]}" "$*"; }
-warn(){ printf "%s %s\n" "${CTX_TAG:-[gitstrap]}[WARN]" "$*" >&2; }
-err(){  printf "%s\n" "$(red "${CTX_TAG:-[gitstrap]}[ERROR] $*")" >&2; }
+log(){  printf "%s %s\n" "${CTX_TAG:-[codestrap]}" "$*"; }
+warn(){ printf "%s %s\n" "${CTX_TAG:-[codestrap]}[WARN]" "$*" >&2; }
+err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
 
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
@@ -61,17 +61,17 @@ LOGO
 
 print_help(){
 cat <<'HLP'
-gitstrap — bootstrap GitHub + manage code-server auth
+codestrap — bootstrap GitHub + manage code-server auth
 
 Usage (subcommands):
-  gitstrap                      # Interactive hub: ask GitHub? Config? Change password?
-  gitstrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
-  gitstrap config [flags...]    # Config hub (interactive + flags to skip prompts)
-  gitstrap passwd               # Interactive password change (secure prompts)
-  gitstrap -h | --help          # Help
-  gitstrap -v | --version       # Version
+  codestrap                      # Interactive hub: ask GitHub? Config? Change password?
+  codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
+  codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
+  codestrap passwd               # Interactive password change (secure prompts)
+  codestrap -h | --help          # Help
+  codestrap -v | --version       # Version
 
-Flags for 'gitstrap github' (map 1:1 to env vars; dash/underscore both accepted):
+Flags for 'codestrap github' (map 1:1 to env vars; dash/underscore both accepted):
   --gh-username | --gh_username <val>        → GH_USERNAME
   --gh-pat      | --gh_pat      <val>        → GH_PAT   (classic; scopes: user:email, admin:public_key)
   --git-name    | --git_name    <val>        → GIT_NAME
@@ -82,7 +82,7 @@ Flags for 'gitstrap github' (map 1:1 to env vars; dash/underscore both accepted)
   --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
   --env                                                Use environment variables only (no prompts)
 
-Flags for 'gitstrap config' (booleans; supply only the ones you want to skip prompts for):
+Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
   --settings <true|false>     Merge strapped settings.json into user settings.json
                               (Interactive default: ask; Non-interactive default: true)
 
@@ -90,25 +90,25 @@ Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
 Examples:
-  gitstrap
-  gitstrap github
-  gitstrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  gitstrap github --workspace-dir /config/workspace --repos-subdir /repos
-  gitstrap config
-  gitstrap config --settings false
-  gitstrap passwd
+  codestrap
+  codestrap github
+  codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
+  codestrap github --workspace-dir /config/workspace --repos-subdir /repos
+  codestrap config
+  codestrap config --settings false
+  codestrap passwd
 HLP
 }
 
-print_version(){ echo "gitstrap ${VERSION}"; }
+print_version(){ echo "codestrap ${VERSION}"; }
 
 # ===== paths / state =====
 export HOME="${HOME:-/config}"
 PUID="${PUID:-1000}"; PGID="${PGID:-1000}"
 
-STATE_DIR="$HOME/.gitstrap"; ensure_dir "$STATE_DIR"
-LOCK_DIR="/run/gitstrap";    ensure_dir "$LOCK_DIR"
-LOCK_FILE="$LOCK_DIR/init-gitstrap.lock"
+STATE_DIR="$HOME/.codestrap"; ensure_dir "$STATE_DIR"
+LOCK_DIR="/run/codestrap";    ensure_dir "$LOCK_DIR"
+LOCK_FILE="$LOCK_DIR/init-codestrap.lock"
 
 PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
@@ -138,7 +138,7 @@ TASKS_PATH="$USER_DIR/tasks.json"
 KEYB_PATH="$USER_DIR/keybindings.json"
 EXT_PATH="$USER_DIR/extensions.json"
 
-REPO_SETTINGS_SRC="$HOME/gitstrap/settings.json"
+REPO_SETTINGS_SRC="$HOME/codestrap/settings.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # Track origins for nicer errors
@@ -228,7 +228,7 @@ validate_github_pat(){
   code="$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${GH_PAT}" \
     -H "Accept: application/vnd.github+json" \
-    -H "User-Agent: gitstrap" \
+    -H "User-Agent: codestrap" \
     https://api.github.com/user || echo "000")"
   src="${ORIGIN_GH_PAT:-env GH_PAT}"
   if [ "$code" = "401" ]; then
@@ -244,7 +244,7 @@ validate_github_pat(){
   headers="$(curl -fsS -D - -o /dev/null \
     -H "Authorization: token ${GH_PAT}" \
     -H "Accept: application/vnd.github+json" \
-    -H "User-Agent: gitstrap" \
+    -H "User-Agent: codestrap" \
     https://api.github.com/user 2>/dev/null || true)"
   scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
   if [ -n "$scopes" ]; then
@@ -257,7 +257,6 @@ validate_github_pat(){
 password_change_interactive(){
   command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
 
-  # Temporarily prefix prompts + context for this section
   _OLD_PROMPT_TAG="$PROMPT_TAG"
   _OLD_CTX_TAG="$CTX_TAG"
   PROMPT_TAG="[Change password] ? "
@@ -266,7 +265,6 @@ password_change_interactive(){
   NEW="$(prompt_secret "New code-server password: ")"
   CONF="$(prompt_secret "Confirm password: ")"
 
-  # Validate with standardized error format
   [ -n "$NEW" ]  || { err "password required!";  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
   [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
   [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
@@ -278,11 +276,9 @@ password_change_interactive(){
   printf "\n\033[1;33m*** CODE-SERVER PASSWORD CHANGED ***\n*** REFRESH PAGE TO LOGIN ***\033[0m\n\n"
   trigger_restart_gate
 
-  # Restore tags
   PROMPT_TAG="$_OLD_PROMPT_TAG"
   CTX_TAG="$_OLD_CTX_TAG"
 }
-
 
 # ===== github bootstrap internals =====
 resolve_email(){
@@ -299,7 +295,7 @@ resolve_email(){
   echo "${GH_USERNAME:-unknown}@users.noreply.github.com"
 }
 git_upload_key(){
-  GH_PAT="${GH_PAT:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}"
+  GH_PAT="${GH_PAT:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-codestrapped-code-server SSH Key}"
   [ -n "$GH_PAT" ] || { warn "GH_PAT empty; cannot upload SSH key"; return 0; }
   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
   KEYS_JSON="$(curl -fsS -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
@@ -344,7 +340,7 @@ clone_one(){
   chown -R "$PUID:$PGID" "$dest" || true
 }
 
-gitstrap_run(){
+codestrap_run(){
   GH_USERNAME="${GH_USERNAME:-}"; GH_PAT="${GH_PAT:-}"
   GIT_NAME="${GIT_NAME:-${GH_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
   GH_REPOS="${GH_REPOS:-}"; PULL_EXISTING_REPOS="${PULL_EXISTING_REPOS:-true}"
@@ -356,7 +352,7 @@ gitstrap_run(){
   git config --global pull.ff only || true
   git config --global advice.detachedHead false || true
   git config --global --add safe.directory "*"
-  git config --global user.name "${GIT_NAME:-gitstrap}" || true
+  git config --global user.name "${GIT_NAME:-codestrap}" || true
   if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
   git config --global user.email "$GIT_EMAIL" || true
   log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
@@ -424,14 +420,14 @@ install_settings_from_repo(){
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
       (. // {}) as $user
-      | ($user.gitstrap_preserve // []) as $pres
+      | ($user. codestrap_preserve // []) as $pres
       | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
       | reduce $rskeys[] as $k (
           $user_without_repo;
           .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
         )
-      | .gitstrap_preserve = arr($pres)
+      | .codestrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
   tmp_managed="$(mktemp)"
@@ -444,16 +440,16 @@ install_settings_from_repo(){
   tmp_rest="$(mktemp)"
   jq --argjson ks "$RS_KEYS_JSON" '
     def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
-    delKeys(.; ($ks + ["gitstrap_preserve"]))
+    delKeys(.; ($ks + ["codestrap_preserve"]))
   ' "$tmp_merged" > "$tmp_rest"
 
-  preserve_json="$(jq -c '.gitstrap_preserve // []' "$tmp_merged")"
+  preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
   mcount="$(jq 'keys|length' "$tmp_managed")"
   rcount="$(jq 'keys|length' "$tmp_rest")"
 
   {
     echo "{"
-    echo "  // START gitstrap settings"
+    echo "  // START codestrap settings"
     if [ "$mcount" -gt 0 ]; then
       jq -r '
         to_entries
@@ -462,10 +458,10 @@ install_settings_from_repo(){
       ' "$tmp_managed"
       echo ","
     fi
-    echo "  // gitstrap_preserve - enter key names of gitstrap merged settings here which you wish the gitstrap script not to overwrite"
-    printf '  "gitstrap_preserve": %s\n' "$preserve_json"
+    echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
+    printf '  "codestrap_preserve": %s\n' "$preserve_json"
     if [ "$rcount" -gt 0 ]; then
-      echo "  // END gitstrap settings"
+      echo "  // END codestrap settings"
       echo "  ,"
       jq -r '
         to_entries
@@ -473,7 +469,7 @@ install_settings_from_repo(){
         | join(",\n")
       ' "$tmp_rest"
     else
-      echo "  // END gitstrap settings"
+      echo "  // END codestrap settings"
     fi
     echo "}"
   } > "$SETTINGS_PATH"
@@ -485,9 +481,9 @@ install_settings_from_repo(){
   log "merged settings.json → $SETTINGS_PATH"
 }
 
-# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
+# ===== workspace config-shortcuts (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
-  local d="$WORKSPACE_DIR/config"
+  local d="$WORKSPACE_DIR/config-shortcuts"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
@@ -506,8 +502,7 @@ install_config_shortcuts(){
 
   chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
 
-  # Only announce creation if the folder didn't already exist
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
+  [ "$pre_exists" = "0" ] && log "created config-shortcuts in workspace" || true
 }
 
 # ===== CLI helpers =====
@@ -515,36 +510,44 @@ install_cli_shim(){
   # System-wide install when root, else user-level install into ~/.local/bin
   if require_root; then
     mkdir -p /usr/local/bin
-    cat >/usr/local/bin/gitstrap <<'EOF'
+    cat >/usr/local/bin/codestrap <<'EOF'
 #!/usr/bin/env sh
 set -eu
-TARGET="/custom-cont-init.d/10-gitstrap.sh"
-# Always route through CLI sentinel so non-root usage never hits init path
-if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
+  if [ -e "$TARGET" ]; then
+    if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+  fi
+done
+echo "[codestrap][ERROR] launcher script not found." >&2
+exit 127
 EOF
-    chmod 755 /usr/local/bin/gitstrap
-    echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
-    log "installed CLI shim → /usr/local/bin/gitstrap"
+    chmod 755 /usr/local/bin/codestrap
+    echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
+    log "installed CLI shim → /usr/local/bin/codestrap"
   else
     # Non-root fallback: user-level shim
     mkdir -p "$HOME/.local/bin"
-    cat >"$HOME/.local/bin/gitstrap" <<'EOF'
+    cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
 set -eu
-TARGET="/custom-cont-init.d/10-gitstrap.sh"
-if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
+  if [ -e "$TARGET" ]; then
+    if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+  fi
+done
+echo "[codestrap][ERROR] launcher script not found." >&2
+exit 127
 EOF
-    chmod 755 "$HOME/.local/bin/gitstrap"
-    case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) log "note: ensure \$HOME/.local/bin is on PATH to use 'gitstrap' command";; esac
-    log "installed CLI shim → $HOME/.local/bin/gitstrap"
+    chmod 755 "$HOME/.local/bin/codestrap"
+    case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) log "note: ensure \$HOME/.local/bin is on PATH to use 'codestrap' command";; esac
+    log "installed CLI shim → $HOME/.local/bin/codestrap"
   fi
 }
 
-bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
+bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
-  # (Banner now shown by callers so it appears before hub question)
   GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
   GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
   GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
@@ -554,7 +557,7 @@ bootstrap_interactive(){
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS ORIGIN_GH_USERNAME ORIGIN_GH_PAT
-  gitstrap_run; log "bootstrap complete"
+  codestrap_run; log "bootstrap complete"
 }
 
 bootstrap_env_only(){
@@ -563,7 +566,7 @@ bootstrap_env_only(){
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (env)." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (env)." >&2; exit 2; }
   export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
-  gitstrap_run; log "bootstrap complete (env)"
+  codestrap_run; log "bootstrap complete (env)"
 }
 
 # ===== flag → env mapping (1:1, dash/underscore agnostic) =====
@@ -596,7 +599,7 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
-# --- interactive config flow ---
+# --- interactive config flow (kept for manual flow) ---
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
@@ -616,7 +619,6 @@ config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
-  # If CFG_SETTINGS is set, use it; otherwise, prompt.
   if [ -n "${CFG_SETTINGS+x}" ]; then
     if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
       install_settings_from_repo
@@ -637,7 +639,8 @@ config_hybrid(){
   CTX_TAG=""
 }
 
-bootstrap_from_args(){ # used by: gitstrap github [flags...]
+# ===== github flags handler =====
+bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -664,8 +667,8 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
   else
     if ! is_tty; then
       echo "No TTY available for prompts. Use flags or --env. Examples:
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap github --env
-  gitstrap github --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+  GH_USERNAME=alice GH_PAT=ghp_xxx codestrap github --env
+  codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
 " >&2
       exit 3
     fi
@@ -683,7 +686,7 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
 
   CTX_TAG="[Bootstrap GitHub]"
   export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GH_USERNAME ORIGIN_GH_PAT
-  gitstrap_run
+  codestrap_run
   log "bootstrap complete"
   CTX_TAG=""
 }
@@ -696,9 +699,9 @@ cli_entry(){
     # Hub flow
     if ! is_tty; then
       echo "No TTY detected. Run a subcommand or provide flags. Examples:
-  gitstrap github --env
-  gitstrap config
-  gitstrap passwd
+  codestrap github --env
+  codestrap config
+  codestrap passwd
 " >&2
       exit 3
     fi
@@ -726,7 +729,7 @@ cli_entry(){
       CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
-    # 3) Password?  (no [Change password] ? prefix; default YES)
+    # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
@@ -782,10 +785,8 @@ cli_entry(){
       done
 
       if is_tty; then
-        # Hybrid: use flags to skip prompts for provided options, prompt for the rest
         config_hybrid
       else
-        # Non-interactive: respect flags; default to merge when unset (preserve old behavior)
         CTX_TAG="[Bootstrap config]"
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
@@ -804,7 +805,6 @@ cli_entry(){
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
-      # No PROMPT_TAG for the direct subcommand; we run it immediately
       CTX_TAG="[Change password]"
       password_change_interactive
       CTX_TAG=""
@@ -819,7 +819,7 @@ autorun_env_if_present(){
   if [ -n "${GH_USERNAME:-}" ] && [ -n "${GH_PAT:-}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
     log "env present and no lock → running bootstrap"
-    gitstrap_run || exit $?
+    codestrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
     { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_PAT missing → no autorun"
@@ -835,7 +835,7 @@ case "${1:-init}" in
     install_settings_from_repo
     install_config_shortcuts
     autorun_env_if_present
-    log "Gitstrap initialized. Use: gitstrap -h"
+    log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
     shift; cli_entry "$@";;

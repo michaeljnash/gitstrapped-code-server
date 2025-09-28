@@ -5,10 +5,10 @@
 > Ships a code-server workspace bootstrapped with github that:
 >
 > * Bootstraps your workspace with GitHub: generates an SSH key if not present, uploads it to GitHub via a PAT if needed, and clones/pulls specified repositories.
-> * Provides a simple CLI (`gitstrap`) for interactive or env-driven bootstrap.
-> * Sets a first-boot code-server password automatically (optional), and lets you change it later with `gitstrap passwd`.
+> * Provides a simple CLI (`codestrap`) for interactive or env-driven bootstrap.
+> * Sets a first-boot code-server password automatically (optional), and lets you change it later with `codestrap passwd`.
 
-This repository wraps the official LinuxServer.io `code-server` image with `gitstrap.sh` and a few conventions that make fresh environments productive in seconds.
+This repository wraps the official LinuxServer.io `code-server` image with `codestrap.sh` and a few conventions that make fresh environments productive in seconds.
 
 ---
 
@@ -28,13 +28,13 @@ This repository wraps the official LinuxServer.io `code-server` image with `gits
 
 ## How it works
 
-1. Restart gate — `gitstrap.sh` installs a tiny supervised Node HTTP service at `127.0.0.1:9000` to request a gentle container restart after sensitive changes (like password updates).
+1. Restart gate — `codestrap.sh` installs a tiny supervised Node HTTP service at `127.0.0.1:9000` to request a gentle container restart after sensitive changes (like password updates).
 2. First-boot password hash — If `DEFAULT_PASSWORD` is set and no hash exists at `FILE__HASHED_PASSWORD`, a secure Argon2 hash is generated and saved. A one-time marker triggers a supervised restart so code-server picks it up.
-3. CLI shim — A `gitstrap` executable is installed into `/usr/local/bin`. You can run it from the integrated terminal in code-server or by `docker exec`.
+3. CLI shim — A `codestrap` executable is installed into `/usr/local/bin`. You can run it from the integrated terminal in code-server or by `docker exec`.
 4. Bootstrap (two modes)
    - Env-driven autorun (optional): If both `GH_USERNAME` and `GH_PAT` are set at minimum on container start, bootstrap runs automatically (once per boot).
-   - Interactive/manual: Run `gitstrap` for prompts, or `gitstrap --env` to use env vars without prompts.
-5. Password updates — Change the code-server password anytime with `gitstrap passwd` (interactive, secure prompts). The restart gate reloads code-server cleanly.
+   - Interactive/manual: Run `codestrap` for prompts, or `codestrap --env` to use env vars without prompts.
+5. Password updates — Change the code-server password anytime with `codestrap passwd` (interactive, secure prompts). The restart gate reloads code-server cleanly.
 
 ---
 
@@ -44,24 +44,24 @@ This repository wraps the official LinuxServer.io `code-server` image with `gits
 2. Adjust `docker-compose.yml` (ports/volumes) to your environment.
 3. `docker compose up -d`
 4. Open code-server in your browser, then:
-   - Interactive bootstrap: open a terminal and run `gitstrap` (you’ll be prompted).
-   - Env-driven: set `GH_USERNAME` and `GH_PAT` in `.env` and it will autorun on first boot; or run `gitstrap --env`.
+   - Interactive bootstrap: open a terminal and run `codestrap` (you’ll be prompted).
+   - Env-driven: set `GH_USERNAME` and `GH_PAT` in `.env` and it will autorun on first boot; or run `codestrap --env`.
 
-> You can leave all env vars empty and fully bootstrap interactively with `gitstrap`.
+> You can leave all env vars empty and fully bootstrap interactively with `codestrap`.
 
 ---
 
 ## CLI usage
 
-gitstrap — bootstrap GitHub + manage code-server auth
+codestrap — bootstrap GitHub + manage code-server auth
 
 Usage:
-  gitstrap                               # interactive bootstrap (prompts if TTY)
-  gitstrap --env                         # bootstrap using environment variables only
-  gitstrap [flags...]                    # non-interactive bootstrap using provided flags/env
-  gitstrap passwd                        # interactive password change (secure prompts)
-  gitstrap -h | --help                   # help
-  gitstrap -v | --version                # version
+  codestrap                               # interactive bootstrap (prompts if TTY)
+  codestrap --env                         # bootstrap using environment variables only
+  codestrap [flags...]                    # non-interactive bootstrap using provided flags/env
+  codestrap passwd                        # interactive password change (secure prompts)
+  codestrap -h | --help                   # help
+  codestrap -v | --version                # version
 
 Power-user flags (1:1 with env vars; dash or underscore both accepted):
   --gh-username | --gh_username <val>        → GH_USERNAME
@@ -75,14 +75,14 @@ Power-user flags (1:1 with env vars; dash or underscore both accepted):
 
 Env-only (no flags):
   DEFAULT_PASSWORD          First-boot only; initial password
-  GH_KEY_TITLE              Title for uploaded GitHub SSH key (default "gitstrapped-code-server SSH Key")
+  GH_KEY_TITLE              Title for uploaded GitHub SSH key (default "codestrapped-code-server SSH Key")
 
 Examples:
-  gitstrap
-  GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
-  gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  gitstrap --pull-existing-repos false
-  gitstrap passwd
+  codestrap
+  GH_USERNAME=alice GH_PAT=ghp_xxx codestrap --env
+  codestrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
+  codestrap --pull-existing-repos false
+  codestrap passwd
 
 ---
 
@@ -102,7 +102,7 @@ Defaults are sensible; everything is optional except where noted.
 | GH_REPOS              |    ☐     | Comma-separated repos to clone (see below).                                                                  |
 | PULL_EXISTING_REPOS   |    ☐     | `true`/`false` — if repo exists, pull/reset (default `true`).                                               |
 | GIT_BASE_DIR          |    ☐     | Workspace root inside the container (default `/config/workspace`).                                          |
-| GH_KEY_TITLE          |    ☐     | Title for the uploaded GitHub SSH key (default `gitstrapped-code-server SSH Key`).                          |
+| GH_KEY_TITLE          |    ☐     | Title for the uploaded GitHub SSH key (default `codestrapped-code-server SSH Key`).                          |
 
 ---
 
@@ -130,7 +130,7 @@ Example:
 GH_REPOS="owner1/repo1#main, owner2/repo2, https://github.com/owner3/repo3"
 
 When a target already contains a repo:
-- If `PULL_EXISTING_REPOS=true`, `gitstrap` will fetch and fast-forward pull, or hard reset to `origin/<branch>` when a branch was specified.
+- If `PULL_EXISTING_REPOS=true`, `codestrap` will fetch and fast-forward pull, or hard reset to `origin/<branch>` when a branch was specified.
 - If `false`, existing repos are left unchanged.
 
 All clones land under `GIT_BASE_DIR` (default `/config/workspace`).
@@ -143,16 +143,16 @@ volumes:
   code-config:   # persists VS Code user data and script state under /config
   projects:      # persists your workspace repos under /config/workspace
 
-State lives in `/config/.gitstrap`. SSH keys in `/config/.ssh`.
+State lives in `/config/.codestrap`. SSH keys in `/config/.ssh`.
 
 ---
 
 ## Troubleshooting
 
-- Autorun didn’t trigger — You must set both `GH_USERNAME` and `GH_PAT` before container start. A lock file at `/run/gitstrap/init-gitstrap.lock` prevents duplicate autoruns in the same boot.
+- Autorun didn’t trigger — You must set both `GH_USERNAME` and `GH_PAT` before container start. A lock file at `/run/codestrap/init-codestrap.lock` prevents duplicate autoruns in the same boot.
 - Git cannot access GitHub — The script generates an ed25519 key, adds `github.com` to `known_hosts`, and uploads the public key using your PAT. Ensure PAT scopes include `user:email` and `admin:public_key`.
 - Password change banner appeared but login didn’t change — The Argon2 hash is written to `FILE__HASHED_PASSWORD`. If code-server didn’t pick it up, the restart gate triggers a supervised restart; if that fails, manually restart the container.
 - No TTY for prompts — Use flags or `--env`, e.g.:
-    GH_USERNAME=alice GH_PAT=ghp_xxx gitstrap --env
+    GH_USERNAME=alice GH_PAT=ghp_xxx codestrap --env
   or:
-    gitstrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main"
+    codestrap --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main"

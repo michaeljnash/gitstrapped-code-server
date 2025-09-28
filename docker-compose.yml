@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     environment:
-      FILE__HASHED_PASSWORD: /config/.gitstrap/password.hash
+      FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
       INSTALL_PACKAGES: argon2 #jq curl git python3-venv
       PUID: ${PUID:-1000}
@@ -23,13 +23,13 @@ services:
       PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS}
       WORKSPACE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
-      GH_KEY_TITLE: ${GH_KEY_TITLE:-gitstrapped-code-server SSH Key}
+      GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
     volumes:
       - code-config:/config123454
       - code-config:/config
       - projects:/config/workspace
-      - ./settings.json:/config/gitstrap/settings.json:ro
-      - ./gitstrap.sh:/custom-cont-init.d/10-gitstrap.sh:ro
+      - ./settings.json:/config/codestrap/settings.json:ro
+      - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     ports:
       - ":8443"
       #- "8443:8443"
