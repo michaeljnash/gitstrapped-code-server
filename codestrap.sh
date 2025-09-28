@@ -700,7 +700,7 @@ cli_entry(){
       CTX_TAG=""
     else
       CTX_TAG="[Bootstrap GitHub]"
-      log "skipped GitHub bootstrap"
+      log "skipped bootstrap GitHub"
       CTX_TAG=""
     fi
     # 2) Config?
@@ -708,7 +708,7 @@ cli_entry(){
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
-      CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
+      CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
     fi
 
     # 3) Password?  (no prefix on question; default YES)
@@ -717,7 +717,7 @@ cli_entry(){
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
       password_change_interactive
     else
-      log "skipped password change"
+      log "skipped change password"
     fi
     PROMPT_TAG=""
     CTX_TAG=""
