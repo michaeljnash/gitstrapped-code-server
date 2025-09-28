@@ -505,13 +505,7 @@ EOF
   echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
-bootstrap_banner(){
-  if has_tty; then
-    printf "\n%s Interactive bootstrap — press Ctrl+C to abort.\n\n" "${CTX_TAG:-[gitstrap]}" >/dev/tty
-  else
-    log "No TTY; use flags or --env."
-  fi
-}
+bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
@@ -700,15 +694,7 @@ cli_entry(){
       ;;
     config)
       shift || true
-      if is_tty; then
-        config_interactive
-      else
-        CTX_TAG="[Bootstrap config]"
-        install_settings_from_repo
-        install_config_shortcuts
-        log "Bootstrap config completed"
-        CTX_TAG=""
-      fi
+      if is_tty; then config_interactive; else CTX_TAG="[Bootstrap config]"; install_settings_from_repo; install_config_shortcuts; log "Bootstrap config completed"; CTX_TAG=""; fi
       ;;
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
