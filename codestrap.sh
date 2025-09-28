@@ -513,9 +513,8 @@ merge_codestrap_keybindings(){
   # ---- Load USER keybindings (allow JSONC comments; empty => []) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
-    # Strip comments only
     strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-    # If empty/whitespace after stripping, treat as empty array
+    # If empty/whitespace, treat as empty array
     if [ ! -s "$tmp_user_json" ] || ! grep -q '[^[:space:]]' "$tmp_user_json"; then
       printf '[]\n' >"$tmp_user_json"
     fi
@@ -538,7 +537,7 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # ---- Build merged array with jq (robust, no indexing on non-objects) ----
+  # ---- Build merged array with jq (robust; no has/[] on non-objects) ----
   tmp_final="$(mktemp)"
   jq -n \
     --slurpfile u "$tmp_user_json" \
@@ -549,38 +548,40 @@ merge_codestrap_keybindings(){
       (arr($u[0])) as $U |
       (arr($r[0])) as $R |
 
-      # Preserve list: from { "codestrap_preserve": [...] } object if present
+      # Extract preserve array from a special object, if present
       (
-        [ $U[]? | objects | .codestrap_preserve? | select(type=="array") ] | first
+        [ $U[]? | select(type=="object") | .codestrap_preserve? | select(type=="array") ] | first
       ) as $pres_in |
       ( ($pres_in // []) | map(select(type=="string")) | unique ) as $preserve |
 
-      # Index user bindings by .key (object; safe)
-      ( INDEX( $U[]? | objects | select(has("key") and (.key|type=="string")); .key ) // {} ) as $uindex |
+      # Build user index by key (object -> object), robustly
+      ( reduce ( [ $U[]? | select(type=="object" and has("key") and (.key|type=="string")) ] )[] as $o
+          ({}; .[$o.key] = $o)
+      ) as $uindex |
 
-      # Repo keys set
-      ( [ $R[]? | objects | select(has("key") and (.key|type=="string")) | .key ] | unique ) as $rkeys |
+      # Build a set of repo keys for collision checks
+      ( reduce ( [ $R[]? | select(type=="object" and has("key") and (.key|type=="string")) ] )[] as $o
+          ({}; .[$o.key] = true)
+      ) as $rset |
 
-      # Managed (repo) items with preserve overrides from user
+      # Managed (repo) items, honoring preserve overrides from user
       ([
-        $R[]? | objects | select(has("key") and (.key|type=="string")) as $r
+        $R[]? | select(type=="object" and has("key") and (.key|type=="string")) as $r
         | ($r.key) as $k
-        | if ($preserve | index($k)) and ($uindex | has($k))
-            then $uindex[$k]
-            else $r
-          end
+        | if (($preserve | index($k)) and ($uindex | has($k))) then $uindex[$k] else $r end
       ]) as $managed |
 
-      # Rest: user items excluding codestrap_preserve object and any that collide with repo keys
+      # Pass-through user items that are NOT the special preserve object
+      # and do not collide with repo keys
       ([
         $U[]?
         | if (type=="object" and has("codestrap_preserve")) then empty
-          elif (type=="object" and has("key") and (.key|type=="string") and ($rkeys | index(.key))) then empty
+          elif (type=="object" and has("key") and (.key|type=="string") and ($rset | has(.key))) then empty
           else .
           end
       ]) as $rest |
 
-      # Final array
+      # Final array: managed + preserve object + rest
       $managed + [ { codestrap_preserve: $preserve } ] + $rest
     ' | jq '.' > "$tmp_final"
 
