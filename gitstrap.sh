@@ -23,17 +23,17 @@ ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
-prompt(){ msg="$1"; if has_tty; then printf "\n%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "\n%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
+prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
 prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
 prompt_secret(){
   if has_tty; then
-    printf "\n%s%s" "$PROMPT_TAG" "$1" >/dev/tty
+    printf "%s%s" "$PROMPT_TAG" "$1" >/dev/tty
     stty -echo </dev/tty >/dev/tty 2>/dev/null || true
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
-    printf "\n" >/dev/tty 2>/dev/null || true
+    printf "\n" >/dev/tty 2>/dev/tty 2>/dev/null || true
   else
-    printf "\n%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
+    printf "%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
   fi; printf "%s" "${s:-}"
 }
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
@@ -375,7 +375,7 @@ install_settings_from_repo(){
 
   tmp_user_json="$(mktemp)"
   if [ ! -f "$SETTINGS_PATH" ] || ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-    if [ -f "$SETTINGS_PATH" ]; then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
+    if [ -f "$SETTINGS_PATH" ] then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
   else
     cp "$SETTINGS_PATH" "$tmp_user_json"
   fi
@@ -644,7 +644,8 @@ cli_entry(){
     # Show banner BEFORE first interactive question
     bootstrap_banner
 
-    # 1) GitHub?
+    # 1) GitHub? (add a blank line before the question)
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
       CTX_TAG="[Bootstrap GitHub]"
@@ -655,14 +656,16 @@ cli_entry(){
       log "skipped GitHub bootstrap"
     fi
 
-    # 2) Config?
+    # 2) Config? (add a blank line before the question)
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
       CTX_TAG="[Bootstrap config]"; log "skipped config"; CTX_TAG=""
     fi
 
-    # 3) Password? (default = Yes)
+    # 3) Password? default Yes (add a blank line before the question)
+    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     PROMPT_TAG="[Change password] ? "
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
