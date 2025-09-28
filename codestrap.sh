@@ -593,82 +593,71 @@ merge_codestrap_keybindings(){
       | ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
     ' > "$tmp_final"
 
-  # ---- Inject comments with correct placement (outside preserve object) ----
+  # ---- Inject comments with correct placement ----
+  # Place:
+  #   - START banner right after the opening '['
+  #   - Guidance BEFORE the preserve object
+  #   - END banner immediately AFTER the closing '}' of the preserve object
   tmp_with_comments="$(mktemp)"
   awk '
     function nchr(s, ch,   t) { t=s; gsub(ch,"",t); return length(s)-length(t) }
 
     BEGIN {
-      seen_start=0
-      printed_end=0
+      seen_array_start=0
       in_preserve=0
-      preserve_depth=-1
+      preserve_level=-1
       depth=0
-      buf=""
+      prev=""   # single-line lookbehind buffer (for a lone "{")
     }
 
-    # Flush helper: print buffered line and update depth
-    function flush_buf(   b) {
-      if (buf != "") {
-        print buf
-        depth += nchr(buf,"{") - nchr(buf,"}")
-        buf=""
+    # helper to actually print a line and update depth
+    function out(l,   opens,closes) {
+      print l
+      opens  = nchr(l,"{")
+      closes = nchr(l,"}")
+      depth += (opens - closes)
+
+      # If we just stepped OUT of the preserve object, print END banner now.
+      if (in_preserve && depth < preserve_level) {
+        print "  // END codestrap keybindings"
+        in_preserve=0
       }
     }
 
     {
       line=$0
 
-      # Handle array start and print START banner
-      if (seen_start==0 && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
-        flush_buf()
-        print line
+      # On first array bracket, print START banner
+      if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
+        out(line)
         print "  // START codestrap keybindings"
-        seen_start=1
+        seen_array_start=1
         next
       }
 
-      # If we have not yet entered the preserve object, check for the pattern:
-      # previous buffered line is "{", and THIS line has the preserve key.
-      if (!in_preserve && buf ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
-        # Insert guidance BEFORE the opening brace
+      # If previous buffered line was a lone "{", and THIS line begins the preserve key,
+      # insert guidance BEFORE the "{", then print the "{", then the key line.
+      if (prev != "" && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        # Now print the "{"
-        print buf
-        depth += 1   # opening brace from buf
-        buf=""
-        # Print the current line (the key line)
-        print line
-        depth += nchr(line,"{") - nchr(line,"}")
-        # We are now inside the preserve object. Record its starting depth.
+        out(prev)               # prints the "{", depth++
+        prev=""
+        out(line)               # prints the '"codestrap_preserve": ...' line (depth usually unchanged)
         in_preserve=1
-        preserve_depth=depth-0
+        preserve_level=depth    # record object depth right after "{"
         next
       }
 
-      # Normal path: shift buffer
-      flush_buf()
-      buf=line
+      # Normal flow:
+      if (prev != "") { out(prev); prev="" }
+      # Buffer a lone "{" to allow lookahead for preserve key line
+      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) { prev=line; next }
 
-      # If we just printed a closing brace line that exits the preserve object, emit END
-      # (This will be handled when the buffered closing brace is flushed on next iteration or after loop end)
+      out(line)
     }
 
     END {
-      # Flush the last buffered line
-      flush_buf()
-
-      # If we were in the preserve object, we need to detect exit on last printed line;
-      # If we are no longer deeper than preserve depth, that closing brace was printed,
-      # so we can safely emit END now.
-      if (in_preserve && !printed_end && depth <= preserve_depth) {
-        print "  // END codestrap keybindings"
-        printed_end=1
-      }
-
-      # If END somehow wasn’t printed (e.g., no preserve object), ensure it appears before the closing array.
-      # We can’t easily reposition now, so emit nothing here unless needed.
-      # (If there was a preserve object, the block above will have printed END.)
+      if (prev != "") { out(prev) }  # flush any remaining buffered "{"
+      # If file ended while still flagged as in_preserve (malformed), do not add END.
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
