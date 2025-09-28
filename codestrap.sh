@@ -459,19 +459,50 @@ install_settings_from_repo(){
   tmp_with_comments="$(mktemp)"
   {
     first_brace_done=0
+    in_preserve=0
+    depth=0
     while IFS= read -r line; do
+      # Print opening brace + START banner once
       if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
         echo "$line"
         echo "  // START codestrap settings"
         first_brace_done=1
         continue
       fi
+
+      if [ $in_preserve -eq 1 ]; then
+        # Still inside the codestrap_preserve array: echo line and track depth
+        echo "$line"
+        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
+        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
+        depth=$((depth + inc - dec))
+        if [ "$depth" -le 0 ]; then
+          # Array closed on this line; now place END banner
+          echo "  // END codestrap settings"
+          in_preserve=0
+        fi
+        continue
+      fi
+
+      # Detect the codestrap_preserve key; place its guidance banner above it
       if echo "$line" | grep -q '^[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
         echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
         echo "$line"
-        echo "  // END codestrap settings"
+
+        # Initialize depth from this very line (handles inline arrays too)
+        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
+        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
+        depth=$((inc - dec))
+        if [ "$depth" -le 0 ]; then
+          # Array starts & ends on same line; close immediately
+          echo "  // END codestrap settings"
+        else
+          in_preserve=1
+        fi
         continue
       fi
+
+      # Default passthrough
       echo "$line"
     done < "$tmp_final"
   } > "$tmp_with_comments"
