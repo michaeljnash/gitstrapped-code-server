@@ -505,148 +505,148 @@ merge_codestrap_settings(){
 
 # ===== keybindings.json merge =====
 merge_codestrap_keybindings(){
+  REPO_KEYB_SRC="${REPO_KEYB_SRC:-$HOME/codestrap/keybindings.json}"
   [ -f "$REPO_KEYB_SRC" ] || { log "no repo keybindings.json; skipping keybindings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping keybindings merge"; return 0; }
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER keybindings (allow JSONC comments; empty => []) ----
+  # ---- Load USER keybindings (allow JSONC comments, no other repairs) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
-    strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-    # Empty/whitespace → []
-    if [ ! -s "$tmp_user_json" ] || ! grep -q '[^[:space:]]' "$tmp_user_json"; then
-      printf '[]\n' >"$tmp_user_json"
-    fi
-    # Must be valid JSON array
-    if ! jq -e . "$tmp_user_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1; then
-      CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
-      rm -f "$tmp_user_json" 2>/dev/null || true
-      return 1
+    if [ ! -s "$KEYB_PATH" ]; then
+      printf '[]\n' > "$tmp_user_json"
+    else
+      if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
+        cp "$KEYB_PATH" "$tmp_user_json"
+      else
+        strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
+        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+          CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+          rm -f "$tmp_user_json" 2>/dev/null || true
+          return 1
+        fi
+      fi
     fi
   else
-    printf '[]\n' >"$tmp_user_json"
+    printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO keybindings (allow JSONC comments only) ----
+  # ---- Load REPO keybindings (allow JSONC comments, no other repairs) ----
   tmp_repo_json="$(mktemp)"
-  strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
-  if [ ! -s "$tmp_repo_json" ] || ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
-    CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""
-    rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-    return 1
+  if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
+    cp "$REPO_KEYB_SRC" "$tmp_repo_json"
+  else
+    strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+      return 1
+    fi
   fi
 
-  # ---- Merge (robust; never has(null); treat only objects-with-string-key as bindings) ----
+  # ---- Merge: repo array into user array, honoring codestrap_preserve ----
   tmp_final="$(mktemp)"
   jq -n \
-    --slurpfile u "$tmp_user_json" \
-    --slurpfile r "$tmp_repo_json" '
-      def arr(x): if (x|type)=="array" then x else [] end;
-      (arr($u[0])) as $U |
-      (arr($r[0])) as $R |
+    --argfile u "$tmp_user_json" \
+    --argfile r "$tmp_repo_json" '
+      def arr(v): if (v|type)=="array" then v else [] end;
+      def is_kb: (type=="object") and (.key? != null);
+      def kstr: .key|tostring;
 
-      # Pull a single preserve object if present and valid
-      (
-        [ $U[]? | select(type=="object" and has("codestrap_preserve") and (.codestrap_preserve|type=="array")) ] | first
-      ) as $pres_obj |
-      ( ($pres_obj.codestrap_preserve // []) | map(select(type=="string")) | unique ) as $preserve |
+      # Normalize
+      $U := arr($u);
+      $R := arr($r);
 
-      # Build user index by key (only objects with string "key")
-      (
-        reduce ( [ $U[]? | select(type=="object" and has("key") and (.key|type=="string")) ] )[] as $o
-          ({}; .[$o.key] = $o)
-      ) as $uindex |
+      # Extract preserve list from user (last preserve block wins)
+      $pres :=
+        ( [ $U[] | select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve ] | last ) // [];
 
-      # Set of repo keys
-      (
-        reduce ( [ $R[]? | select(type=="object" and has("key") and (.key|type=="string")) ] )[] as $o
-          ({}; .[$o.key] = true)
-      ) as $rset |
+      # Quick lookup maps
+      $u_by_key := reduce ( $U[] | select(is_kb) ) as $o ({}; .[($o|kstr)] = $o);
+      $r_by_key := reduce ( $R[] | select(is_kb) ) as $o ({}; .[($o|kstr)] = $o);
 
-      # Managed (repo) items with preserve override from user
-      ([
-        $R[]?
-        | select(type=="object" and has("key") and (.key|type=="string"))
-        | .key as $k
-        | if ($preserve | index($k)) and ($uindex | has($k)) then $uindex[$k] else . end
-      ]) as $managed |
+      # Start with repo entries; for preserved keys prefer user version if present
+      $initial :=
+        [ $R[] | select(is_kb) as $o
+          | ($o|kstr) as $k
+          | if ($pres | index($k)) and ($u_by_key[$k]? != null) then $u_by_key[$k] else $o end
+        ];
 
-      # Rest of user items:
-      # - drop special preserve object
-      # - drop user bindings whose keys collide with repo keys
-      ([
-        $U[]?
-        | if (type=="object" and has("codestrap_preserve")) then empty
-          elif (type=="object" and has("key") and (.key|type=="string"))
-            then (.key as $k | if $rset|has($k) then empty else . end)
-          else .
-          end
-      ]) as $rest |
+      # Add user entries not already included by key (regardless of origin)
+      $seen := (reduce $initial[] as $x ({}; .[($x|kstr)] = true));
+      $extras :=
+        [ $U[] | select(is_kb) as $o
+          | ($o|kstr) as $k
+          | select( ($seen[$k]? // false) | not )
+        ];
 
-      # Final array
-      $managed + [ { codestrap_preserve: $preserve } ] + $rest
-    ' | jq '.' > "$tmp_final"
+      ($initial + $extras + [ { "codestrap_preserve": $pres } ])
+    ' > "$tmp_final"
 
-  # ---- Inject comments (END always printed; safe even if preserve is multi-line) ----
+  # ---- Inject comments (works regardless of jq formatting) ----
   tmp_with_comments="$(mktemp)"
-  {
-    first_bracket_done=0
-    in_preserve_obj=0
-    depth_obj=0
-    end_done=0
-    while IFS= read -r line; do
-      if [ $first_bracket_done -eq 0 ] && echo "$line" | grep -q '^\[\s*$'; then
-        echo "$line"
-        echo "  // START codestrap keybindings"
-        first_bracket_done=1
-        continue
-      fi
+  awk '
+    # Count occurrences of a single character without mutating the original line
+    function nchr(s, ch,   tmp) { tmp = s; gsub(ch, "", tmp); return length(s) - length(tmp) }
 
-      if [ $in_preserve_obj -eq 1 ]; then
-        echo "$line"
-        inc=$(printf "%s" "$line" | tr -cd '{' | wc -c | tr -d ' ')
-        dec=$(printf "%s" "$line" | tr -cd '}' | wc -c | tr -d ' ')
-        depth_obj=$((depth_obj + inc - dec))
-        if [ "$depth_obj" -le 0 ] && [ $end_done -eq 0 ]; then
-          echo "  // END codestrap keybindings"
-          end_done=1
-          in_preserve_obj=0
-        fi
-        continue
-      fi
+    BEGIN { seen_start=0; in_preserve=0; depth=0; printed_end=0 }
 
-      if echo "$line" | grep -q '^[[:space:]]*{[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
-        echo "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        echo "$line"
-        inc=$(printf "%s" "$line" | tr -cd '{' | wc -c | tr -d ' ')
-        dec=$(printf "%s" "$line" | tr -cd '}' | wc -c | tr -d ' ')
-        depth_obj=$((inc - dec))
-        if [ "$depth_obj" -le 0 ] && [ $end_done -eq 0 ]; then
-          echo "  // END codestrap keybindings"
-          end_done=1
-        else
-          in_preserve_obj=1
-        fi
-        continue
-      fi
+    {
+      line = $0
 
-      # Final safeguard: if we reach the closing ] and END not printed, print it now
-      if [ $end_done -eq 0 ] && echo "$line" | grep -q '^[[:space:]]*\][[:space:]]*,?[[:space:]]*$'; then
-        echo "  // END codestrap keybindings"
-        end_done=1
-      fi
+      # After the first "[" line, print START banner
+      if (seen_start==0 && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
+        print line
+        print "  // START codestrap keybindings"
+        seen_start=1
+        next
+      }
 
-      echo "$line"
-    done < "$tmp_final"
-  } > "$tmp_with_comments"
+      # While inside the { "codestrap_preserve": ... } object, track brace depth
+      if (in_preserve==1) {
+        print line
+        depth += nchr(line, "{") - nchr(line, "}")
+        if (depth <= 0 && printed_end==0) {
+          print "  // END codestrap keybindings"
+          printed_end=1
+          in_preserve=0
+        }
+        next
+      }
 
+      # If we see the preserve key on ANY line, print guidance before it
+      if (line ~ /"codestrap_preserve"[[:space:]]*:/) {
+        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
+        print line
+        depth = nchr(line, "{") - nchr(line, "}")
+        if (depth > 0) {
+          in_preserve=1
+        } else if (printed_end==0) {
+          # one-line preserve object
+          print "  // END codestrap keybindings"
+          printed_end=1
+        }
+        next
+      }
+
+      # If we hit the closing ] and END hasn’t been printed, print it now (safeguard)
+      if (printed_end==0 && line ~ /^[[:space:]]*\][[:space:]]*,?[[:space:]]*$/) {
+        print "  // END codestrap keybindings"
+        printed_end=1
+      }
+
+      print line
+    }
+  ' "$tmp_final" > "$tmp_with_comments"
+
+  # ---- Write atomically ----
   mv -f "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
+
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
-
 
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
