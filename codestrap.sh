@@ -15,7 +15,7 @@ red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
 ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
 
 log(){  printf "%s %s\n" "${CTX_TAG:-[codestrap]}" "$*"; }
-warn(){ printf "%s %s\n" "${CTX_TAG:-[codestrap]}[WARN]" "$*" >&2; }
+warn(){ printf "%s\n" "$(ylw "${CTX_TAG:-[codestrap]}[WARN] $*")" >&2; }
 err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
 
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
@@ -616,7 +616,7 @@ set_flag_env(){
       [ "$envname" = "GH_PAT" ] && ORIGIN_GH_PAT="--gh-pat"
       export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
       ;;
-    *) warn "Unknown or disallowed flag '--$1'"; print_help; exit 1;;
+    *) err "Unknown or disallowed flag '--$1'"; print_help; exit 1;;
   esac
 }
 
@@ -685,11 +685,11 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
       --*)
         key="${1#--}"; shift || true
         val="${1:-}"
-        [ -n "$val" ] && [ "${val#--}" = "$val" ] || { warn "Flag '--$key' requires a value."; exit 2; }
+        [ -n "$val" ] && [ "${val#--}" = "$val" ] || { err "Flag '--$key' requires a value."; exit 2; }
         set_flag_env "$key" "$val"
         ;;
       *)
-        warn "Unknown argument: $1"; print_help; exit 1;;
+        err "Unknown argument: $1"; print_help; exit 1;;
     esac
     shift || true
   done
@@ -808,13 +808,13 @@ cli_entry(){
           --settings)
             shift || true
             CFG_SETTINGS="${1:-}"
-            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; warn "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
           --settings=*)
             CFG_SETTINGS="${1#*=}"
             ;;
           *)
-            CTX_TAG="[Bootstrap config]"; warn "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+            CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
         shift || true
       done
