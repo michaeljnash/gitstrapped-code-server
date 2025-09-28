@@ -48,6 +48,7 @@ Usage (subcommands):
   codestrap                      # Interactive hub: ask GitHub? Config? Change password?
   codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
+  codestrap extensions [flags...]# Install/update extensions from extensions.json
   codestrap passwd               # Interactive password change (secure prompts)
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
@@ -69,6 +70,12 @@ Flags for 'codestrap config' (booleans; supply only the ones you want to skip pr
   --extensions <true|false>     Merge strapped extensions.json into user extensions.json
                                 (Interactive default: ask; Non-interactive default: true)
 
+Flags for 'codestrap extensions':
+  --install <all|missing>       Install/update extensions from merged extensions.json:
+                                all     → install missing + update already-installed to latest
+                                missing → install only those not yet installed
+                                (No flag) → interactive: ask per missing; then offer to update installed
+
 Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
@@ -79,6 +86,9 @@ Examples:
   codestrap github --workspace-dir /config/workspace --repos-subdir /repos
   codestrap config
   codestrap config --settings false --keybindings true --extensions true
+  codestrap extensions                   # interactive (ask per missing; offer to update)
+  codestrap extensions --install all     # install missing + update installed
+  codestrap extensions --install missing # install only missing
   codestrap passwd
 HLP
 }
@@ -724,6 +734,207 @@ merge_codestrap_extensions(){
   log "merged extensions.json → $EXT_PATH"
 }
 
+# ===== extension management (install/update using code-server/VS Code CLI) =====
+detect_code_cli(){
+  if command -v code-server >/dev/null 2>&1; then echo "code-server"; return 0; fi
+  if command -v code >/dev/null 2>&1; then echo "code"; return 0; fi
+  echo ""
+}
+
+emit_recommended_exts(){
+  [ -f "$EXT_PATH" ] || return 0
+  tmp="$(mktemp)"
+  if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
+    cp "$EXT_PATH" "$tmp"
+  else
+    strip_jsonc_to_json "$EXT_PATH" >"$tmp" || true
+    jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
+  fi
+  jq -r '.recommendations // [] | .[] | strings' "$tmp" 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+emit_installed_exts(){
+  CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || return 0
+  "$CODE_BIN" --list-extensions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
+}
+
+emit_installed_exts_with_versions(){
+  CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || return 0
+  "$CODE_BIN" --list-extensions --show-versions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
+}
+
+install_one_ext(){
+  ext="$1"; force="${2:-false}"
+  CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot install ${ext}"; return 1; }
+  if [ "$force" = "true" ]; then
+    "$CODE_BIN" --install-extension "$ext" --force >/dev/null 2>&1
+  else
+    "$CODE_BIN" --install-extension "$ext" >/dev/null 2>&1
+  fi
+}
+
+in_file(){ needle="$1"; file="$2"; grep -F -x -q -- "$needle" "$file" 2>/dev/null; }
+
+extensions_cmd(){
+  # Parse flags
+  MODE=""  # "", "all", "missing"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        cat <<'EHELP'
+Usage:
+  codestrap extensions                 # interactive (ask per missing; offer to update installed)
+  codestrap extensions --install all   # install missing + update installed to latest
+  codestrap extensions --install missing  # install only missing
+
+This uses extensions listed in your merged extensions.json at:
+  $HOME/data/User/extensions.json
+EHELP
+        exit 0;;
+      --install)
+        shift || true
+        MODE="${1:-}"
+        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|missing>"; CTX_TAG=""; exit 2; }
+        ;;
+      --install=*)
+        MODE="${1#*=}"
+        ;;
+      *)
+        CTX_TAG="[Extensions]"; err "Unknown flag for 'extensions': $1"; CTX_TAG=""; exit 1;;
+    esac
+    shift || true
+  done
+
+  CODE_BIN="$(detect_code_cli)"
+  [ -n "$CODE_BIN" ] || { CTX_TAG="[Extensions]"; warn "code-server/VS Code CLI not found; cannot manage extensions"; CTX_TAG=""; exit 0; }
+
+  tmp_recs="$(mktemp)"; tmp_installed="$(mktemp)"
+  emit_recommended_exts >"$tmp_recs" || true
+  emit_installed_exts >"$tmp_installed" || true
+
+  rec_n="$(wc -l < "$tmp_recs" | tr -d ' ')"
+  [ "$rec_n" -gt 0 ] || { CTX_TAG="[Extensions]"; log "no recommended extensions found in $EXT_PATH"; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed"; exit 0; }
+
+  tmp_missing="$(mktemp)"; : >"$tmp_missing"
+  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
+
+  while IFS= read -r ext; do
+    [ -n "$ext" ] || continue
+    if in_file "$ext" "$tmp_installed"; then
+      echo "$ext" >>"$tmp_present_rec"
+    else
+      echo "$ext" >>"$tmp_missing"
+    fi
+  done <"$tmp_recs"
+
+  if [ -z "$MODE" ]; then
+    # Interactive
+    PROMPT_TAG="[Extensions] ? "
+    CTX_TAG="[Extensions]"
+
+    if [ -s "$tmp_missing" ]; then
+      log "missing recommended extensions:"
+      nl -ba "$tmp_missing" | sed 's/^/  /'
+      while IFS= read -r ext; do
+        [ -n "$ext" ] || continue
+        ans="$(prompt_def "Install '${ext}'? (Y/n) " "y")"
+        if [ "$(yn_to_bool "$ans")" = "true" ]; then
+          log "installing ${ext}"
+          if install_one_ext "$ext" "false"; then
+            log "installed ${ext}"
+          else
+            warn "failed to install ${ext}"
+          fi
+        else
+          log "skipped ${ext}"
+        fi
+      done <"$tmp_missing"
+    else
+      log "no missing recommended extensions"
+    fi
+
+    if [ -s "$tmp_present_rec" ]; then
+      ans2="$(prompt_def "Update already-installed recommended extensions to latest? (y/N) " "n")"
+      if [ "$(yn_to_bool "$ans2")" = "true" ]; then
+        while IFS= read -r ext; do
+          [ -n "$ext" ] || continue
+          log "updating ${ext}"
+          if install_one_ext "$ext" "true"; then
+            log "updated ${ext}"
+          else
+            warn "failed to update ${ext}"
+          fi
+        done <"$tmp_present_rec"
+      else
+        log "skipped updates"
+      fi
+    fi
+
+    PROMPT_TAG=""
+    CTX_TAG=""
+
+  else
+    # Non-interactive
+    case "$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')" in
+      missing)
+        if [ -s "$tmp_missing" ]; then
+          CTX_TAG="[Extensions]"
+          log "installing missing recommended extensions"
+          while IFS= read -r ext; do
+            [ -n "$ext" ] || continue
+            if install_one_ext "$ext" "false"; then
+              log "installed ${ext}"
+            else
+              warn "failed to install ${ext}"
+            fi
+          done <"$tmp_missing"
+          CTX_TAG=""
+        else
+          CTX_TAG="[Extensions]"; log "no missing recommended extensions"; CTX_TAG=""
+        fi
+        ;;
+      all)
+        if [ -s "$tmp_missing" ]; then
+          CTX_TAG="[Extensions]"
+          log "installing missing recommended extensions"
+          while IFS= read -r ext; do
+            [ -n "$ext" ] || continue
+            if install_one_ext "$ext" "false"; then
+              log "installed ${ext}"
+            else
+              warn "failed to install ${ext}"
+            fi
+          done <"$tmp_missing"
+          CTX_TAG=""
+        else
+          CTX_TAG="[Extensions]"; log "no missing recommended extensions"; CTX_TAG=""
+        fi
+
+        if [ -s "$tmp_present_rec" ]; then
+          CTX_TAG="[Extensions]"
+          log "updating already-installed recommended extensions to latest"
+          while IFS= read -r ext; do
+            [ -n "$ext" ] || continue
+            if install_one_ext "$ext" "true"; then
+              log "updated ${ext}"
+            else
+              warn "failed to update ${ext}"
+            fi
+          done <"$tmp_present_rec"
+          CTX_TAG=""
+        else
+          CTX_TAG="[Extensions]"; log "no already-installed recommended extensions to update"; CTX_TAG=""
+        fi
+        ;;
+      *)
+        CTX_TAG="[Extensions]"; err "Unknown value for --install: '$MODE' (expected all|missing)"; CTX_TAG=""; exit 2;;
+    esac
+  fi
+
+  rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" 2>/dev/null || true
+}
+
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config"
@@ -1122,6 +1333,10 @@ cli_entry(){
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
+      ;;
+    extensions)
+      shift || true
+      extensions_cmd "$@"
       ;;
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
