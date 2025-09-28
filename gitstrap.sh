@@ -499,13 +499,19 @@ install_cli_shim(){
 set -eu
 TARGET="/custom-cont-init.d/10-gitstrap.sh"
 # Always route through CLI sentinel so non-root usage never hits init path
-if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+if [ -x "$TARGET" ] then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
   echo "${GITSTRAP_VERSION:-0.3.8}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
-bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
+bootstrap_banner(){
+  if has_tty; then
+    printf "\n%s Interactive bootstrap — press Ctrl+C to abort.\n\n" "${CTX_TAG:-[gitstrap]}" >/dev/tty
+  else
+    log "No TTY; use flags or --env."
+  fi
+}
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
@@ -563,7 +569,7 @@ recompute_base(){
 
 # --- interactive config flow ---
 config_interactive(){
-  PROMPT_TAG="[Bootstrap config] "
+  PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     install_settings_from_repo
@@ -608,7 +614,7 @@ bootstrap_from_args(){ # used by: gitstrap github [flags...]
 " >&2
       exit 3
     fi
-    PROMPT_TAG="[Bootstrap GitHub] "
+    PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
     bootstrap_interactive
     PROMPT_TAG=""
@@ -643,7 +649,7 @@ cli_entry(){
 
     # 1) GitHub?
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
-      PROMPT_TAG="[Bootstrap GitHub] "
+      PROMPT_TAG="[Bootstrap GitHub] ? "
       CTX_TAG="[Bootstrap GitHub]"
       bootstrap_interactive
       PROMPT_TAG=""
@@ -660,7 +666,7 @@ cli_entry(){
     fi
 
     # 3) Password?
-    PROMPT_TAG="[Change password] "
+    PROMPT_TAG="[Change password] ? "
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "n")" = "true" ]; then
       password_change_interactive
@@ -680,7 +686,7 @@ cli_entry(){
       shift || true
       if [ $# -eq 0 ]; then
         if is_tty; then
-          PROMPT_TAG="[Bootstrap GitHub] "
+          PROMPT_TAG="[Bootstrap GitHub] ? "
           CTX_TAG="[Bootstrap GitHub]"
           bootstrap_interactive
           PROMPT_TAG=""
@@ -694,12 +700,20 @@ cli_entry(){
       ;;
     config)
       shift || true
-      if is_tty; then config_interactive; else CTX_TAG="[Bootstrap config]"; install_settings_from_repo; install_config_shortcuts; log "Bootstrap config completed"; CTX_TAG=""; fi
+      if is_tty; then
+        config_interactive
+      else
+        CTX_TAG="[Bootstrap config]"
+        install_settings_from_repo
+        install_config_shortcuts
+        log "Bootstrap config completed"
+        CTX_TAG=""
+      fi
       ;;
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
-      PROMPT_TAG="[Change password] "
+      PROMPT_TAG="[Change password] ? "
       CTX_TAG="[Change password]"
       password_change_interactive
       PROMPT_TAG=""
@@ -718,7 +732,7 @@ autorun_env_if_present(){
     gitstrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
-    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ]; } && log "GH_USERNAME/GH_PAT missing → no autorun"
+    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_PAT missing → no autorun"
   fi
 }
 
