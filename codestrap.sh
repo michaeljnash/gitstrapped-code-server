@@ -48,7 +48,7 @@ Usage (subcommands):
   codestrap                      # Interactive hub: ask GitHub? Config? Change password?
   codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
-  codestrap extensions [flags...]# Install/update extensions from extensions.json
+  codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
   codestrap passwd               # Interactive password change (secure prompts)
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
@@ -71,10 +71,17 @@ Flags for 'codestrap config' (booleans; supply only the ones you want to skip pr
                                 (Interactive default: ask; Non-interactive default: true)
 
 Flags for 'codestrap extensions':
-  --install <all|missing>       Install/update extensions from merged extensions.json:
-                                all     → install missing + update already-installed to latest
-                                missing → install only those not yet installed
-                                (No flag) → interactive: ask per missing; then offer to update installed
+  --install <all|missing|a|m>     Install/update extensions from merged extensions.json:
+                                  all/a     → install missing + update already-installed to latest
+                                  missing/m → install only those not yet installed
+  --uninstall <all|missing|a|m>   Uninstall extensions:
+                                  all/a     → uninstall *all* installed extensions
+                                  missing/m → uninstall extensions NOT in recommendations (cleanup)
+  (No flags) → interactive: choose install or uninstall, then scope.
+
+Env vars (init-time automation):
+  INSTALL_EXTENSIONS=<all|missing|none>      # default none
+  UNINSTALL_EXTENSIONS=<all|missing|none>    # default none; runs BEFORE install
 
 Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
@@ -83,12 +90,9 @@ Examples:
   codestrap
   codestrap github
   codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  codestrap github --workspace-dir /config/workspace --repos-subdir /repos
   codestrap config
-  codestrap config --settings false --keybindings true --extensions true
-  codestrap extensions                   # interactive (ask per missing; offer to update)
-  codestrap extensions --install all     # install missing + update installed
-  codestrap extensions --install missing # install only missing
+  codestrap extensions --install all
+  codestrap extensions --install missing --uninstall missing   # sync to recommendations
   codestrap passwd
 HLP
 }
@@ -734,7 +738,7 @@ merge_codestrap_extensions(){
   log "merged extensions.json → $EXT_PATH"
 }
 
-# ===== extension management (install/update using code-server/VS Code CLI) =====
+# ===== extension management (install/update/uninstall using code-server/VS Code CLI) =====
 detect_code_cli(){
   if command -v code-server >/dev/null 2>&1; then echo "code-server"; return 0; fi
   if command -v code >/dev/null 2>&1; then echo "code"; return 0; fi
@@ -774,19 +778,34 @@ install_one_ext(){
   fi
 }
 
+uninstall_one_ext(){
+  ext="$1"
+  CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot uninstall ${ext}"; return 1; }
+  "$CODE_BIN" --uninstall-extension "$ext" >/dev/null 2>&1
+}
+
 in_file(){ needle="$1"; file="$2"; grep -F -x -q -- "$needle" "$file" 2>/dev/null; }
+
+normalize_scope(){ case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in a|all) echo "all";; m|missing) echo "missing";; *) echo ""; esac; }
 
 extensions_cmd(){
   # Parse flags
-  MODE=""  # "", "all", "missing"
+  MODE=""         # install scope: "", "all", "missing"
+  UNMODE=""       # uninstall scope: "", "all", "missing"
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)
         cat <<'EHELP'
 Usage:
-  codestrap extensions                 # interactive (ask per missing; offer to update installed)
-  codestrap extensions --install all   # install missing + update installed to latest
-  codestrap extensions --install missing  # install only missing
+  codestrap extensions
+    → interactive: choose install or uninstall, then scope (all/missing)
+
+  codestrap extensions --install all|a
+  codestrap extensions --install missing|m
+  codestrap extensions --uninstall all|a
+  codestrap extensions --uninstall missing|m
+  # Combine:
+  codestrap extensions --install missing --uninstall missing
 
 This uses extensions listed in your merged extensions.json at:
   $HOME/data/User/extensions.json
@@ -794,11 +813,21 @@ EHELP
         exit 0;;
       --install)
         shift || true
-        MODE="${1:-}"
-        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|missing>"; CTX_TAG=""; exit 2; }
+        MODE="$(normalize_scope "${1:-}")"
+        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
       --install=*)
-        MODE="${1#*=}"
+        MODE="$(normalize_scope "${1#*=}")"
+        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
+        ;;
+      --uninstall)
+        shift || true
+        UNMODE="$(normalize_scope "${1:-}")"
+        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
+        ;;
+      --uninstall=*)
+        UNMODE="$(normalize_scope "${1#*=}")"
+        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
       *)
         CTX_TAG="[Extensions]"; err "Unknown flag for 'extensions': $1"; CTX_TAG=""; exit 1;;
@@ -813,73 +842,72 @@ EHELP
   emit_recommended_exts >"$tmp_recs" || true
   emit_installed_exts >"$tmp_installed" || true
 
-  rec_n="$(wc -l < "$tmp_recs" | tr -d ' ')"
-  [ "$rec_n" -gt 0 ] || { CTX_TAG="[Extensions]"; log "no recommended extensions found in $EXT_PATH"; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed"; exit 0; }
+  # Build sets
+  tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
+  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec" # in recs and installed
+  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended" # installed but NOT in recs
 
-  tmp_missing="$(mktemp)"; : >"$tmp_missing"
-  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
+  # Index installed for quick checks
+  while IFS= read -r ext; do
+    [ -n "$ext" ] || continue
+    if in_file "$ext" "$tmp_recs"; then
+      echo "$ext" >>"$tmp_present_rec"
+    else
+      echo "$ext" >>"$tmp_not_recommended"
+    fi
+  done <"$tmp_installed"
 
   while IFS= read -r ext; do
     [ -n "$ext" ] || continue
-    if in_file "$ext" "$tmp_installed"; then
-      echo "$ext" >>"$tmp_present_rec"
-    else
+    if ! in_file "$ext" "$tmp_installed"; then
       echo "$ext" >>"$tmp_missing"
     fi
   done <"$tmp_recs"
 
-  if [ -z "$MODE" ]; then
-    # Interactive
-    PROMPT_TAG="[Extensions] ? "
+  do_uninstall(){
+    scope="$1"
     CTX_TAG="[Extensions]"
-
-    if [ -s "$tmp_missing" ]; then
-      log "missing recommended extensions:"
-      nl -ba "$tmp_missing" | sed 's/^/  /'
-      while IFS= read -r ext; do
-        [ -n "$ext" ] || continue
-        ans="$(prompt_def "Install '${ext}'? (Y/n) " "y")"
-        if [ "$(yn_to_bool "$ans")" = "true" ]; then
-          log "installing ${ext}"
-          if install_one_ext "$ext" "false"; then
-            log "installed ${ext}"
-          else
-            warn "failed to install ${ext}"
-          fi
+    case "$scope" in
+      all)
+        if [ -s "$tmp_installed" ]; then
+          log "uninstalling ALL installed extensions"
+          while IFS= read -r ext; do
+            [ -n "$ext" ] || continue
+            if uninstall_one_ext "$ext"; then
+              log "uninstalled ${ext}"
+            else
+              warn "failed to uninstall ${ext}"
+            fi
+          done <"$tmp_installed"
         else
-          log "skipped ${ext}"
+          log "no installed extensions to uninstall"
         fi
-      done <"$tmp_missing"
-    else
-      log "no missing recommended extensions"
-    fi
-
-    if [ -s "$tmp_present_rec" ]; then
-      ans2="$(prompt_def "Update already-installed recommended extensions to latest? (y/N) " "n")"
-      if [ "$(yn_to_bool "$ans2")" = "true" ]; then
-        while IFS= read -r ext; do
-          [ -n "$ext" ] || continue
-          log "updating ${ext}"
-          if install_one_ext "$ext" "true"; then
-            log "updated ${ext}"
-          else
-            warn "failed to update ${ext}"
-          fi
-        done <"$tmp_present_rec"
-      else
-        log "skipped updates"
-      fi
-    fi
-
-    PROMPT_TAG=""
+        ;;
+      missing)
+        if [ -s "$tmp_not_recommended" ]; then
+          log "uninstalling extensions not in recommendations (cleanup)"
+          while IFS= read -r ext; do
+            [ -n "$ext" ] || continue
+            if uninstall_one_ext "$ext"; then
+              log "uninstalled ${ext}"
+            else
+              warn "failed to uninstall ${ext}"
+            fi
+          done <"$tmp_not_recommended"
+        else
+          log "no non-recommended extensions to uninstall"
+        fi
+        ;;
+    esac
     CTX_TAG=""
+  }
 
-  else
-    # Non-interactive
-    case "$(printf '%s' "$MODE" | tr '[:upper:]' '[:lower:]')" in
+  do_install(){
+    scope="$1"
+    CTX_TAG="[Extensions]"
+    case "$scope" in
       missing)
         if [ -s "$tmp_missing" ]; then
-          CTX_TAG="[Extensions]"
           log "installing missing recommended extensions"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
@@ -889,14 +917,13 @@ EHELP
               warn "failed to install ${ext}"
             fi
           done <"$tmp_missing"
-          CTX_TAG=""
         else
-          CTX_TAG="[Extensions]"; log "no missing recommended extensions"; CTX_TAG=""
+          log "no missing recommended extensions"
         fi
         ;;
       all)
+        # Install any missing …
         if [ -s "$tmp_missing" ]; then
-          CTX_TAG="[Extensions]"
           log "installing missing recommended extensions"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
@@ -906,13 +933,11 @@ EHELP
               warn "failed to install ${ext}"
             fi
           done <"$tmp_missing"
-          CTX_TAG=""
         else
-          CTX_TAG="[Extensions]"; log "no missing recommended extensions"; CTX_TAG=""
+          log "no missing recommended extensions"
         fi
-
+        # …then update present
         if [ -s "$tmp_present_rec" ]; then
-          CTX_TAG="[Extensions]"
           log "updating already-installed recommended extensions to latest"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
@@ -922,17 +947,52 @@ EHELP
               warn "failed to update ${ext}"
             fi
           done <"$tmp_present_rec"
-          CTX_TAG=""
         else
-          CTX_TAG="[Extensions]"; log "no already-installed recommended extensions to update"; CTX_TAG=""
+          log "no already-installed recommended extensions to update"
         fi
         ;;
-      *)
-        CTX_TAG="[Extensions]"; err "Unknown value for --install: '$MODE' (expected all|missing)"; CTX_TAG=""; exit 2;;
     esac
+    CTX_TAG=""
+  }
+
+  if [ -z "$MODE" ] && [ -z "$UNMODE" ]; then
+    # Interactive: pick action then scope
+    PROMPT_TAG="[Extensions] ? "
+    CTX_TAG="[Extensions]"
+
+    # Choose action (install/uninstall)
+    act_raw="$(prompt_def "Action (install|uninstall) [install]: " "install")"
+    act="$(printf "%s" "$act_raw" | tr '[:upper:]' '[:lower:]')"
+    case "$act" in
+      i|install|"") act="install" ;;
+      u|uninstall)  act="uninstall" ;;
+      *) log "unknown action '$act_raw' → defaulting to install"; act="install" ;;
+    esac
+
+    # Choose scope based on action
+    if [ "$act" = "install" ]; then
+      scope_raw="$(prompt_def "Install scope (all|missing) [missing]: " "missing")"
+      MODE="$(normalize_scope "$scope_raw")"; [ -n "$MODE" ] || MODE="missing"
+      do_install "$MODE"
+    else
+      scope_raw="$(prompt_def "Uninstall scope (all|missing) [missing]: " "missing")"
+      UNMODE="$(normalize_scope "$scope_raw")"; [ -n "$UNMODE" ] || UNMODE="missing"
+      if [ "$UNMODE" = "all" ]; then
+        conf="$(prompt_def "This will remove ALL installed extensions. Continue? (y/N) " "n")"
+        [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }
+      end_if=true
+      fi
+      do_uninstall "$UNMODE"
+    fi
+    PROMPT_TAG=""
+    CTX_TAG=""
+  else
+    # Non-interactive: ALWAYS uninstall first (if requested), then install (if requested)
+    if [ -n "$UNMODE" ]; then do_uninstall "$UNMODE"; fi
+    if [ -n "$MODE" ]; then do_install "$MODE"; fi
   fi
 
-  rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" 2>/dev/null || true
+  rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
@@ -1363,75 +1423,39 @@ autorun_env_if_present(){
   fi
 }
 
-# ===== NEW: init-time extensions auto-install via INSTALL_EXTENSIONS =====
+# ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
-  mode="$(printf "%s" "${INSTALL_EXTENSIONS:-}" | tr '[:upper:]' '[:lower:]')"
-  case "$mode" in
-    ""|none)
-      log "INSTALL_EXTENSIONS unset/none → not installing extensions"
-      return 0
-      ;;
-    all|missing)
-      CODE_BIN="$(detect_code_cli)"
-      [ -n "$CODE_BIN" ] || { CTX_TAG="[Extensions]"; warn "code-server/VS Code CLI not found; cannot manage extensions"; CTX_TAG=""; return 0; }
+  # Normalize envs
+  inst_mode="$(printf "%s" "${INSTALL_EXTENSIONS:-}"   | tr '[:upper:]' '[:lower:]')"
+  uninst_mode="$(printf "%s" "${UNINSTALL_EXTENSIONS:-}" | tr '[:upper:]' '[:lower:]')"
 
-      tmp_recs="$(mktemp)"; tmp_installed="$(mktemp)"
-      emit_recommended_exts >"$tmp_recs" || true
-      emit_installed_exts  >"$tmp_installed" || true
-
-      rec_n="$(wc -l < "$tmp_recs" | tr -d ' ')"
-      if [ "$rec_n" -eq 0 ]; then
-        CTX_TAG="[Extensions]"; log "no recommended extensions found in $EXT_PATH"; CTX_TAG=""
-        rm -f "$tmp_recs" "$tmp_installed"
-        return 0
-      fi
-
-      tmp_missing="$(mktemp)"; : >"$tmp_missing"
-      tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
-
-      while IFS= read -r ext; do
-        [ -n "$ext" ] || continue
-        if in_file "$ext" "$tmp_installed"; then
-          echo "$ext" >>"$tmp_present_rec"
-        else
-          echo "$ext" >>"$tmp_missing"
-        fi
-      done <"$tmp_recs"
-
+  # Helper to reuse command logic without prompts
+  run_noninteractive(){
+    # args: uninstall_mode install_mode
+    um="$1"; im="$2"
+    args=""
+    case "$um" in all|a) args="$args --uninstall all";; missing|m) args="$args --uninstall missing";; esac
+    case "$im" in all|a) args="$args --install all";;   missing|m) args="$args --install missing";; esac
+    if [ -n "$args" ]; then
       CTX_TAG="[Extensions]"
-      if [ -s "$tmp_missing" ]; then
-        log "INSTALL_EXTENSIONS=$mode → installing missing recommended extensions"
-        while IFS= read -r ext; do
-          [ -n "$ext" ] || continue
-          if install_one_ext "$ext" "false"; then
-            log "installed ${ext}"
-          else
-            warn "failed to install ${ext}"
-          fi
-        done <"$tmp_missing"
-      else
-        log "no missing recommended extensions"
-      fi
-
-      if [ "$mode" = "all" ] && [ -s "$tmp_present_rec" ]; then
-        log "INSTALL_EXTENSIONS=all → updating already-installed recommended extensions to latest"
-        while IFS= read -r ext; do
-          [ -n "$ext" ] || continue
-          if install_one_ext "$ext" "true"; then
-            log "updated ${ext}"
-          else
-            warn "failed to update ${ext}"
-          fi
-        done <"$tmp_present_rec"
-      fi
+      log "env automation → codestrap extensions$args"
       CTX_TAG=""
+      # call directly to avoid re-parsing entrypoint
+      extensions_cmd $args
+    fi
+  }
 
-      rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" 2>/dev/null || true
-      ;;
-    *)
-      CTX_TAG="[Extensions]"; warn "INSTALL_EXTENSIONS has invalid value: '$mode' (use all|missing|none)"; CTX_TAG=""
-      ;;
-  esac
+  # If both set, uninstall FIRST then install (clear-then-install behavior)
+  case "$uninst_mode" in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "UNINSTALL_EXTENSIONS invalid: '$uninst_mode' (use all|missing|none)"; CTX_TAG=""; uninst_mode="";; esac
+  case "$inst_mode"   in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "INSTALL_EXTENSIONS invalid: '$inst_mode' (use all|missing|none)";     CTX_TAG=""; inst_mode="";; esac
+
+  [ "$uninst_mode" = "none" ] && uninst_mode=""
+  [ "$inst_mode"   = "none" ] && inst_mode=""
+
+  # nothing to do?
+  [ -z "$uninst_mode$inst_mode" ] && return 0
+
+  run_noninteractive "$uninst_mode" "$inst_mode"
 }
 
 # ===== entrypoint =====
@@ -1445,7 +1469,7 @@ case "${1:-init}" in
     merge_codestrap_extensions
     install_config_shortcuts
     autorun_env_if_present
-    autorun_install_extensions   # <— added
+    autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
