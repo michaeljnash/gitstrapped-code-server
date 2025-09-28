@@ -29,6 +29,7 @@ services:
       - code-config:/config
       - projects:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
+      - ./keybindings.json:/config/codestrap/keybindings.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     ports:
       - ":8443"

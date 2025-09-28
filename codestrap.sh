@@ -40,7 +40,6 @@ yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
 prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
 
-
 print_help(){
 cat <<'HLP'
 codestrap — bootstrap GitHub + manage code-server auth
@@ -65,8 +64,9 @@ Flags for 'codestrap github' (map 1:1 to env vars; dash/underscore both accepted
   --env                                                Use environment variables only (no prompts)
 
 Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
-  --settings <true|false>     Merge strapped settings.json into user settings.json
-                              (Interactive default: ask; Non-interactive default: true)
+  --settings <true|false>        Merge strapped settings.json into user settings.json
+  --keybindings <true|false>     Merge strapped keybindings.json into user keybindings.json
+                                 (Interactive default: ask; Non-interactive default: true)
 
 Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
@@ -78,6 +78,8 @@ Examples:
   codestrap github --workspace-dir /config/workspace --repos-subdir /repos
   codestrap config
   codestrap config --settings false
+  codestrap config --keybindings true
+  codestrap config --settings true --keybindings false
   codestrap passwd
 HLP
 }
@@ -121,6 +123,7 @@ KEYB_PATH="$USER_DIR/keybindings.json"
 EXT_PATH="$USER_DIR/extensions.json"
 
 REPO_SETTINGS_SRC="$HOME/codestrap/settings.json"
+REPO_KEYB_SRC="$HOME/codestrap/keybindings.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # Track origins for nicer errors
@@ -365,7 +368,8 @@ codestrap_run(){
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
-install_settings_from_repo(){
+# ===== settings.json merge (repo → user) with preserve and stable comment insertion =====
+merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping settings merge"; return 0; }
 
@@ -378,7 +382,6 @@ install_settings_from_repo(){
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
-      # Try stripping ONLY comments; still fail if malformed (e.g., trailing commas).
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
         CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
@@ -390,9 +393,7 @@ install_settings_from_repo(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Validate and load repo settings:
-  # 1) Try strict JSON
-  # 2) If that fails, allow JSONC (strip comments only) and re-validate
+  # Validate and load repo settings (allow JSONC comments)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -447,7 +448,7 @@ install_settings_from_repo(){
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
 
-  # Build final JSON (proper commas), then inject comments without touching commas
+  # Build final JSON (proper commas), then inject comments with correct END placement
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -462,7 +463,6 @@ install_settings_from_repo(){
     in_preserve=0
     depth=0
     while IFS= read -r line; do
-      # Print opening brace + START banner once
       if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
         echo "$line"
         echo "  // START codestrap settings"
@@ -471,30 +471,24 @@ install_settings_from_repo(){
       fi
 
       if [ $in_preserve -eq 1 ]; then
-        # Still inside the codestrap_preserve array: echo line and track depth
         echo "$line"
         inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
         dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
         depth=$((depth + inc - dec))
         if [ "$depth" -le 0 ]; then
-          # Array closed on this line; now place END banner
           echo "  // END codestrap settings"
           in_preserve=0
         fi
         continue
       fi
 
-      # Detect the codestrap_preserve key; place its guidance banner above it
       if echo "$line" | grep -q '^[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
         echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
         echo "$line"
-
-        # Initialize depth from this very line (handles inline arrays too)
         inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
         dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
         depth=$((inc - dec))
         if [ "$depth" -le 0 ]; then
-          # Array starts & ends on same line; close immediately
           echo "  // END codestrap settings"
         else
           in_preserve=1
@@ -502,18 +496,158 @@ install_settings_from_repo(){
         continue
       fi
 
-      # Default passthrough
       echo "$line"
     done < "$tmp_final"
   } > "$tmp_with_comments"
 
-  # Write atomically (no backups)
   mv -f "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
+}
+
+# ===== keybindings.json merge (repo → user) with preserve support =====
+merge_codestrap_keybindings(){
+  [ -f "$REPO_KEYB_SRC" ] || { log "no repo keybindings.json; skipping keybindings merge"; return 0; }
+  command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping keybindings merge"; return 0; }
+
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+
+  # Load USER keybindings (allow JSONC comments)
+  tmp_user_json="$(mktemp)"
+  tmp_user_stripped="$(mktemp)"
+  if [ -f "$KEYB_PATH" ]; then
+    strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_stripped" || true
+    if jq -e . "$tmp_user_stripped" >/dev/null 2>&1; then
+      cp "$tmp_user_stripped" "$tmp_user_json"
+    else
+      CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+      rm -f "$tmp_user_json" "$tmp_user_stripped" 2>/dev/null || true
+      return 1
+    fi
+  else
+    printf '[]\n' >"$tmp_user_json"
+  fi
+  rm -f "$tmp_user_stripped" 2>/dev/null || true
+
+  if ! jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1; then
+    CTX_TAG="[Bootstrap config]"; err "user keybindings.json must be a JSON array."; CTX_TAG=""
+    rm -f "$tmp_user_json" 2>/dev/null || true
+    return 1
+  fi
+
+  # Load REPO keybindings (allow JSONC comments)
+  tmp_repo_json="$(mktemp)"
+  strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
+  if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1 || ! jq -e 'type=="array"' "$tmp_repo_json" >/dev/null 2>&1; then
+    CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""
+    rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+    return 1
+  fi
+
+  # Extract preserve array (if present in user)
+  preserve_json="$(jq -c '
+    [ .[] | select(type=="object" and has("codestrap_preserve")) ]
+    | (.[0].codestrap_preserve // [])
+  ' "$tmp_user_json")"
+
+  # Build a map of existing user bindings by key (first occurrence wins)
+  tmp_user_map="$(mktemp)"
+  jq '
+    reduce .[] as $it ({};
+      if ($it|type)=="object" and ($it|has("key")) then
+        . as $m | if ($m|has($it.key)) then $m else .[$it.key]=$it end
+      else .
+      end
+    )
+  ' "$tmp_user_json" > "$tmp_user_map"
+
+  # Managed list: repo entries, overridden by user when key is preserved
+  tmp_managed_arr="$(mktemp)"
+  jq --argjson preserve "$preserve_json" --slurpfile usermap "$tmp_user_map" '
+    . as $repo
+    | [ $repo[]
+        | select(type=="object" and has("key"))
+        | if ($preserve|index(.key)) and ($usermap[0]|has(.key))
+          then $usermap[0][.key]
+          else .
+          end
+      ]
+  ' "$tmp_repo_json" > "$tmp_managed_arr"
+
+  # Repo keys set
+  tmp_repo_keys="$(mktemp)"
+  jq -r '[ .[] | select(type=="object" and has("key")) | .key ] | unique | .[]' "$tmp_repo_json" > "$tmp_repo_keys"
+
+  # Rest: keep user items except the preserve object and any item whose key is also in repo (avoid duplicates)
+  tmp_rest_arr="$(mktemp)"
+  jq --slurpfile repokeys "$tmp_repo_keys" '
+    [ .[]
+      | select( (type=="object" and has("codestrap_preserve")) | not )
+      | select( (type=="object" and has("key")) | not or ((.key as $k | ($repokeys[] | contains([$k])) | not)) )
+    ]
+  ' "$tmp_user_json" > "$tmp_rest_arr"
+
+  # Compose final array: managed + {codestrap_preserve: [...] } + rest
+  tmp_final="$(mktemp)"
+  jq -n \
+    --argjson managed "$(cat "$tmp_managed_arr")" \
+    --argjson preserve "$preserve_json" \
+    --argjson rest "$(cat "$tmp_rest_arr")" '
+      ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
+    ' | jq '.' > "$tmp_final"
+
+  # Inject comments and ensure END marker is after the preserve object (even if array is multi-line)
+  tmp_with_comments="$(mktemp)"
+  {
+    first_bracket_done=0
+    in_preserve=0
+    depth=0
+    while IFS= read -r line; do
+      if [ $first_bracket_done -eq 0 ] && echo "$line" | grep -q '^\[\s*$'; then
+        echo "$line"
+        echo "  // START codestrap keybindings"
+        first_bracket_done=1
+        continue
+      fi
+
+      if [ $in_preserve -eq 1 ]; then
+        echo "$line"
+        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
+        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
+        depth=$((depth + inc - dec))
+        if [ "$depth" -le 0 ]; then
+          echo "  // END codestrap keybindings"
+          in_preserve=0
+        fi
+        continue
+      fi
+
+      if echo "$line" | grep -q '^[[:space:]]*{[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
+        echo "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
+        echo "$line"
+        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
+        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
+        depth=$((inc - dec))
+        if [ "$depth" -le 0 ]; then
+          echo "  // END codestrap keybindings"
+        else
+          in_preserve=1
+        fi
+        continue
+      fi
+
+      echo "$line"
+    done < "$tmp_final"
+  } > "$tmp_with_comments"
+
+  mv -f "$tmp_with_comments" "$KEYB_PATH"
+  chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
+
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_user_map" "$tmp_managed_arr" "$tmp_repo_keys" "$tmp_rest_arr" "$tmp_final" 2>/dev/null || true
+  log "merged keybindings.json → $KEYB_PATH"
 }
 
 # ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
@@ -550,7 +684,7 @@ install_cli_shim(){
 set -eu
 for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
   if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+    if [ -x "$TARGET" ] then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
   fi
 done
 echo "[codestrap][ERROR] launcher script not found." >&2
@@ -567,7 +701,7 @@ EOF
 set -eu
 for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
   if [ -e "$TARGET" ]; then
-    if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
+    if [ -x "$TARGET" ] then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
   fi
 done
 echo "[codestrap][ERROR] launcher script not found." >&2
@@ -634,15 +768,23 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
-# --- interactive config flow (kept for manual flow) ---
+# --- interactive config flow ---
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
+  # settings.json
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-    install_settings_from_repo
+    merge_codestrap_settings
   else
     log "skipped settings merge"
   fi
+  # keybindings.json
+  if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
+    merge_codestrap_keybindings
+  else
+    log "skipped keybindings merge"
+  fi
+
   install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
@@ -654,18 +796,18 @@ config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
+  # settings.json (flag overrides prompt)
   if [ -n "${CFG_SETTINGS+x}" ]; then
-    if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
-      install_settings_from_repo
-    else
-      log "skipped settings merge"
-    fi
+    if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
   else
-    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-      install_settings_from_repo
-    else
-      log "skipped settings merge"
-    fi
+    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
+  fi
+
+  # keybindings.json (flag overrides prompt)
+  if [ -n "${CFG_KEYB+x}" ]; then
+    if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
+  else
+    if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
   fi
 
   install_config_shortcuts
@@ -800,8 +942,8 @@ cli_entry(){
       ;;
     config)
       shift || true
-      # Parse config flags (currently only --settings <true|false>)
-      unset CFG_SETTINGS
+      # Parse config flags
+      unset CFG_SETTINGS CFG_KEYB
       while [ $# -gt 0 ]; do
         case "$1" in
           -h|--help) print_help; exit 0;;
@@ -812,6 +954,14 @@ cli_entry(){
             ;;
           --settings=*)
             CFG_SETTINGS="${1#*=}"
+            ;;
+          --keybindings)
+            shift || true
+            CFG_KEYB="${1:-}"
+            [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --keybindings=*)
+            CFG_KEYB="${1#*=}"
             ;;
           *)
             CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
@@ -824,15 +974,19 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
+        # Non-interactive defaults: perform merges unless explicitly false
         if [ -n "${CFG_SETTINGS+x}" ]; then
-          if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
-            install_settings_from_repo
-          else
-            log "skipped settings merge"
-          fi
+          if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
         else
-          install_settings_from_repo
+          merge_codestrap_settings
         fi
+
+        if [ -n "${CFG_KEYB+x}" ]; then
+          if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
+        else
+          merge_codestrap_keybindings
+        fi
+
         install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
@@ -870,7 +1024,8 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
-    install_settings_from_repo
+    merge_codestrap_settings
+    merge_codestrap_keybindings
     install_config_shortcuts
     autorun_env_if_present
     log "Codestrap initialized. Use: codestrap -h"
