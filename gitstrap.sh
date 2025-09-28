@@ -2,7 +2,7 @@
 # gitstrap — bootstrap GitHub + manage code-server auth (CLI-first)
 set -eu
 
-VERSION="${GITSTRAP_VERSION:-0.2.1}"
+VERSION="${GITSTRAP_VERSION:-0.2.2}"
 
 log(){ echo "[gitstrap] $*"; }
 warn(){ echo "[gitstrap][WARN] $*" >&2; }
@@ -267,12 +267,10 @@ install_settings_from_repo(){
 
   # Normalize user settings to JSON (handle JSONC)
   tmp_user_json="$(mktemp)"
-  if [ ! -f "$SETTINGS_PATH" ]; then
-    printf '{}\n' >"$tmp_user_json"
-  elif jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-    cp "$SETTINGS_PATH" "$tmp_user_json"
+  if [ ! -f "$SETTINGS_PATH" ] || ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+    if [ -f "$SETTINGS_PATH" ]; then strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"; else printf '{}\n' >"$tmp_user_json"; fi
   else
-    strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || printf '{}\n' >"$tmp_user_json"
+    cp "$SETTINGS_PATH" "$tmp_user_json"
   fi
   jq -e . "$tmp_user_json" >/dev/null 2>&1 || printf '{}\n' >"$tmp_user_json"
 
@@ -280,7 +278,7 @@ install_settings_from_repo(){
   if ! jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     warn "repo settings JSON invalid → $REPO_SETTINGS_SRC ; skipping"
     rm -f "$tmp_user_json" 2>/dev/null || true
-    return 0;
+    return 0
   fi
 
   RS_KEYS_JSON="$(jq 'keys' "$REPO_SETTINGS_SRC")"
@@ -320,11 +318,12 @@ install_settings_from_repo(){
       | .gitstrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # Managed-only object (repo keys only)
+  # Managed-only object (repo keys only) — capture from source ($src), not accumulator
   tmp_managed="$(mktemp)"
   jq \
     --argjson ks "$RS_KEYS_JSON" '
-      reduce $ks[] as $k ({}; .[$k] = (.[$k]))
+      . as $src
+      | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
     ' "$tmp_merged" > "$tmp_managed"
 
   # Rest object = merged minus (repo keys + gitstrap_preserve)
@@ -335,13 +334,14 @@ install_settings_from_repo(){
   ' "$tmp_merged" > "$tmp_rest"
 
   preserve_json="$(jq -c '.gitstrap_preserve // []' "$tmp_merged")"
+  mcount="$(jq 'keys|length' "$tmp_managed")"
+  rcount="$(jq 'keys|length' "$tmp_rest")"
 
-  # Assemble JSONC output: single root, inline gitstrap section, then other keys
+  # Assemble JSONC output
   {
     echo "{"
     echo "  //gitstrap settings start"
-
-    if [ "$(jq 'length' "$tmp_managed")" -gt 0 ]; then
+    if [ "$mcount" -gt 0 ]; then
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
@@ -349,21 +349,16 @@ install_settings_from_repo(){
       ' "$tmp_managed"
       echo ","
     fi
-
     echo "  //gitstrap preserve - enter keys of gitstrap merged settings here which you wish the gitstrap script not to overwrite!"
     printf '  "gitstrap_preserve": %s\n' "$preserve_json"
     echo "  //gitstrap settings end"
-
-    if [ "$(jq 'keys|length' "$tmp_rest")" -gt 0 ]; then
+    if [ "$rcount" -gt 0 ]; then
       echo "  ,"
       jq -r '
         to_entries
         | map("  " + (.key|@json) + ": " + (.value|tojson))
         | join(",\n")
       ' "$tmp_rest"
-      echo ""
-    else
-      echo ""
     fi
     echo "}"
   } > "$SETTINGS_PATH"
@@ -387,7 +382,7 @@ TARGET="/custom-cont-init.d/10-gitstrap.sh"
 if [ -x "$TARGET" ]; then exec "$TARGET" cli "$@"; else exec sh "$TARGET" cli "$@"; fi
 EOF
   chmod 755 /usr/local/bin/gitstrap
-  echo "${GITSTRAP_VERSION:-0.2.1}" >/etc/gitstrap-version 2>/dev/null || true
+  echo "${GITSTRAP_VERSION:-0.2.2}" >/etc/gitstrap-version 2>/dev/null || true
 }
 
 bootstrap_banner(){ if has_tty; then printf "\n[gitstrap] Interactive bootstrap — press Ctrl+C to abort.\n\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
@@ -401,7 +396,7 @@ bootstrap_interactive(){
   PULL_EXISTING_REPOS="$(yn_to_bool "$(prompt_def "Pull existing repos? [Y/n]: " "y")")"
   [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
   [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REOS PULL_EXISTING_REPOS
+  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS
   gitstrap_run; log "bootstrap complete"
 }
 bootstrap_env_only(){
