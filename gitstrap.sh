@@ -251,12 +251,22 @@ validate_github_pat(){
 # ===== password change =====
 password_change_interactive(){
   command -v argon2 >/dev/null 2>&1 || { echo "argon2 not found." >&2; return 1; }
+
+  # Temporarily prefix prompts for this section
+  _OLD_PROMPT_TAG="$PROMPT_TAG"
+  PROMPT_TAG="[Change password] ? "
+
   NEW="$(prompt_secret "New code-server password: ")"
   CONF="$(prompt_secret "Confirm password: ")"
+
+  # Restore original prompt tag
+  PROMPT_TAG="$_OLD_PROMPT_TAG"
+
   [ -n "$NEW" ] || { echo "Error: password required." >&2; return 1; }
   [ -n "$CONF" ] || { echo "Error: confirmation required." >&2; return 1; }
   [ "$NEW" = "$CONF" ] || { echo "Error: passwords do not match." >&2; return 1; }
   [ ${#NEW} -ge 8 ] || { echo "Error: minimum length 8." >&2; return 1; }
+
   salt="$(head -c16 /dev/urandom | base64)"
   hash="$(printf '%s' "$NEW" | argon2 "$salt" -id -e)"
   printf '%s' "$hash" > "$PASS_HASH_PATH"; chmod 644 "$PASS_HASH_PATH" || true; chown "${PUID}:${PGID}" "$PASS_HASH_PATH" 2>/dev/null || true
