@@ -539,46 +539,34 @@ merge_codestrap_keybindings(){
 
   # ---- Merge arrays (honor codestrap_preserve) ----
   tmp_final="$(mktemp)"
-  jq -n \
-    --slurpfile u "$tmp_user_json" \
-    --slurpfile r "$tmp_repo_json" '
-      def arr(v): if (v|type)=="array" then v else [] end;
-      def is_kb: (type=="object") and (.key? != null);
-      def kstr(x): (x.key|tostring);
+  jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" "$(cat <<'JQ'
+def arr(v): if (v|type)=="array" then v else [] end;
+def is_kb: (type=="object") and (.key? != null);
+def kstr(x): (x.key|tostring);
 
-      ($u[0] | arr(.)) as $U
-      | ($r[0] | arr(.)) as $R
+($u[0] | arr(.)) as $U
+| ($r[0] | arr(.)) as $R
+| ($U | map(select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve) | last // []) as $pres
+| ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
+| ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
+| ($R
+    | map(select(is_kb) as $o
+          | (kstr($o)) as $k
+          | if (($pres | index($k)) and ($u_by_key[$k]? != null))
+            then $u_by_key[$k]
+            else $o
+            end)
+  ) as $managed
+| ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
+| ($U | map(select(is_kb) as $o
+            | (kstr($o)) as $k
+            | select(($seen[$k]? // false)|not)
+            | $o)) as $extras
+| ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
+JQ
+  )" > "$tmp_final"
 
-      # find last codestrap_preserve in user (or [])
-      | ($U
-          | map(select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve)
-          | last // []
-        ) as $pres
-
-      | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
-      | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
-
-      # managed (repo) respecting preserve list
-      | ($R
-          | map(select(is_kb) as $o
-                | (kstr($o)) as $k
-                | if (($pres | index($k)) and ($u_by_key[$k]? != null))
-                    then $u_by_key[$k]
-                    else $o
-                  end))
-        ) as $managed
-
-      # seen keys from managed
-      | ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
-
-      # user extras not overridden
-      | ($U | map(select(is_kb) as $o | (kstr($o)) as $k | select(($seen[$k]? // false)|not) | $o)) as $extras
-
-      # final merged array: managed + preserve object + extras
-      | ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
-    ' > "$tmp_final"
-
-  # ---- Inject comments with correct placement (mawk/busybox-safe) ----
+  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
   tmp_with_comments="$(mktemp)"
   awk '
     BEGIN {
@@ -589,27 +577,21 @@ merge_codestrap_keybindings(){
       depth=0
     }
 
-    # helper: update depth counters for a printed line (no user-defined functions)
     {
       line = $0
 
-      # If we havent printed the opening "[" yet, do it and add START banner
       if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
         print line
-        # update depth for this line
         tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         print "  // START codestrap keybindings"
         seen_array_start=1
         next
       }
 
-      # If we buffered a lone "{", decide whether next line is the preserve key
       if (have_prev && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        # print prev and update depth
         print prev
         tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        # print current line and update depth
         print line
         tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         in_preserve=1
@@ -618,21 +600,18 @@ merge_codestrap_keybindings(){
         next
       }
 
-      # If we had buffered prev but it wasn’t preserve, flush prev now
       if (have_prev) {
         print prev
         tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         have_prev=0
       }
 
-      # Buffer a lone "{" so we can check the next line for preserve key
       if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
         prev=line
         have_prev=1
         next
       }
 
-      # If the preserve key appears inline with the "{", emit guidance first
       if (line ~ /\{[[:space:]]*"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         print line
@@ -642,11 +621,9 @@ merge_codestrap_keybindings(){
         next
       }
 
-      # Normal passthrough
       print line
       tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
 
-      # If we just closed the preserve object, drop END banner immediately
       if (in_preserve && depth < preserve_level) {
         print "  // END codestrap keybindings"
         in_preserve=0
@@ -654,10 +631,7 @@ merge_codestrap_keybindings(){
     }
 
     END {
-      # If something left in buffer (should not happen), flush it
-      if (have_prev) {
-        print prev
-      }
+      if (have_prev) { print prev }
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
