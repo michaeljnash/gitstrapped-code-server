@@ -527,6 +527,7 @@ merge_codestrap_keybindings(){
   fi
   rm -f "$tmp_user_stripped" 2>/dev/null || true
 
+  # Must be an array
   if ! jq -e 'type=="array"' "$tmp_user_json" >/dev/null 2>&1; then
     CTX_TAG="[Bootstrap config]"; err "user keybindings.json must be a JSON array."; CTX_TAG=""
     rm -f "$tmp_user_json" 2>/dev/null || true
@@ -542,42 +543,41 @@ merge_codestrap_keybindings(){
     return 1
   fi
 
-  # Extract preserve list from user (first object that has codestrap_preserve)
+  # Extract preserve list from user (first object that has codestrap_preserve); default []
   preserve_json="$(jq -c '
-    ( [ .[] | select((type=="object") and has("codestrap_preserve")) ][0].codestrap_preserve ) // []
+    ( [ .[]? | select(type=="object" and has("codestrap_preserve")) ][0].codestrap_preserve ) // []
   ' "$tmp_user_json")"
 
-  # Build a map of user entries keyed by "key"
+  # Build user map keyed by "key" (only objects with string "key")
   user_map_json="$(jq -c '
-    reduce ( .[] | select((type=="object") and has("key")) ) as $it
-      ({}; .[$it.key] = $it)
+    [ .[]? | select(type=="object" and has("key") and (.key|type=="string")) ]
+    | reduce .[] as $it ({}; .[$it.key] = $it)
   ' "$tmp_user_json")"
 
-  # Managed: repo entries, overridden by user if key preserved and present in user_map
+  # Managed = repo entries (objects w/ string "key"), overridden by user if preserved & present
   tmp_managed_arr="$(mktemp)"
   jq --argjson preserve "$preserve_json" --argjson usermap "$user_map_json" '
-    [ .[]
-      | select((type=="object") and has("key"))
-      | . as $r
-      | if (($preserve | index($r.key)) and ($usermap | has($r.key)))
-        then $usermap[$r.key]
-        else $r
+    [ .[]? 
+      | select(type=="object" and has("key") and (.key|type=="string"))
+      | if (($preserve | index(.key)) and ($usermap | has(.key)))
+        then $usermap[.key]
+        else .
         end
     ]
   ' "$tmp_repo_json" > "$tmp_managed_arr"
 
-  # Repo keys for filtering "rest"
-  repo_keys_json="$(jq -c '[ .[] | select((type=="object") and has("key")) | .key ] | unique' "$tmp_repo_json")"
+  # Repo keys for filtering rest
+  repo_keys_json="$(jq -c '
+    [ .[]? | select(type=="object" and has("key") and (.key|type=="string")) | .key ] | unique
+  ' "$tmp_repo_json")"
 
-  # Rest: user items except the preserve object and any item whose key is in repo keys
+  # Rest = user items excluding the codestrap_preserve object and any item with key in repo keys
   tmp_rest_arr="$(mktemp)"
   jq --argjson repokeys "$repo_keys_json" '
-    [ .[]
-      | select( ( (type=="object") and has("codestrap_preserve") ) | not )
+    [ .[]?
+      | select( (type=="object" and has("codestrap_preserve")) | not )
       | select(
-          ( (type=="object") and has("key") )
-          | not
-          or ( .key as $k | ($repokeys | index($k)) | not )
+          (type=="object" and has("key") and (.key|type=="string") and ($repokeys | index(.key))) | not
         )
     ]
   ' "$tmp_user_json" > "$tmp_rest_arr"
@@ -591,7 +591,7 @@ merge_codestrap_keybindings(){
       ($managed + [ {codestrap_preserve: $preserve} ] + $rest)
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments with correct END placement
+  # Inject comments with correct END placement (outside the preserve object)
   tmp_with_comments="$(mktemp)"
   {
     first_bracket_done=0
