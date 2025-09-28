@@ -548,54 +548,73 @@ merge_codestrap_keybindings(){
   # ---- Merge: repo array into user array, honoring codestrap_preserve ----
   tmp_final="$(mktemp)"
   jq -n \
-    --argfile u "$tmp_user_json" \
-    --argfile r "$tmp_repo_json" '
+    --slurpfile u "$tmp_user_json" \
+    --slurpfile r "$tmp_repo_json" '
       def arr(v): if (v|type)=="array" then v else [] end;
       def is_kb: (type=="object") and (.key? != null);
-      def kstr: .key|tostring;
+      def kstr(x): (x.key|tostring);
 
-      # Normalize
-      $U := arr($u);
-      $R := arr($r);
+      # Normalize inputs to arrays
+      ($u[0] | arr(.)) as $U
+      | ($r[0] | arr(.)) as $R
 
-      # Extract preserve list from user (last preserve block wins)
-      $pres :=
-        ( [ $U[] | select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve ] | last ) // [];
+      # Preserve list from any { "codestrap_preserve": [...] } object in user (last wins)
+      | ($U
+          | map(select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve)
+          | last // []
+        ) as $pres
 
-      # Quick lookup maps
-      $u_by_key := reduce ( $U[] | select(is_kb) ) as $o ({}; .[($o|kstr)] = $o);
-      $r_by_key := reduce ( $R[] | select(is_kb) ) as $o ({}; .[($o|kstr)] = $o);
+      # Maps for quick lookup by "key"
+      | ($U
+          | map(select(is_kb) | { (kstr(.)): . })
+          | add // {}
+        ) as $u_by_key
+      | ($R
+          | map(select(is_kb) | { (kstr(.)): . })
+          | add // {}
+        ) as $r_by_key
 
-      # Start with repo entries; for preserved keys prefer user version if present
-      $initial :=
-        [ $R[] | select(is_kb) as $o
-          | ($o|kstr) as $k
-          | if ($pres | index($k)) and ($u_by_key[$k]? != null) then $u_by_key[$k] else $o end
-        ];
+      # Start with repo entries; preserved keys take the user version when present
+      | ($R
+          | map(
+              select(is_kb) as $o
+              | (kstr($o)) as $k
+              | if ( ($pres | index($k)) and ($u_by_key[$k]? != null) )
+                  then $u_by_key[$k]
+                  else $o
+                end
+            )
+        ) as $initial
 
-      # Add user entries not already included by key (regardless of origin)
-      $seen := (reduce $initial[] as $x ({}; .[($x|kstr)] = true));
-      $extras :=
-        [ $U[] | select(is_kb) as $o
-          | ($o|kstr) as $k
-          | select( ($seen[$k]? // false) | not )
-        ];
+      # Build a seen set for keys already in $initial
+      | ($initial
+          | map(kstr(.))
+          | map({(.): true})
+          | add // {}
+        ) as $seen
 
-      ($initial + $extras + [ { "codestrap_preserve": $pres } ])
+      # Add user keybindings that are not already present by key
+      | ($U
+          | map(
+              select(is_kb) as $o
+              | (kstr($o)) as $k
+              | select( ($seen[$k]? // false) | not )
+              | $o
+            )
+        ) as $extras
+
+      # Final array with preserve marker object appended
+      | ($initial + $extras + [ { "codestrap_preserve": $pres } ])
     ' > "$tmp_final"
 
-  # ---- Inject comments (works regardless of jq formatting) ----
+  # ---- Inject comments (START, guidance before preserve, END) ----
   tmp_with_comments="$(mktemp)"
   awk '
-    # Count occurrences of a single character without mutating the original line
-    function nchr(s, ch,   tmp) { tmp = s; gsub(ch, "", tmp); return length(s) - length(tmp) }
-
+    function nchr(s, ch,   t) { t=s; gsub(ch,"",t); return length(s)-length(t) }
     BEGIN { seen_start=0; in_preserve=0; depth=0; printed_end=0 }
-
     {
-      line = $0
+      line=$0
 
-      # After the first "[" line, print START banner
       if (seen_start==0 && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
         print line
         print "  // START codestrap keybindings"
@@ -603,10 +622,9 @@ merge_codestrap_keybindings(){
         next
       }
 
-      # While inside the { "codestrap_preserve": ... } object, track brace depth
       if (in_preserve==1) {
         print line
-        depth += nchr(line, "{") - nchr(line, "}")
+        depth += nchr(line,"{") - nchr(line,"}")
         if (depth <= 0 && printed_end==0) {
           print "  // END codestrap keybindings"
           printed_end=1
@@ -615,22 +633,14 @@ merge_codestrap_keybindings(){
         next
       }
 
-      # If we see the preserve key on ANY line, print guidance before it
       if (line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         print line
-        depth = nchr(line, "{") - nchr(line, "}")
-        if (depth > 0) {
-          in_preserve=1
-        } else if (printed_end==0) {
-          # one-line preserve object
-          print "  // END codestrap keybindings"
-          printed_end=1
-        }
+        depth = nchr(line,"{") - nchr(line,"}")
+        if (depth > 0) { in_preserve=1 } else if (printed_end==0) { print "  // END codestrap keybindings"; printed_end=1 }
         next
       }
 
-      # If we hit the closing ] and END hasn’t been printed, print it now (safeguard)
       if (printed_end==0 && line ~ /^[[:space:]]*\][[:space:]]*,?[[:space:]]*$/) {
         print "  // END codestrap keybindings"
         printed_end=1
