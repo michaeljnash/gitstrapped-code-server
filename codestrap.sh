@@ -40,17 +40,6 @@ yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
 prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
 
-# ---- banner ----
-print_logo(){
-  is_tty || return 0
-  cat <<'LOGO'
-     ▌    ▗       
-▛▘▛▌▛▌█▌▛▘▜▘▛▘▀▌▛▌
-▙▖▙▌▙▌▙▖▄▌▐▖▌ █▌▙▌
-                ▌ 
-LOGO
-  echo
-}
 
 print_help(){
 cat <<'HLP'
@@ -413,7 +402,7 @@ install_settings_from_repo(){
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
       (. // {}) as $user
-      | ($user. codestrap_preserve // []) as $pres
+      | ($user.codestrap_preserve // []) as $pres
       | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
       | reduce $rskeys[] as $k (
@@ -537,7 +526,7 @@ EOF
   fi
 }
 
-#bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
+bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
@@ -665,7 +654,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 " >&2
       exit 3
     fi
-    #bootstrap_banner
+    bootstrap_banner
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
     bootstrap_interactive
@@ -686,8 +675,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 
 # ===== top-level CLI entry with subcommands =====
 cli_entry(){
-  print_logo
-
+  
   if [ $# -eq 0 ]; then
     # Hub flow
     if ! is_tty; then
@@ -700,7 +688,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    #bootstrap_banner
+    bootstrap_banner
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -743,7 +731,7 @@ cli_entry(){
       shift || true
       if [ $# -eq 0 ]; then
         if is_tty; then
-          #bootstrap_banner
+          bootstrap_banner
           PROMPT_TAG="[Bootstrap GitHub] ? "
           CTX_TAG="[Bootstrap GitHub]"
           bootstrap_interactive
@@ -778,6 +766,7 @@ cli_entry(){
       done
 
       if is_tty; then
+        bootstrap_banner
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
@@ -798,6 +787,8 @@ cli_entry(){
     --env)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
+      # Interactive password flow should also show banner
+      bootstrap_banner
       CTX_TAG="[Change password]"
       password_change_interactive
       CTX_TAG=""
