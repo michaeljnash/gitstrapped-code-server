@@ -564,17 +564,11 @@ merge_codestrap_keybindings(){
           | last // []
         ) as $pres
 
-      # Maps for quick lookup by "key"
-      | ($U
-          | map(select(is_kb) | { (kstr(.)): . })
-          | add // {}
-        ) as $u_by_key
-      | ($R
-          | map(select(is_kb) | { (kstr(.)): . })
-          | add // {}
-        ) as $r_by_key
+      # Quick lookup maps
+      | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
+      | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
 
-      # Start with repo entries; preserved keys take the user version when present
+      # Repo-based entries, but use user value when preserved
       | ($R
           | map(
               select(is_kb) as $o
@@ -584,16 +578,13 @@ merge_codestrap_keybindings(){
                   else $o
                 end
             )
-        ) as $initial
+        ) as $managed
 
-      # Build a seen set for keys already in $initial
-      | ($initial
+      # User extras not already covered by repo keys
+      | ($managed
           | map(kstr(.))
-          | map({(.): true})
-          | add // {}
+          | map({(.): true}) | add // {}
         ) as $seen
-
-      # Add user keybindings that are not already present by key
       | ($U
           | map(
               select(is_kb) as $o
@@ -603,18 +594,26 @@ merge_codestrap_keybindings(){
             )
         ) as $extras
 
-      # Final array with preserve marker object appended
-      | ($initial + $extras + [ { "codestrap_preserve": $pres } ])
+      # Final: managed first, then preserve marker, then user extras
+      | ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
     ' > "$tmp_final"
 
-  # ---- Inject comments (START, guidance before preserve, END) ----
+  # ---- Inject comments (START, guidance BEFORE the preserve object, END AFTER the preserve object) ----
   tmp_with_comments="$(mktemp)"
   awk '
     function nchr(s, ch,   t) { t=s; gsub(ch,"",t); return length(s)-length(t) }
-    BEGIN { seen_start=0; in_preserve=0; depth=0; printed_end=0 }
+
+    BEGIN {
+      seen_start=0
+      printed_end=0
+      preserve_depth=-1
+      depth=0
+    }
+
     {
       line=$0
-
+      # Update depth AFTER printing decisions that rely on current depth snapshot
+      # But for the array open, we handle early
       if (seen_start==0 && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
         print line
         print "  // START codestrap keybindings"
@@ -622,31 +621,35 @@ merge_codestrap_keybindings(){
         next
       }
 
-      if (in_preserve==1) {
-        print line
-        depth += nchr(line,"{") - nchr(line,"}")
-        if (depth <= 0 && printed_end==0) {
-          print "  // END codestrap keybindings"
-          printed_end=1
-          in_preserve=0
-        }
-        next
-      }
-
-      if (line ~ /"codestrap_preserve"[[:space:]]*:/) {
+      # Detect the preserve object key; print guidance BEFORE the object
+      if (preserve_depth < 0 && line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         print line
-        depth = nchr(line,"{") - nchr(line,"}")
-        if (depth > 0) { in_preserve=1 } else if (printed_end==0) { print "  // END codestrap keybindings"; printed_end=1 }
+        # snapshot current object nesting depth; END will print once we exit this object
+        preserve_depth = depth
+        # update depth for this line and then possibly print END on later lines
+        depth += nchr(line,"{") - nchr(line,"}")
         next
       }
 
+      # Normal print
+      print line
+
+      # Update depth for this line
+      depth += nchr(line,"{") - nchr(line,"}")
+
+      # If we just exited the preserve object, print END once
+      if (preserve_depth >= 0 && depth < preserve_depth && printed_end==0) {
+        print "  // END codestrap keybindings"
+        printed_end=1
+        preserve_depth=-1
+      }
+
+      # Safety: if we somehow reach the closing array and END wasn’t printed yet, print just before ]
       if (printed_end==0 && line ~ /^[[:space:]]*\][[:space:]]*,?[[:space:]]*$/) {
         print "  // END codestrap keybindings"
         printed_end=1
       }
-
-      print line
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
