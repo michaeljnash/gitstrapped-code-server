@@ -1,4 +1,18 @@
 services:
+  init-config:
+    image: alpine:3.20
+    command: >
+      sh -c '
+        mkdir -p /config/data/User /config/workspace &&
+        mkdir -p /host &&
+        [ -f /host/settings.json ] || touch /host/settings.json
+      '
+    volumes:
+      - code-config:/config
+      - projects:/config/workspace
+      # One real host file that both containers paths will share
+      - ${SETTINGS_FILE:-./runtime/settings.json}:/host/settings.json
+
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     environment:
@@ -35,6 +49,10 @@ services:
       - ./extensions.json:/config/codestrap/extensions.json:ro
       - ./tasks.json:/config/codestrap/tasks.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
+      
+      - ${SETTINGS_FILE:-./runtime/settings.json}:/config/data/User/settings.json
+      - ${SETTINGS_FILE:-./runtime/settings.json}:/config/workspace/settings.json
+
     ports:
       - ":8443"
       #- "8443:8443"
