@@ -206,142 +206,6 @@ init_default_password(){
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
 }
 
-# ===== config symlink watcher (Node.js; triggers code-server reloads) =====
-install_config_watcher(){
-  require_root || return 0
-
-  NODE_BIN=""
-  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do
-    [ -x "$p" ] && { NODE_BIN="$p"; break; }
-  done
-  [ -n "$NODE_BIN" ] || { warn "Node not found; config watcher disabled"; return 0; }
-
-  mkdir -p /usr/local/bin
-  cat >/usr/local/bin/configwatch.js <<'EOF'
-const fs = require('fs');
-const { exec } = require('child_process');
-
-const WS_DIR  = process.env.WS_CONFIG_DIR || '/config/workspace/config';
-const entries = [
-  { src: `${WS_DIR}/settings.json`,    dst: process.env.SETTINGS_PATH   },
-  { src: `${WS_DIR}/keybindings.json`, dst: process.env.KEYB_PATH       },
-  { src: `${WS_DIR}/extensions.json`,  dst: process.env.EXT_PATH        },
-  { src: `${WS_DIR}/tasks.json`,       dst: process.env.TASKS_PATH      },
-].filter(e => e.dst);
-
-const debounceMs = 400;
-const last = new Map();
-
-function now(){ return Date.now(); }
-function debounced(file){
-  const t = last.get(file) || 0;
-  if (now() - t < debounceMs) return true;
-  last.set(file, now());
-  return false;
-}
-
-function realOrNull(p){
-  try { return fs.realpathSync(p); } catch { return null; }
-}
-
-function touch(p){
-  const t = new Date();
-  fs.utimes(p, t, t, (err)=>{
-    if (err) {
-      // harmless fallback: fd open/close to poke mtime through append/truncate
-      exec(`sh -lc "dd if=/dev/null of='${p}' oflag=append conv=notrunc 2>/dev/null || true"`);
-    }
-  });
-}
-
-function ensureRegular(path){
-  try{
-    const st = fs.lstatSync(path);
-    if (st.isSymbolicLink()) {
-      // If still a symlink somehow, copy-through into a regular file
-      const tmp = `${path}.tmp.codestrap`;
-      try {
-        fs.copyFileSync(path, tmp);
-      } catch {
-        fs.writeFileSync(tmp, path.includes('keybindings') ? '[]\n' : (path.includes('extensions') ? '{ "recommendations": [] }\n' : '{}\n'));
-      }
-      try { fs.unlinkSync(path); } catch {}
-      fs.copyFileSync(tmp, path);
-      fs.unlinkSync(tmp);
-    }
-  } catch {
-    // Create missing file
-    fs.writeFileSync(path, path.includes('keybindings') ? '[]\n' : (path.includes('extensions') ? '{ "recommendations": [] }\n' : '{}\n'));
-  }
-}
-
-function watchPair(src, dst){
-  const realDst = realOrNull(dst) || dst;
-
-  // If resolving dst loops (null) and dst is a symlink to src or within WS_DIR, skip to avoid ELOOP
-  if (!realOrNull(dst)) {
-    try {
-      const lst = fs.lstatSync(dst);
-      if (lst.isSymbolicLink()) {
-        const link = fs.readlinkSync(dst);
-        if (link.startsWith(WS_DIR)) {
-          console.error(`[configwatch] Detected circular link ${dst} -> ${link}, skipping to avoid ELOOP`);
-          return;
-        }
-      }
-    } catch {}
-  }
-
-  ensureRegular(realDst);
-
-  try {
-    fs.watch(src, { persistent: true }, ()=>{
-      if (debounced(realDst)) return;
-      touch(realDst);
-    });
-    console.log(`[configwatch] watching ${src} -> poke ${realDst}`);
-  } catch (e) {
-    try {
-      fs.watch(WS_DIR, { persistent: true }, ()=>{
-        try {
-          if (fs.existsSync(src)) {
-            watchPair(src, dst);
-          }
-        } catch {}
-      });
-      console.log(`[configwatch] waiting for ${src} in ${WS_DIR}`);
-    } catch (e2) {
-      console.error(`[configwatch] cannot watch ${src}: ${e2.message}`);
-    }
-  }
-}
-
-try { if (!fs.existsSync(WS_DIR)) fs.mkdirSync(WS_DIR, { recursive: true }); } catch {}
-
-entries.forEach(({src,dst})=>watchPair(src,dst));
-setInterval(()=>{}, 1<<30);
-EOF
-  chmod 755 /usr/local/bin/configwatch.js
-
-  mkdir -p /etc/services.d/configwatch
-  cat >/etc/services.d/configwatch/run <<EOF
-#!/usr/bin/env sh
-set -eu
-WS_CONFIG_DIR="$WORKSPACE_DIR/config"
-export WS_CONFIG_DIR
-
-export SETTINGS_PATH="$SETTINGS_PATH"
-export KEYB_PATH="$KEYB_PATH"
-export EXT_PATH="$EXT_PATH"
-export TASKS_PATH="$TASKS_PATH"
-
-exec "$NODE_BIN" /usr/local/bin/configwatch.js
-EOF
-  chmod +x /etc/services.d/configwatch/run
-  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/configwatch/finish && chmod +x /etc/services.d/configwatch/finish
-  log "installed config watcher service"
-}
-
 # ===== helpers for interactive -a/--auto =====
 env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -a/--auto to use env %s)" "$1" || true; }
 read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
@@ -815,7 +679,7 @@ merge_codestrap_extensions(){
       jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
     fi
   else
-    printf '{ "recommendations": [] }\n' >"$tmp_user_json"
+    printf '{ "recommendations": [] }\n' > "$tmp_user_json"
   fi
 
   # Load REPO (allow comments only)
@@ -846,9 +710,11 @@ merge_codestrap_extensions(){
     echo "{"
     echo '  "recommendations": ['
     echo '    // START codestrap extensions'
+    REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
+      REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
     echo '    // END codestrap extensions'
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
@@ -905,7 +771,11 @@ emit_installed_exts_with_versions(){
 install_one_ext(){
   ext="$1"; force="${2:-false}"
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot install ${ext}"; return 1; }
-  if [ "$force" = "true" ] then "$CODE_BIN" --install-extension "$ext" --force >/dev/null 2>&1; else "$CODE_BIN" --install-extension "$ext" >/dev/null 2>&1; fi
+  if [ "$force" = "true" ]; then
+    "$CODE_BIN" --install-extension "$ext" --force >/dev/null 2>&1
+  else
+    "$CODE_BIN" --install-extension "$ext" >/dev/null 2>&1
+  fi
 }
 
 uninstall_one_ext(){
@@ -971,10 +841,11 @@ EHELP
   emit_installed_exts >"$tmp_installed" || true
 
   # Build sets
-  tmp_missing="$(mktemp)"; : >"$tmp_missing"
-  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
-  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended"
+  tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
+  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec" # in recs and installed
+  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended" # installed but NOT in recs
 
+  # Index installed for quick checks
   while IFS= read -r ext; do
     [ -n "$ext" ] || continue
     if in_file "$ext" "$tmp_recs"; then
@@ -1081,6 +952,7 @@ EHELP
   }
 
   if [ -z "$MODE" ] && [ -z "$UNMODE" ]; then
+    # Interactive: pick action then scope
     PROMPT_TAG="[Extensions] ? "
     CTX_TAG="[Extensions]"
 
@@ -1108,6 +980,7 @@ EHELP
     PROMPT_TAG=""
     CTX_TAG=""
   else
+    # Non-interactive: ALWAYS uninstall first (if requested), then install (if requested)
     if [ -n "$UNMODE" ]; then do_uninstall "$UNMODE"; fi
     if [ -n "$MODE" ]; then do_install "$MODE"; fi
   fi
@@ -1115,48 +988,63 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
+# ===== workspace config folder (REAL files in WORKSPACE, symlinks in USER_DIR) =====
 install_config_shortcuts(){
+  # Real files live here:
   local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
-  # Ensure REAL files in user dir (never symlinks) to prevent circular links
-  make_regular(){
-    _p="$1"; _default="$2"
-    if [ -L "$_p" ]; then
-      tmp="$(mktemp)"
-      cp -f "$_p" "$tmp" 2>/dev/null || printf '%s\n' "$_default" >"$tmp"
-      rm -f "$_p"
-      cp -f "$tmp" "$_p"
-      rm -f "$tmp"
-    elif [ ! -e "$_p" ]; then
-      printf '%s\n' "$_default" >"$_p"
+  # Paths of real files in workspace
+  local WS_SETTINGS="$d/settings.json"
+  local WS_TASKS="$d/tasks.json"
+  local WS_KEYB="$d/keybindings.json"
+  local WS_EXT="$d/extensions.json"
+
+  # Helper: initialize a workspace file with (1) existing USER file content if present,
+  # else a sensible default JSON/JSON array.
+  init_ws_file(){
+    local ws="$1" user="$2" default_content="$3"
+    if [ -f "$ws" ] && [ -s "$ws" ]; then
+      : # keep existing workspace file
+    else
+      if [ -f "$user" ] && [ -s "$user" ] && [ ! -L "$user" ]; then
+        cp -f "$user" "$ws"
+      else
+        printf '%s\n' "$default_content" >"$ws"
+      fi
     fi
-    chmod 644 "$_p" 2>/dev/null || true
-    chown "${PUID}:${PGID}" "$_p" 2>/dev/null || true
+    chown "${PUID}:${PGID}" "$ws" 2>/dev/null || true
   }
 
-  make_regular "$SETTINGS_PATH"  '{}'
-  make_regular "$TASKS_PATH"     '{}'
-  make_regular "$KEYB_PATH"      '[]'
-  make_regular "$EXT_PATH"       '{ "recommendations": [] }'
+  init_ws_file "$WS_SETTINGS" "$SETTINGS_PATH" '{}'
+  init_ws_file "$WS_TASKS"    "$TASKS_PATH"    '{}'
+  init_ws_file "$WS_KEYB"     "$KEYB_PATH"     '[]'
+  init_ws_file "$WS_EXT"      "$EXT_PATH"      '{ "recommendations": [] }'
 
-  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
+  # Now force USER_DIR files to symlink to the workspace "real" files
+  force_link(){
+    local src="$1" dst="$2"
+    rm -f "$dst" 2>/dev/null || true
+    ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"
+    chown -h "${PUID}:${PGID}" "$dst" 2>/dev/null || true
+  }
 
-  mklink "$SETTINGS_PATH" "$d/settings.json"
-  mklink "$TASKS_PATH"    "$d/tasks.json"
-  mklink "$KEYB_PATH"     "$d/keybindings.json"
-  mklink "$EXT_PATH"      "$d/extensions.json"
+  force_link "$WS_SETTINGS" "$SETTINGS_PATH"
+  force_link "$WS_TASKS"    "$TASKS_PATH"
+  force_link "$WS_KEYB"     "$KEYB_PATH"
+  force_link "$WS_EXT"      "$EXT_PATH"
 
-  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+  # Make sure the workspace config folder is owned correctly
+  chown -h "${PUID}:${PGID}" "$d" "$d/"* 2>/dev/null || true
 
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace (real files) and linked user config → workspace" || true
 }
 
 # ===== CLI helpers =====
 install_cli_shim(){
+  # System-wide install when root, else user-level install into ~/.local/bin
   if require_root; then
     mkdir -p /usr/local/bin
     cat >/usr/local/bin/codestrap <<'EOF'
@@ -1178,6 +1066,7 @@ EOF
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
+    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
@@ -1200,7 +1089,7 @@ EOF
   fi
 }
 
-bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
+bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."); fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
@@ -1239,7 +1128,7 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
-# --- interactive config flow ---
+# --- interactive config flow (manual flow) ---
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
@@ -1272,6 +1161,7 @@ config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
+  # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
     if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
       merge_codestrap_settings
@@ -1286,6 +1176,7 @@ config_hybrid(){
     fi
   fi
 
+  # --keybindings
   if [ -n "${CFG_KEYB+x}" ]; then
     if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then
       merge_codestrap_keybindings
@@ -1300,6 +1191,7 @@ config_hybrid(){
     fi
   fi
 
+  # --extensions
   if [ -n "${CFG_EXT+x}" ]; then
     if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then
       merge_codestrap_extensions
@@ -1323,6 +1215,7 @@ config_hybrid(){
 # ===== github flags handler =====
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
+  # Clear any old values (so flags fully control when provided)
   unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1377,6 +1270,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 cli_entry(){
 
   if [ $# -eq 0 ]; then
+    # Hub flow
     if ! is_tty; then
       echo "No TTY detected. Run a subcommand or provide flags. Examples:
   codestrap github --auto
@@ -1386,8 +1280,10 @@ cli_entry(){
       exit 3
     fi
 
+    # Show banner BEFORE first hub question
     bootstrap_banner()
 
+    # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
@@ -1400,7 +1296,7 @@ cli_entry(){
       log "skipped bootstrap GitHub"
       CTX_TAG=""
     fi
-
+    # 2) Config?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
@@ -1408,6 +1304,7 @@ cli_entry(){
       CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
     fi
 
+    # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
@@ -1420,6 +1317,7 @@ cli_entry(){
     exit 0
   fi
 
+  # Subcommands
   case "$1" in
     -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
@@ -1442,6 +1340,7 @@ cli_entry(){
       ;;
     config)
       shift || true
+      # Parse config flags
       unset CFG_SETTINGS
       unset CFG_KEYB
       unset CFG_EXT
@@ -1449,21 +1348,31 @@ cli_entry(){
         case "$1" in
           -h|--help) print_help; exit 0;;
           -s|--settings)
-            shift || true; CFG_SETTINGS="${1:-}"
+            shift || true
+            CFG_SETTINGS="${1:-}"
             [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --settings=*) CFG_SETTINGS="${1#*=}";;
+          --settings=*)
+            CFG_SETTINGS="${1#*=}"
+            ;;
           -k|--keybindings)
-            shift || true; CFG_KEYB="${1:-}"
+            shift || true
+            CFG_KEYB="${1:-}"
             [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --keybindings=*) CFG_KEYB="${1#*=}";;
+          --keybindings=*)
+            CFG_KEYB="${1#*=}"
+            ;;
           -e|--extensions)
-            shift || true; CFG_EXT="${1:-}"
+            shift || true
+            CFG_EXT="${1:-}"
             [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --extensions=*) CFG_EXT="${1#*=}";;
-          *) CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+          --extensions=*)
+            CFG_EXT="${1#*=}"
+            ;;
+          *)
+            CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
         shift || true
       done
@@ -1473,6 +1382,7 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
+        # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
         else
@@ -1522,8 +1432,9 @@ autorun_env_if_present(){
   fi
 }
 
-# ===== init-time extensions automation via env =====
+# ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
+  # Normalize envs
   inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
   uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
 
@@ -1533,7 +1444,9 @@ autorun_install_extensions(){
     case "$um" in all|a) args="$args --uninstall all";; missing|m) args="$args --uninstall missing";; esac
     case "$im" in all|a) args="$args --install all";;   missing|m) args="$args --install missing";; esac
     if [ -n "$args" ]; then
-      CTX_TAG="[Extensions]"; log "env automation → codestrap extensions$args"; CTX_TAG=""
+      CTX_TAG="[Extensions]"
+      log "env automation → codestrap extensions$args"
+      CTX_TAG=""
       extensions_cmd $args
     fi
   }
@@ -1545,6 +1458,7 @@ autorun_install_extensions(){
   [ "$inst_mode"   = "none" ] && inst_mode=""
 
   [ -z "$uninst_mode$inst_mode" ] && return 0
+
   run_noninteractive "$uninst_mode" "$inst_mode"
 }
 
@@ -1558,9 +1472,8 @@ case "${1:-init}" in
     merge_codestrap_keybindings
     merge_codestrap_extensions
     install_config_shortcuts
-    install_config_watcher
     autorun_env_if_present
-    autorun_install_extensions
+    autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
