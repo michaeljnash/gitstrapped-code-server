@@ -60,7 +60,7 @@ Flags for 'codestrap github' (hyphenated only; envs shown at right):
   -u, --username <val>           → GITHUB_USERNAME
   -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
   -n, --name <val>               → GITHUB_NAME
-  -e, --email <val>              → GITHUB_EMAIL
+  -m, --email <val>              → GITHUB_EMAIL
   -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   -p, --pull <true|false>        → GITHUB_PULL    (default: true)
   -a, --auto                     Use environment variables only (no prompts)
@@ -709,18 +709,12 @@ merge_codestrap_extensions(){
   {
     echo "{"
     echo '  "recommendations": ['
-    # START comment
     echo '    // START codestrap extensions'
-    # repo items
-    REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
-      REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
-    # END comment just after repo segment
     echo '    // END codestrap extensions'
-    # user extras (no trailing comma on last)
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
     idx=0
     while IFS= read -r item; do
@@ -823,13 +817,13 @@ EHELP
         MODE="$(normalize_scope "${1#*=}")"
         [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
-      --uninstall|-u)
-        if [ "$1" = "-u" ]; then shift || true; UNMODE="$(normalize_scope "${1:-}")"; else shift || true; UNMODE="$(normalize_scope "${1:-}")"; fi
-        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall|-u' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
-        ;;
       --uninstall=*)
         UNMODE="$(normalize_scope "${1#*=}")"
         [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
+        ;;
+      --uninstall|-u)
+        if [ "$1" = "-u" ]; then shift || true; UNMODE="$(normalize_scope "${1:-}")"; else shift || true; UNMODE="$(normalize_scope "${1:-}")"; fi
+        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall|-u' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
       *)
         CTX_TAG="[Extensions]"; err "Unknown flag for 'extensions': $1"; CTX_TAG=""; exit 1;;
@@ -992,73 +986,68 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (User files -> symlink to workspace files) =====
+# ===== workspace config folder (canonical files live in workspace; user paths symlink to them) =====
 install_config_shortcuts(){
-  local d="$WORKSPACE_DIR/config"
-  local pre_exists="0"
+  d="$WORKSPACE_DIR/config"
+  pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
-  # Workspace "real" file paths
-  local WS_SETTINGS="$d/settings.json"
-  local WS_TASKS="$d/tasks.json"
-  local WS_KEYB="$d/keybindings.json"
-  local WS_EXT="$d/extensions.json"
+  WS_SETTINGS="$d/settings.json"
+  WS_TASKS="$d/tasks.json"
+  WS_KEYB="$d/keybindings.json"
+  WS_EXT="$d/extensions.json"
 
-  # 1) Ensure workspace REAL files exist.
-  #    Prefer copying current user files if present; else create sensible defaults.
-  seed_or_default(){
-    # $1: user_path, $2: ws_path, $3: default_content
-    if [ ! -e "$2" ]; then
-      if [ -s "$1" ]; then
-        cp -f "$1" "$2"
+  # Adopt or seed: make sure workspace files exist with real content first,
+  # then replace USER files with symlinks to workspace files.
+  adopt_to_ws(){
+    user_path="$1"; ws_path="$2"; default_content="$3"
+
+    ensure_dir "$(dirname "$ws_path")"
+    # Create or adopt into workspace
+    if [ ! -e "$ws_path" ]; then
+      if [ -L "$user_path" ]; then
+        # If user file is a symlink, try to copy its target if it exists
+        target="$(readlink -f "$user_path" 2>/dev/null || true)"
+        if [ -n "$target" ] && [ -s "$target" ]; then
+          cp -f "$target" "$ws_path"
+        elif [ -s "$user_path" ]; then
+          # Symlink but readable file via link (edge case)
+          cp -f "$user_path" "$ws_path"
+        else
+          printf '%s\n' "$default_content" >"$ws_path"
+        fi
+      elif [ -f "$user_path" ] && [ -s "$user_path" ]; then
+        # Move user file into workspace so content is preserved
+        mv -f "$user_path" "$ws_path"
       else
-        printf '%s\n' "$3" > "$2"
+        printf '%s\n' "$default_content" >"$ws_path"
       fi
     fi
-    chown "${PUID}:${PGID}" "$2" 2>/dev/null || true
-  }
 
-  seed_or_default "$SETTINGS_PATH" "$WS_SETTINGS"       '{}'
-  seed_or_default "$TASKS_PATH"    "$WS_TASKS"          '{}'
-  seed_or_default "$KEYB_PATH"     "$WS_KEYB"           '[]'
-  seed_or_default "$EXT_PATH"      "$WS_EXT"            '{ "recommendations": [] }'
+    chown "${PUID}:${PGID}" "$ws_path" 2>/dev/null || true
 
-  # 2) Make USER files symlink to the workspace real files (flip direction).
-  link_user_to_ws(){
-    # $1: ws_file, $2: user_file
-    if [ -L "$2" ]; then
-      # If already the correct link, keep. If not, replace.
-      target="$(readlink "$2" || true)"
-      if [ "$target" != "$1" ]; then
-        rm -f "$2"
-        ln -s "$1" "$2"
-      fi
-    else
-      if [ -e "$2" ]; then
-        # Backup once if it's a regular file (preserve user data already seeded).
-        [ -f "$2" ] && cp -f "$2" "$2.bak" || true
-        rm -f "$2"
-      fi
-      ln -s "$1" "$2"
+    # Now point user path to workspace
+    ensure_dir "$(dirname "$user_path")"
+    if [ -e "$user_path" ] || [ -L "$user_path" ]; then
+      rm -f "$user_path"
     fi
-    chown -h "${PUID}:${PGID}" "$2" 2>/dev/null || true
+    ln -s "$ws_path" "$user_path"
+    chown -h "${PUID}:${PGID}" "$user_path" 2>/dev/null || true
   }
 
-  link_user_to_ws "$WS_SETTINGS" "$SETTINGS_PATH"
-  link_user_to_ws "$WS_TASKS"    "$TASKS_PATH"
-  link_user_to_ws "$WS_KEYB"     "$KEYB_PATH"
-  link_user_to_ws "$WS_EXT"      "$EXT_PATH"
+  adopt_to_ws "$SETTINGS_PATH" "$WS_SETTINGS"       '{}'
+  adopt_to_ws "$TASKS_PATH"    "$WS_TASKS"          '{}'
+  adopt_to_ws "$KEYB_PATH"     "$WS_KEYB"           '[]'
+  adopt_to_ws "$EXT_PATH"      "$WS_EXT"            '{ "recommendations": [] }'
 
-  # 3) Make sure workspace dir is owned correctly (and links visible to users).
   chown -R "${PUID}:${PGID}" "$d" 2>/dev/null || true
 
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace (user files now symlink to it)" || log "verified config symlinks (user → workspace)"
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace; user files now symlink to it" || log "verified config symlinks (user → workspace)"
 }
 
 # ===== CLI helpers =====
 install_cli_shim(){
-  # System-wide install when root, else user-level install into ~/.local/bin
   if require_root; then
     mkdir -p /usr/local/bin
     cat >/usr/local/bin/codestrap <<'EOF'
@@ -1080,7 +1069,6 @@ EOF
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
-    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
@@ -1144,6 +1132,9 @@ recompute_base(){
 
 # --- interactive config flow (manual flow) ---
 config_interactive(){
+  # Ensure live pointers first so merges write to canonical files
+  install_config_shortcuts
+
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
@@ -1164,7 +1155,6 @@ config_interactive(){
     log "skipped extensions merge"
   fi
 
-  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1172,6 +1162,9 @@ config_interactive(){
 
 # --- hybrid / flag-aware config flow ---
 config_hybrid(){
+  # Ensure live pointers first so merges write to canonical files
+  install_config_shortcuts
+
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
@@ -1220,7 +1213,6 @@ config_hybrid(){
     fi
   fi
 
-  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1229,7 +1221,6 @@ config_hybrid(){
 # ===== github flags handler =====
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
-  # Clear any old values (so flags fully control when provided)
   unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1239,7 +1230,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
       -n|--name)     shift || true; GITHUB_NAME="${1:-}";;
-      -e|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
+      -m|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
       -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
       -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
       --*)           err "Unknown flag '$1'"; print_help; exit 1;;
@@ -1396,6 +1387,8 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
+        # Ensure symlinks first in non-interactive as well
+        install_config_shortcuts
         # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
@@ -1412,7 +1405,6 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
-        install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
@@ -1448,7 +1440,6 @@ autorun_env_if_present(){
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
-  # Normalize envs
   inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
   uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
 
@@ -1482,10 +1473,11 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
+    # Ensure symlinks/canonical files first, then merges write into them
+    install_config_shortcuts
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
-    install_config_shortcuts
     autorun_env_if_present
     autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
