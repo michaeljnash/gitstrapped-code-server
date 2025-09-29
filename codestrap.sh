@@ -1016,6 +1016,148 @@ install_config_shortcuts(){
   [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
 }
 
+# ===== Config Watcher (Node-based, watches workspace/config → syncs into User) =====
+install_config_watcher(){
+  # Find a Node binary (same search as restart gate)
+  NODE_BIN=""
+  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do
+    [ -x "$p" ] && { NODE_BIN="$p"; break; }
+  done
+  [ -n "$NODE_BIN" ] || { warn "Node not found; config watcher disabled"; return 0; }
+
+  mkdir -p /usr/local/bin
+  cat >/usr/local/bin/configwatch.js <<'EOF'
+const fs = require('fs');
+const fsp = fs.promises;
+const path = require('path');
+
+const USER_DIR = process.env.USER_DIR || '/config/data/User';
+const WS_DIR   = process.env.WORKSPACE_DIR || '/config/workspace';
+const PUID     = process.env.PUID || '1000';
+const PGID     = process.env.PGID || '1000';
+
+const CONFIG_DIR = path.join(WS_DIR, 'config');
+
+const MAP = {
+  'settings.json':   path.join(USER_DIR, 'settings.json'),
+  'keybindings.json':path.join(USER_DIR, 'keybindings.json'),
+  'extensions.json': path.join(USER_DIR, 'extensions.json'),
+  'tasks.json':      path.join(USER_DIR, 'tasks.json'),
+};
+
+const debounce = (fn, ms=120) => {
+  let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+};
+
+async function ensureSymlink(src, linkPath) {
+  try {
+    const st = await fsp.lstat(linkPath);
+    if (!st.isSymbolicLink()) {
+      await fsp.rm(linkPath, { force: true });
+      await fsp.symlink(src, linkPath);
+    } else {
+      const tgt = await fsp.readlink(linkPath).catch(() => '');
+      if (tgt !== src) {
+        await fsp.rm(linkPath, { force: true });
+        await fsp.symlink(src, linkPath);
+      }
+    }
+  } catch (e) {
+    // not exists
+    try { await fsp.symlink(src, linkPath); } catch {}
+  }
+}
+
+async function copyFile(srcPath, dstPath) {
+  try {
+    await fsp.mkdir(path.dirname(dstPath), { recursive: true });
+    await fsp.copyFile(srcPath, dstPath);
+    // Touch to poke code-server watchers
+    const now = new Date();
+    await fsp.utimes(dstPath, now, now).catch(()=>{});
+    // chown if available
+    try { await fsp.chown(dstPath, Number(PUID), Number(PGID)); } catch {}
+  } catch (e) {
+    // ignore copy errors silently; watcher will retry on next change
+  }
+}
+
+async function initialReconcile() {
+  // If a workspace file exists and is not a symlink (editor replaced it),
+  // sync its contents into the user file and convert it back to a symlink.
+  for (const [name, userPath] of Object.entries(MAP)) {
+    const wsPath = path.join(CONFIG_DIR, name);
+    try {
+      const st = await fsp.lstat(wsPath);
+      if (!st.isSymbolicLink()) {
+        await copyFile(wsPath, userPath);
+        await ensureSymlink(userPath, wsPath);
+      }
+    } catch {}
+  }
+}
+
+function watchOne(name) {
+  const wsPath   = path.join(CONFIG_DIR, name);
+  const userPath = MAP[name];
+
+  const sync = debounce(async () => {
+    try {
+      await copyFile(wsPath, userPath);
+      await ensureSymlink(userPath, wsPath);
+    } catch {}
+  }, 80);
+
+  // Also poll existence every few seconds to re-arm if editors create new files/replace symlinks
+  setInterval(async () => {
+    try {
+      const st = await fsp.lstat(wsPath);
+      if (!st.isSymbolicLink()) {
+        await copyFile(wsPath, userPath);
+        await ensureSymlink(userPath, wsPath);
+      }
+    } catch {}
+  }, 3000);
+
+  try {
+    // fs.watch emits 'change' (write) and 'rename' (replaced/created) events.
+    const w = fs.watch(wsPath, { persistent: true }, (_event) => {
+      sync();
+    });
+    w.on('error', () => {
+      // If file not found yet, retry arming shortly
+      setTimeout(() => watchOne(name), 1000);
+    });
+  } catch {
+    // If watching fails (e.g., file missing), try again later
+    setTimeout(() => watchOne(name), 1000);
+  }
+}
+
+(async function main(){
+  try { await fsp.mkdir(CONFIG_DIR, { recursive: true }); } catch {}
+  await initialReconcile();
+  Object.keys(MAP).forEach(watchOne);
+  console.log('[configwatch] watching workspace config → user sync');
+})();
+EOF
+  chmod 755 /usr/local/bin/configwatch.js
+
+  # s6 service
+  mkdir -p /etc/services.d/configwatch
+  cat >/etc/services.d/configwatch/run <<EOF
+#!/usr/bin/env sh
+export USER_DIR="$USER_DIR"
+export WORKSPACE_DIR="$WORKSPACE_DIR"
+export PUID="${PUID:-1000}"
+export PGID="${PGID:-1000}"
+exec "$NODE_BIN" /usr/local/bin/configwatch.js
+EOF
+  chmod +x /etc/services.d/configwatch/run
+  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/configwatch/finish && chmod +x /etc/services.d/configwatch/finish
+  log "installed config watcher service"
+}
+
 # ===== CLI helpers =====
 install_cli_shim(){
   # System-wide install when root, else user-level install into ~/.local/bin
@@ -1148,6 +1290,7 @@ config_hybrid(){
     else
       log "skipped settings merge"
     fi
+  end
   fi
 
   # --keybindings
@@ -1446,6 +1589,7 @@ case "${1:-init}" in
     merge_codestrap_keybindings
     merge_codestrap_extensions
     install_config_shortcuts
+    install_config_watcher
     autorun_env_if_present
     autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
