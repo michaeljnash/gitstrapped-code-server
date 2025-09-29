@@ -39,7 +39,7 @@ services:
     ports:
       - ":8443"
       #- "8443:8443"
-    command: --user-data-dir /config/data
+    command: --user-data-dir $HOME/config/data
     restart: always
 
 volumes:
