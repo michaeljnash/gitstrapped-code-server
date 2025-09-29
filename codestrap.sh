@@ -60,7 +60,7 @@ Flags for 'codestrap github' (hyphenated only; envs shown at right):
   -u, --username <val>           → GITHUB_USERNAME
   -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
   -n, --name <val>               → GITHUB_NAME
-  -m, --email <val>              → GITHUB_EMAIL
+  -e, --email <val>              → GITHUB_EMAIL
   -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   -p, --pull <true|false>        → GITHUB_PULL    (default: true)
   -a, --auto                     Use environment variables only (no prompts)
@@ -395,6 +395,7 @@ merge_codestrap_settings(){
 
   tmp_user_json="$(mktemp)"
 
+  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -410,6 +411,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
+  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -464,6 +466,7 @@ merge_codestrap_settings(){
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
 
+  # Build final JSON, then inject comments with correct END placement
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -528,6 +531,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # ---- Load USER (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -544,6 +548,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
+  # ---- Load REPO (allow JSONC comments; no other repairs) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -552,6 +557,7 @@ merge_codestrap_keybindings(){
     jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
+  # ---- Merge arrays (honor codestrap_preserve) ----
   tmp_final="$(mktemp)"
   jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" "$(cat <<'JQ'
 def arr(v): if (v|type)=="array" then v else [] end;
@@ -580,6 +586,7 @@ def kstr(x): (x.key|tostring);
 JQ
   )" > "$tmp_final"
 
+  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
   tmp_with_comments="$(mktemp)"
   awk '
     BEGIN {
@@ -662,6 +669,7 @@ merge_codestrap_extensions(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # Load USER (allow comments only; no other repairs)
   tmp_user_json="$(mktemp)"
   if [ -f "$EXT_PATH" ]; then
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
@@ -674,6 +682,7 @@ merge_codestrap_extensions(){
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
   fi
 
+  # Load REPO (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
     cp "$REPO_EXT_SRC" "$tmp_repo_json"
@@ -682,9 +691,11 @@ merge_codestrap_extensions(){
     jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo extensions JSON invalid → $REPO_EXT_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
+  # Extract repo list (de-dup preserving order)
   tmp_repo_list="$(mktemp)"
   jq -r '.recommendations // [] | .[] | @json' "$tmp_repo_json" | awk '!seen[$0]++' > "$tmp_repo_list"
 
+  # Extract user extras (those NOT in repo list, preserving order)
   tmp_user_extras="$(mktemp)"
   jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" '
     def arr(v): if (v|type)=="array" then v else [] end;
@@ -693,16 +704,23 @@ merge_codestrap_extensions(){
     | [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ]
   ' | jq -r '.[] | @json' > "$tmp_user_extras"
 
+  # Compose final with inline comments around repo segment (no preserve needed)
   tmp_with_comments="$(mktemp)"
   {
     echo "{"
     echo '  "recommendations": ['
+    # START comment
     echo '    // START codestrap extensions'
+    # repo items
+    REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
+      REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
+    # END comment just after repo segment
     echo '    // END codestrap extensions'
+    # user extras (no trailing comma on last)
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
     idx=0
     while IFS= read -r item; do
@@ -826,10 +844,12 @@ EHELP
   emit_recommended_exts >"$tmp_recs" || true
   emit_installed_exts >"$tmp_installed" || true
 
-  tmp_missing="$(mktemp)"; : >"$tmp_missing"
-  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
-  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended"
+  # Build sets
+  tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
+  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec" # in recs and installed
+  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended" # installed but NOT in recs
 
+  # Index installed for quick checks
   while IFS= read -r ext; do
     [ -n "$ext" ] || continue
     if in_file "$ext" "$tmp_recs"; then
@@ -936,6 +956,7 @@ EHELP
   }
 
   if [ -z "$MODE" ] && [ -z "$UNMODE" ]; then
+    # Interactive: pick action then scope
     PROMPT_TAG="[Extensions] ? "
     CTX_TAG="[Extensions]"
 
@@ -963,6 +984,7 @@ EHELP
     PROMPT_TAG=""
     CTX_TAG=""
   else
+    # Non-interactive: ALWAYS uninstall first (if requested), then install (if requested)
     if [ -n "$UNMODE" ]; then do_uninstall "$UNMODE"; fi
     if [ -n "$MODE" ]; then do_install "$MODE"; fi
   fi
@@ -970,103 +992,33 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (real files + two-way sync)
+# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
-  local ws="$WORKSPACE_DIR/config"
-  ensure_dir "$ws"
+  local d="$WORKSPACE_DIR/config"
+  local pre_exists="0"
+  [ -d "$d" ] && pre_exists="1"
+  ensure_dir "$d"
 
-  # Ensure authoritative USER files (code-server watches these)
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
   [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
-  chown "${PUID}:${PGID}" "$SETTINGS_PATH" "$TASKS_PATH" "$KEYB_PATH" "$EXT_PATH" 2>/dev/null || true
 
-  # Create workspace copies as *real files*, seeded from User
-  copy_if_missing(){
-    src="$1"; dst="$2"
-    if [ ! -f "$dst" ]; then
-      cp -f "$src" "$dst" 2>/dev/null || true
-    fi
-  }
-  copy_if_missing "$SETTINGS_PATH" "$ws/settings.json"
-  copy_if_missing "$TASKS_PATH"    "$ws/tasks.json"
-  copy_if_missing "$KEYB_PATH"     "$ws/keybindings.json"
-  copy_if_missing "$EXT_PATH"      "$ws/extensions.json"
-  chown "${PUID}:${PGID}" "$ws" "$ws/"* 2>/dev/null || true
+  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
-  start_config_sync_daemon "$ws"
-  log "workspace config ready → $ws (real files + sync)"
-}
+  mklink "$SETTINGS_PATH" "$d/settings.json"
+  mklink "$TASKS_PATH"    "$d/tasks.json"
+  mklink "$KEYB_PATH"     "$d/keybindings.json"
+  mklink "$EXT_PATH"      "$d/extensions.json"
 
-start_config_sync_daemon(){
-  local ws="$1"
-  local runner="/usr/local/bin/codestrap-sync.sh"
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
 
-  cat >"$runner" <<'EOSH'
-#!/usr/bin/env sh
-set -eu
-HOME_DIR="${HOME:-/config}"
-USER_DIR="$HOME_DIR/data/User"
-WS_DIR="${WORKSPACE_DIR:-/config/workspace}/config"
-
-sync_one(){ src="$1"; dst="$2"; tmp="$(mktemp)"; cp -f "$src" "$tmp" && mv -f "$tmp" "$dst"; }
-
-# initial gentle reconcile (both ways; newest wins)
-for name in settings.json tasks.json keybindings.json extensions.json; do
-  U="$USER_DIR/$name"; W="$WS_DIR/$name"
-  [ -e "$U" ] || continue
-  [ -e "$W" ] || { cp -f "$U" "$W" 2>/dev/null || true; continue; }
-  if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"
-  elif [ "$U" -nt "$W" ]; then sync_one "$U" "$W"
-  fi
-done
-
-if command -v inotifywait >/dev/null 2>&1; then
-  # inotify mode: watch both dirs; act on writes/moves/attrib
-  while :; do
-    inotifywait -q -e close_write,move,create,attrib "$USER_DIR" "$WS_DIR" >/dev/null 2>&1 || sleep 1
-    for name in settings.json tasks.json keybindings.json extensions.json; do
-      U="$USER_DIR/$name"; W="$WS_DIR/$name"
-      [ -e "$U" ] && [ -e "$W" ] || continue
-      if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
-      if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
-    done
-  done
-else
-  # polling mode fallback
-  while :; do
-    sleep 2
-    for name in settings.json tasks.json keybindings.json extensions.json; do
-      U="$USER_DIR/$name"; W="$WS_DIR/$name"
-      [ -e "$U" ] && [ -e "$W" ] || continue
-      if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
-      if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
-    done
-  done
-fi
-EOSH
-  chmod 755 "$runner"
-
-  if require_root; then
-    # Run under s6 if available
-    mkdir -p /etc/services.d/codestrap-sync
-    cat >/etc/services.d/codestrap-sync/run <<'EOR'
-#!/usr/bin/env sh
-exec /usr/local/bin/codestrap-sync.sh
-EOR
-    chmod +x /etc/services.d/codestrap-sync/run
-    printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/codestrap-sync/finish && chmod +x /etc/services.d/codestrap-sync/finish
-    log "installed config sync daemon (service)"
-  else
-    # Spawn background loop for non-root too
-    ( /usr/local/bin/codestrap-sync.sh >/dev/null 2>&1 & ) || true
-    log "started config sync daemon (user background)"
-  fi
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
 }
 
 # ===== CLI helpers =====
 install_cli_shim(){
+  # System-wide install when root, else user-level install into ~/.local/bin
   if require_root; then
     mkdir -p /usr/local/bin
     cat >/usr/local/bin/codestrap <<'EOF'
@@ -1088,6 +1040,7 @@ EOF
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
+    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
@@ -1149,10 +1102,8 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
-# --- interactive config flow (with real files + sync) ---
+# --- interactive config flow (manual flow) ---
 config_interactive(){
-  install_config_shortcuts
-
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
@@ -1173,6 +1124,7 @@ config_interactive(){
     log "skipped extensions merge"
   fi
 
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1180,8 +1132,6 @@ config_interactive(){
 
 # --- hybrid / flag-aware config flow ---
 config_hybrid(){
-  install_config_shortcuts
-
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
@@ -1230,6 +1180,7 @@ config_hybrid(){
     fi
   fi
 
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1238,6 +1189,7 @@ config_hybrid(){
 # ===== github flags handler =====
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
+  # Clear any old values (so flags fully control when provided)
   unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1247,7 +1199,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
       -n|--name)     shift || true; GITHUB_NAME="${1:-}";;
-      -m|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
+      -e|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
       -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
       -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
       --*)           err "Unknown flag '$1'"; print_help; exit 1;;
@@ -1292,6 +1244,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 cli_entry(){
 
   if [ $# -eq 0 ]; then
+    # Hub flow
     if ! is_tty; then
       echo "No TTY detected. Run a subcommand or provide flags. Examples:
   codestrap github --auto
@@ -1301,9 +1254,10 @@ cli_entry(){
       exit 3
     fi
 
-    # FIXED: correct function call (no parentheses)
-    bootstrap_banner
+    # Show banner BEFORE first hub question
+    bootstrap_banner()
 
+    # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
       PROMPT_TAG="[Bootstrap GitHub] ? "
@@ -1316,6 +1270,7 @@ cli_entry(){
       log "skipped bootstrap GitHub"
       CTX_TAG=""
     fi
+    # 2) Config?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
@@ -1323,6 +1278,7 @@ cli_entry(){
       CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
     fi
 
+    # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
@@ -1335,6 +1291,7 @@ cli_entry(){
     exit 0
   fi
 
+  # Subcommands
   case "$1" in
     -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
@@ -1357,17 +1314,39 @@ cli_entry(){
       ;;
     config)
       shift || true
-      unset CFG_SETTINGS CFG_KEYB CFG_EXT
+      # Parse config flags
+      unset CFG_SETTINGS
+      unset CFG_KEYB
+      unset CFG_EXT
       while [ $# -gt 0 ]; do
         case "$1" in
           -h|--help) print_help; exit 0;;
-          -s|--settings)   shift || true; CFG_SETTINGS="${1:-}"; [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
-          --settings=*)     CFG_SETTINGS="${1#*=}" ;;
-          -k|--keybindings) shift || true; CFG_KEYB="${1:-}"; [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
-          --keybindings=*)  CFG_KEYB="${1#*=}" ;;
-          -e|--extensions)  shift || true; CFG_EXT="${1:-}"; [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
-          --extensions=*)   CFG_EXT="${1#*=}" ;;
-          *) CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+          -s|--settings)
+            shift || true
+            CFG_SETTINGS="${1:-}"
+            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --settings=*)
+            CFG_SETTINGS="${1#*=}"
+            ;;
+          -k|--keybindings)
+            shift || true
+            CFG_KEYB="${1:-}"
+            [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --keybindings=*)
+            CFG_KEYB="${1#*=}"
+            ;;
+          -e|--extensions)
+            shift || true
+            CFG_EXT="${1:-}"
+            [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --extensions=*)
+            CFG_EXT="${1#*=}"
+            ;;
+          *)
+            CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
         shift || true
       done
@@ -1377,7 +1356,7 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
-        install_config_shortcuts
+        # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
         else
@@ -1393,6 +1372,7 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
+        install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
@@ -1428,6 +1408,7 @@ autorun_env_if_present(){
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
+  # Normalize envs
   inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
   uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
 
@@ -1461,12 +1442,12 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
-    install_config_shortcuts
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
+    install_config_shortcuts
     autorun_env_if_present
-    autorun_install_extensions
+    autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
