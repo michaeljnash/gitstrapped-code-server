@@ -970,81 +970,86 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder
-# Authoritative files: USER_DIR (code-server watches here)
-# Workspace copies: hard links to USER files (best) or symlinks (fallback)
+# ===== workspace config folder (real files + two-way sync)
 install_config_shortcuts(){
-  local d="$WORKSPACE_DIR/config"
-  ensure_dir "$d"
+  local ws="$WORKSPACE_DIR/config"
+  ensure_dir "$ws"
 
-  # Ensure authoritative USER files exist with sane defaults
+  # Ensure authoritative USER files (code-server watches these)
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
   [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" "$TASKS_PATH" "$KEYB_PATH" "$EXT_PATH" 2>/dev/null || true
 
-  # helper: try hard link, else symlink
-  link_into_ws(){
+  # Create workspace copies as *real files*, seeded from User
+  copy_if_missing(){
     src="$1"; dst="$2"
-    rm -f "$dst" 2>/dev/null || true
-    # Try hardlink first (same inode)
-    if ln "$src" "$dst" 2>/dev/null; then
-      echo "hard"
-      return 0
+    if [ ! -f "$dst" ]; then
+      cp -f "$src" "$dst" 2>/dev/null || true
     fi
-    # Fallback to symlink
-    if ln -s "$src" "$dst" 2>/dev/null; then
-      echo "soft"
-      return 0
-    fi
-    echo "none"
-    return 1
   }
+  copy_if_missing "$SETTINGS_PATH" "$ws/settings.json"
+  copy_if_missing "$TASKS_PATH"    "$ws/tasks.json"
+  copy_if_missing "$KEYB_PATH"     "$ws/keybindings.json"
+  copy_if_missing "$EXT_PATH"      "$ws/extensions.json"
+  chown "${PUID}:${PGID}" "$ws" "$ws/"* 2>/dev/null || true
 
-  mode_s=""; mode_t=""; mode_k=""; mode_e=""
-  mode_s="$(link_into_ws "$SETTINGS_PATH" "$d/settings.json" || true)"
-  mode_t="$(link_into_ws "$TASKS_PATH"    "$d/tasks.json"    || true)"
-  mode_k="$(link_into_ws "$KEYB_PATH"     "$d/keybindings.json" || true)"
-  mode_e="$(link_into_ws "$EXT_PATH"      "$d/extensions.json"  || true)"
-
-  chown -h "${PUID}:${PGID}" "$d" "$d/"* 2>/dev/null || true
-
-  # If any ended up as symlinks, and we can supervise, install a tiny sync daemon
-  needs_sync=0
-  for m in "$mode_s" "$mode_t" "$mode_k" "$mode_e"; do
-    [ "$m" = "soft" ] && needs_sync=1
-  done
-  [ "$needs_sync" -eq 1 ] && install_config_sync_daemon "$d"
-
-  log "workspace config ready → $d (links: settings=$mode_s tasks=$mode_t keybindings=$mode_k extensions=$mode_e)"
+  start_config_sync_daemon "$ws"
+  log "workspace config ready → $ws (real files + sync)"
 }
 
-# ===== optional sync daemon if only symlinks are possible (cross-device)
-install_config_sync_daemon(){
-  require_root || { warn "cross-device links detected; not root → no sync daemon (edits still work via symlinks)"; return 0; }
-  local d="$1"
+start_config_sync_daemon(){
+  local ws="$1"
+  local runner="/usr/local/bin/codestrap-sync.sh"
 
-  # Only install if inotifywait exists, else a lightweight polling loop
-  if command -v inotifywait >/dev/null 2>&1; then
-    cat >/usr/local/bin/codestrap-sync.sh <<'EOSH'
+  cat >"$runner" <<'EOSH'
 #!/usr/bin/env sh
 set -eu
-USER_DIR="${HOME:-/config}/data/User"
+HOME_DIR="${HOME:-/config}"
+USER_DIR="$HOME_DIR/data/User"
 WS_DIR="${WORKSPACE_DIR:-/config/workspace}/config"
+
 sync_one(){ src="$1"; dst="$2"; tmp="$(mktemp)"; cp -f "$src" "$tmp" && mv -f "$tmp" "$dst"; }
-while :; do
-  inotifywait -q -e close_write,move,create,attrib "$USER_DIR" "$WS_DIR" >/dev/null 2>&1 || sleep 1
-  # Mirror from ws → user if ws newer, and user → ws if user newer
-  for name in settings.json tasks.json keybindings.json extensions.json; do
-    U="$USER_DIR/$name"; W="$WS_DIR/$name"
-    [ -e "$U" ] && [ -e "$W" ] || continue
-    if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
-    if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
-  done
+
+# initial gentle reconcile (both ways; newest wins)
+for name in settings.json tasks.json keybindings.json extensions.json; do
+  U="$USER_DIR/$name"; W="$WS_DIR/$name"
+  [ -e "$U" ] || continue
+  [ -e "$W" ] || { cp -f "$U" "$W" 2>/dev/null || true; continue; }
+  if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"
+  elif [ "$U" -nt "$W" ]; then sync_one "$U" "$W"
+  fi
 done
+
+if command -v inotifywait >/dev/null 2>&1; then
+  # inotify mode: watch both dirs; act on writes/moves/attrib
+  while :; do
+    inotifywait -q -e close_write,move,create,attrib "$USER_DIR" "$WS_DIR" >/dev/null 2>&1 || sleep 1
+    for name in settings.json tasks.json keybindings.json extensions.json; do
+      U="$USER_DIR/$name"; W="$WS_DIR/$name"
+      [ -e "$U" ] && [ -e "$W" ] || continue
+      if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
+      if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
+    done
+  done
+else
+  # polling mode fallback
+  while :; do
+    sleep 2
+    for name in settings.json tasks.json keybindings.json extensions.json; do
+      U="$USER_DIR/$name"; W="$WS_DIR/$name"
+      [ -e "$U" ] && [ -e "$W" ] || continue
+      if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
+      if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
+    done
+  done
+fi
 EOSH
-    chmod 755 /usr/local/bin/codestrap-sync.sh
+  chmod 755 "$runner"
+
+  if require_root; then
+    # Run under s6 if available
     mkdir -p /etc/services.d/codestrap-sync
     cat >/etc/services.d/codestrap-sync/run <<'EOR'
 #!/usr/bin/env sh
@@ -1052,33 +1057,11 @@ exec /usr/local/bin/codestrap-sync.sh
 EOR
     chmod +x /etc/services.d/codestrap-sync/run
     printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/codestrap-sync/finish && chmod +x /etc/services.d/codestrap-sync/finish
-    log "installed config sync daemon (inotify)"
+    log "installed config sync daemon (service)"
   else
-    cat >/usr/local/bin/codestrap-sync.sh <<'EOSH'
-#!/usr/bin/env sh
-set -eu
-USER_DIR="${HOME:-/config}/data/User"
-WS_DIR="${WORKSPACE_DIR:-/config/workspace}/config"
-sync_one(){ src="$1"; dst="$2"; tmp="$(mktemp)"; cp -f "$src" "$tmp" && mv -f "$tmp" "$dst"; }
-while :; do
-  sleep 2
-  for name in settings.json tasks.json keybindings.json extensions.json; do
-    U="$USER_DIR/$name"; W="$WS_DIR/$name"
-    [ -e "$U" ] && [ -e "$W" ] || continue
-    if [ "$W" -nt "$U" ]; then sync_one "$W" "$U"; fi
-    if [ "$U" -nt "$W" ]; then sync_one "$U" "$W"; fi
-  done
-done
-EOSH
-    chmod 755 /usr/local/bin/codestrap-sync.sh
-    mkdir -p /etc/services.d/codestrap-sync
-    cat >/etc/services.d/codestrap-sync/run <<'EOR'
-#!/usr/bin/env sh
-exec /usr/local/bin/codestrap-sync.sh
-EOR
-    chmod +x /etc/services.d/codestrap-sync/run
-    printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/codestrap-sync/finish && chmod +x /etc/services.d/codestrap-sync/finish
-    log "installed config sync daemon (polling)"
+    # Spawn background loop for non-root too
+    ( /usr/local/bin/codestrap-sync.sh >/dev/null 2>&1 & ) || true
+    log "started config sync daemon (user background)"
   fi
 }
 
@@ -1166,7 +1149,7 @@ recompute_base(){
   ensure_dir "$BASE"
 }
 
-# --- interactive config flow ---
+# --- interactive config flow (with real files + sync) ---
 config_interactive(){
   install_config_shortcuts
 
@@ -1202,6 +1185,7 @@ config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
 
+  # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
     if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
       merge_codestrap_settings
@@ -1216,6 +1200,7 @@ config_hybrid(){
     fi
   fi
 
+  # --keybindings
   if [ -n "${CFG_KEYB+x}" ]; then
     if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then
       merge_codestrap_keybindings
@@ -1230,6 +1215,7 @@ config_hybrid(){
     fi
   fi
 
+  # --extensions
   if [ -n "${CFG_EXT+x}" ]; then
     if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then
       merge_codestrap_extensions
@@ -1315,7 +1301,8 @@ cli_entry(){
       exit 3
     fi
 
-    bootstrap_banner()
+    # FIXED: correct function call (no parentheses)
+    bootstrap_banner
 
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
