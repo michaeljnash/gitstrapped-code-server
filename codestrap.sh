@@ -386,6 +386,20 @@ codestrap_run(){
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
+write_inplace(){
+  # usage: write_inplace <tmp_src> <dest_path>
+  tmp="$1"; dest="$2"
+  dest_dir="$(dirname "$dest")"; mkdir -p "$dest_dir" || true
+  if [ -f "$dest" ]; then
+    # Overwrite contents without replacing the inode (keeps watchers alive)
+    cat "$tmp" > "$dest"
+  else
+    # First-time create (sets perms/owner once)
+    install -m 644 -D "$tmp" "$dest"
+    chown "${PUID:-1000}:${PGID:-1000}" "$dest" 2>/dev/null || true
+  fi
+}
+
 # ===== settings.json merge =====
 merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
@@ -515,7 +529,7 @@ merge_codestrap_settings(){
     done < "$tmp_final"
   } > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$SETTINGS_PATH"
+  write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
@@ -655,7 +669,7 @@ JQ
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$KEYB_PATH"
+  write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
@@ -736,7 +750,7 @@ merge_codestrap_extensions(){
     echo "}"
   } > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$EXT_PATH"
+  write_inplace "$tmp_with_comments" "$EXT_PATH"
   chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" 2>/dev/null || true
   log "merged extensions.json → $EXT_PATH"
