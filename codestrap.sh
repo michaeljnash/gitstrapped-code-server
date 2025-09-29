@@ -717,6 +717,7 @@ merge_codestrap_extensions(){
   # Extract repo list (de-dup preserving order)
   tmp_repo_list="$(mktemp)"
   jq -r '.recommendations // [] | .[] | @json' "$tmp_repo_json" | awk '!seen[$0]++' > "$tmp_repo_list"
+  REPO_COUNT="$(wc -l < "$tmp_repo_list" | tr -d ' ')"
 
   # Extract user extras (those NOT in repo list, preserving order)
   tmp_user_extras="$(mktemp)"
@@ -726,33 +727,53 @@ merge_codestrap_extensions(){
     | ( $u[0].recommendations // [] ) as $UR
     | [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ]
   ' | jq -r '.[] | @json' > "$tmp_user_extras"
+  EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
 
-  # Compose final with inline comments around repo segment (no preserve needed)
+  # Compose final with inline comments around repo segment
   tmp_with_comments="$(mktemp)"
   {
     echo "{"
     echo '  "recommendations": ['
-    # START comment
     echo '    // START codestrap extensions'
-    # repo items
-    while IFS= read -r item; do
-      [ -n "$item" ] || continue
-      echo "    $item,"
-    done < "$tmp_repo_list"
-    # END comment just after repo segment
+
+    # repo items: add commas between elements, but…
+    # - if EXTRAS_COUNT == 0 → no trailing comma on the LAST repo item
+    # - if EXTRAS_COUNT > 0  → comma on ALL repo items (extras follow)
+    if [ "$REPO_COUNT" -gt 0 ]; then
+      idx=0
+      while IFS= read -r item; do
+        [ -n "$item" ] || { idx=$((idx+1)); continue; }
+        idx=$((idx+1))
+        if [ "$EXTRAS_COUNT" -gt 0 ]; then
+          # extras exist → always comma (since not final element overall)
+          echo "    $item,"
+        else
+          # no extras → comma only if not the last repo item
+          if [ "$idx" -lt "$REPO_COUNT" ]; then
+            echo "    $item,"
+          else
+            echo "    $item"
+          fi
+        fi
+      done < "$tmp_repo_list"
+    fi
+
     echo '    // END codestrap extensions'
-    # user extras (no trailing comma on last)
-    EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
-    idx=0
-    while IFS= read -r item; do
-      [ -n "$item" ] || { idx=$((idx+1)); continue; }
-      idx=$((idx+1))
-      if [ "$idx" -lt "$EXTRAS_COUNT" ]; then
-        echo "    $item,"
-      else
-        echo "    $item"
-      fi
-    done < "$tmp_user_extras"
+
+    # user extras (no trailing comma on the last)
+    if [ "$EXTRAS_COUNT" -gt 0 ]; then
+      idx=0
+      while IFS= read -r item; do
+        [ -n "$item" ] || { idx=$((idx+1)); continue; }
+        idx=$((idx+1))
+        if [ "$idx" -lt "$EXTRAS_COUNT" ]; then
+          echo "    $item,"
+        else
+          echo "    $item"
+        fi
+      done < "$tmp_user_extras"
+    fi
+
     echo "  ]"
     echo "}"
   } > "$tmp_with_comments"
