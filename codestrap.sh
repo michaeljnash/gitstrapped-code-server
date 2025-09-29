@@ -132,18 +132,15 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# VS Code settings paths
+# VS Code settings: REAL files live in workspace/config; User contains SYMLINKS
 USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
-# Real files live in workspace config dir; User files are symlinks to these.
 CFG_DIR="$WORKSPACE_DIR/config"; ensure_dir "$CFG_DIR"
 
-# REAL paths (workspace/config)
 SETTINGS_PATH="$CFG_DIR/settings.json"
 TASKS_PATH="$CFG_DIR/tasks.json"
 KEYB_PATH="$CFG_DIR/keybindings.json"
 EXT_PATH="$CFG_DIR/extensions.json"
 
-# SYMLINK paths (code-server User dir points to REAL files)
 USER_SETTINGS_LINK="$USER_DIR/settings.json"
 USER_TASKS_LINK="$USER_DIR/tasks.json"
 USER_KEYB_LINK="$USER_DIR/keybindings.json"
@@ -401,18 +398,18 @@ merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping settings merge"; return 0; }
 
-  ensure_dir "$CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"; ensure_dir "$CFG_DIR"
 
   tmp_user_json="$(mktemp)"
 
-  # Current workspace settings (allow comments only; no other repairs)
+  # User settings (allow comments only; no other repairs) — now REAL path in workspace/config
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-        CTX_TAG="[Bootstrap config]"; err "workspace settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
         rm -f "$tmp_user_json" 2>/dev/null || true
         return 1
       fi
@@ -514,7 +511,7 @@ merge_codestrap_settings(){
         inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
         dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
         depth=$((inc - dec))
-        if [ "$depth" -le 0 ]; then
+        if [ "$depth" -le 0 ] && [ $first_brace_done -eq 1 ]; then
           echo "  // END codestrap settings"
         else
           in_preserve=1
@@ -539,9 +536,9 @@ merge_codestrap_keybindings(){
   [ -f "$REPO_KEYB_SRC" ] || { log "no repo keybindings.json; skipping keybindings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping keybindings merge"; return 0; }
 
-  ensure_dir "$CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"; ensure_dir "$CFG_DIR"
 
-  # ---- Load WORKSPACE (allow JSONC comments; no other repairs) ----
+  # ---- Load USER (allow JSONC comments; no other repairs) ---- (REAL file in workspace/config)
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -551,7 +548,7 @@ merge_codestrap_keybindings(){
         cp "$KEYB_PATH" "$tmp_user_json"
       else
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
       fi
     fi
   else
@@ -677,16 +674,16 @@ merge_codestrap_extensions(){
   [ -f "$REPO_EXT_SRC" ] || { log "no repo extensions.json; skipping extensions merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping extensions merge"; return 0; }
 
-  ensure_dir "$CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"; ensure_dir "$CFG_DIR"
 
-  # Load WORKSPACE (allow comments only; no other repairs)
+  # Load USER (allow comments only; no other repairs) — REAL file in workspace/config
   tmp_user_json="$(mktemp)"
   if [ -f "$EXT_PATH" ]; then
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
       cp "$EXT_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
-      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
     fi
   else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
@@ -779,7 +776,7 @@ emit_installed_exts_with_versions(){
 install_one_ext(){
   ext="$1"; force="${2:-false}"
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot install ${ext}"; return 1; }
-  if [ "$force" = "true" ] then
+  if [ "$force" = "true" ]; then
     "$CODE_BIN" --install-extension "$ext" --force >/dev/null 2>&1
   else
     "$CODE_BIN" --install-extension "$ext" >/dev/null 2>&1
@@ -996,32 +993,39 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (REAL files in WORKSPACE_DIR; User are SYMLINKS) =====
+# ===== workspace config as source of truth; User contains symlinks =====
 install_config_shortcuts(){
   local d="$CFG_DIR"
-  local pre_exists="0"
-  [ -d "$d" ] && pre_exists="1"
-  ensure_dir "$d"
+  ensure_dir "$d"; ensure_dir "$USER_DIR"
 
-  # Ensure REAL files exist in workspace/config
+  # Ensure REAL files exist in workspace/config (create if missing)
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
-  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
-  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
+  [ -f "$TASKS_PATH"    ] || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH"     ] || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH"      ] || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
 
-  # Link helper (force symlink)
-  mklink_force(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst"; }
-
-  # Create/refresh SYMLINKS in code-server User dir -> REAL files
-  mklink_force "$SETTINGS_PATH" "$USER_SETTINGS_LINK"
-  mklink_force "$TASKS_PATH"    "$USER_TASKS_LINK"
-  mklink_force "$KEYB_PATH"     "$USER_KEYB_LINK"
-  mklink_force "$EXT_PATH"      "$USER_EXT_LINK"
-
-  chown -h "$PUID:$PGID" "$d" "$USER_SETTINGS_LINK" "$USER_TASKS_LINK" "$USER_KEYB_LINK" "$USER_EXT_LINK" 2>/dev/null || true
   chown "$PUID:$PGID" "$SETTINGS_PATH" "$TASKS_PATH" "$KEYB_PATH" "$EXT_PATH" 2>/dev/null || true
 
-  [ "$pre_exists" = "0" ] && log "created workspace config + User symlinks" || true
+  # Helper: force a symlink (delete any non-symlink or wrong target)
+  force_symlink(){
+    src="$1"; dst="$2"
+    if [ -L "$dst" ]; then
+      target="$(readlink "$dst" || true)"
+      if [ "$target" != "$src" ]; then rm -f "$dst"; ln -s "$src" "$dst"; fi
+    else
+      [ -e "$dst" ] && rm -rf "$dst"
+      ln -s "$src" "$dst"
+    fi
+    chown -h "$PUID:$PGID" "$dst" 2>/dev/null || true
+  }
+
+  # Ensure User/*.json are symlinks to REAL files
+  force_symlink "$SETTINGS_PATH" "$USER_SETTINGS_LINK"
+  force_symlink "$TASKS_PATH"    "$USER_TASKS_LINK"
+  force_symlink "$KEYB_PATH"     "$USER_KEYB_LINK"
+  force_symlink "$EXT_PATH"      "$USER_EXT_LINK"
+
+  log "workspace config ready and User links in place"
 }
 
 # ===== CLI helpers =====
@@ -1108,7 +1112,7 @@ recompute_base(){
     BASE="${WORKSPACE_DIR}"
   fi
   ensure_dir "$BASE"
-  CFG_DIR="$WORKSPACE_DIR/config"; ensure_dir "$CFG_DIR"
+  ensure_dir "$CFG_DIR"
 }
 
 # --- interactive config flow (manual flow) ---
