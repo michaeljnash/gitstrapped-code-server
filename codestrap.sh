@@ -31,7 +31,7 @@ prompt_secret(){
     stty -echo </dev/tty >/dev/tty 2>/dev/null || true
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
-    printf "\n" >/dev/tty 2>/dev/tty 2>/dev/null || true
+    printf "\n" >/dev/tty 2>/dev/null || true
   else
     printf "%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
   fi; printf "%s" "${s:-}"
@@ -91,6 +91,11 @@ Env vars (init-time automation; uninstall runs BEFORE install):
 Interactive tip (github):
   At any 'github' prompt you can type -a or --auto to use the corresponding environment variable (the hint appears only if that env var is set).
 
+Notes:
+  • code-server’s user-data dir is bind-mounted to your workspace config folder.
+  • Your canonical config lives at:  $WORKSPACE_DIR/config
+  • code-server reads/writes:        $HOME/data/User  (bind-mounted to the path above)
+
 Examples:
   codestrap
   codestrap github -u alice -t ghp_xxx -r "alice/app#main, org/infra"
@@ -132,23 +137,20 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# VS Code user dir (actual files code-server reads)
-USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
-USER_SETTINGS_PATH="$USER_DIR/settings.json"
-USER_TASKS_PATH="$USER_DIR/tasks.json"
-USER_KEYB_PATH="$USER_DIR/keybindings.json"
-USER_EXT_PATH="$USER_DIR/extensions.json"
+# Canonical config lives in workspace; code-server reads $HOME/data/User (bind-mounted to it)
+USER_DIR="$WORKSPACE_DIR/config"; ensure_dir "$USER_DIR"
+SETTINGS_PATH="$USER_DIR/settings.json"
+TASKS_PATH="$USER_DIR/tasks.json"
+KEYB_PATH="$USER_DIR/keybindings.json"
+EXT_PATH="$USER_DIR/extensions.json"
 
-# Authoritative workspace config dir (new real files live here)
-WS_CFG_DIR="$WORKSPACE_DIR/config"; ensure_dir "$WS_CFG_DIR"
-WS_SETTINGS_PATH="$WS_CFG_DIR/settings.json"
-WS_TASKS_PATH="$WS_CFG_DIR/tasks.json"
-WS_KEYB_PATH="$WS_CFG_DIR/keybindings.json"
-WS_EXT_PATH="$WS_CFG_DIR/extensions.json"
+# code-server physical user-data dir (target of bind mount)
+CS_USER_DIR="$HOME/data/User"
 
 REPO_SETTINGS_SRC="$HOME/codestrap/settings.json"
 REPO_KEYB_SRC="$HOME/codestrap/keybindings.json"
 REPO_EXT_SRC="$HOME/codestrap/extensions.json"
+REPO_TASKS_SRC="${REPO_TASKS_SRC:-$HOME/codestrap/tasks.json}" # optional
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # Track origins for nicer errors
@@ -166,112 +168,16 @@ install_restart_gate(){
   [ -n "$NODE_BIN" ] || { warn "Node not found; restart gate disabled"; return 0; }
   mkdir -p /usr/local/bin
   cat >/usr/local/bin/restartgate.js <<'EOF'
-const http = require('http'); const { exec, spawn } = require('child_process'); const fs = require('fs'); const path = require('path');
-
+const http = require('http'); const { exec } = require('child_process');
 const PORT = 9000, HOST = '127.0.0.1';
-const WS_CFG_DIR = process.env.WS_CFG_DIR || '/config/workspace/config';
-const USER_DIR   = process.env.USER_DIR   || '/config/data/User';
-
-// --- helpers ---
-function sh(cmd){ exec(cmd, ()=>{}); }
 function supervisedRestart(){
   const cmd = "sh -c 'for i in 1 2 3 4 5; do [ -p /run/s6/scan-control ] && break; sleep 0.4; done; s6-svscanctl -t /run/s6 >/dev/null 2>&1 || kill -TERM 1 >/dev/null 2>&1'";
-  sh(cmd);
+  exec(cmd, () => {});
 }
-function ensureDir(p){ try{ fs.mkdirSync(p, {recursive:true}); }catch(e){} }
-function copyFileSafe(src, dst){
-  try{
-    ensureDir(path.dirname(dst));
-    fs.copyFileSync(src, dst);
-    try{ fs.chmodSync(dst, 0o644); }catch(e){}
-  }catch(e){}
-}
-function walkSync(dir, out=[]){
-  try{
-    for(const e of fs.readdirSync(dir, {withFileTypes:true})){
-      const p = path.join(dir, e.name);
-      if(e.isDirectory()) walkSync(p, out);
-      else if(e.isFile()) out.push(p);
-    }
-  }catch(e){}
-  return out;
-}
-function srcToDst(src){ return path.join(USER_DIR, path.relative(WS_CFG_DIR, src)); }
-function initialSync(){
-  ensureDir(WS_CFG_DIR); ensureDir(USER_DIR);
-  const files = walkSync(WS_CFG_DIR, []);
-  for(const f of files){
-    const dst = srcToDst(f);
-    copyFileSafe(f, dst);
-  }
-  console.log(`[configmirror] initial sync: ${files.length} file(s)`);
-}
-function spawnWatcher(){
-  // prefer inotifywait if available
-  const tryCmd = (c)=> new Promise(res=>spawn('sh',['-lc',`command -v ${c} >/dev/null 2>&1`]).on('exit', code=>res(code===0)));
-  return tryCmd('inotifywait').then(hasInotifywait=>{
-    if(hasInotifywait){
-      const cmd = `inotifywait -m -r -e close_write,create,move,attrib '${WS_CFG_DIR}'`;
-      const p = spawn('sh',['-lc',cmd],{stdio:['ignore','pipe','pipe']});
-      p.stdout.on('data', buf=>{
-        const line = buf.toString();
-        // lines look like: "/dir/ PATH/ EVENT file"
-        // We'll just rescan touched path's file if present.
-        try{
-          const m = line.trim().split(/\s+/);
-          if(m.length>=3){
-            const base = m[0];
-            const file = m[m.length-1];
-            const src = path.join(base.replace(/:$/,''), file);
-            if(fs.existsSync(src) && fs.statSync(src).isFile()){
-              const dst = srcToDst(src);
-              copyFileSafe(src, dst);
-              // console.log(`[configmirror] sync ${src} -> ${dst}`);
-            }
-          }
-        }catch(e){}
-      });
-      p.stderr.on('data', ()=>{});
-      console.log('[configmirror] watching via inotifywait');
-      return;
-    }
-    // fallback: busybox inotifyd
-    return tryCmd('inotifyd').then(hasInotifyd=>{
-      if(hasInotifyd){
-        const handler = '/usr/local/bin/cfgmirror-handler.sh';
-        // create tiny handler if not present
-        try{
-          fs.writeFileSync(handler, `#!/usr/bin/env sh
-SRC_DIR="$1"; EV="$2"; F="$3"
-WS_CFG_DIR="${WS_CFG_DIR}"
-USER_DIR="${USER_DIR}"
-src="$SRC_DIR/$F"
-dst="$USER_DIR/\${src#$WS_CFG_DIR/}"
-[ -f "$src" ] || exit 0
-mkdir -p "$(dirname "$dst")" 2>/dev/null || true
-cp -f "$src" "$dst" 2>/dev/null || true
-chmod 644 "$dst" 2>/dev/null || true
-`, {mode:0o755});
-        }catch(e){}
-        const cmd = `inotifyd ${handler} ${WS_CFG_DIR}:ecwm`;
-        spawn('sh',['-lc',cmd],{stdio:'ignore'});
-        console.log('[configmirror] watching via busybox inotifyd');
-      } else {
-        console.log('[configmirror] no inotify available; only initial sync done');
-      }
-    });
-  });
-}
-
-// --- boot ---
-initialSync();
-spawnWatcher();
-
 http.createServer((req,res)=>{
   const url=(req.url||'/').split('?')[0];
   if(url==='/health'){ res.writeHead(200,{'Content-Type':'text/plain'}).end('OK'); return; }
   if(url==='/restart'){ res.writeHead(200,{'Content-Type':'text/plain'}).end('OK'); supervisedRestart(); return; }
-  if(url==='/sync'){ initialSync(); res.writeHead(200,{'Content-Type':'text/plain'}).end('OK'); return; }
   res.writeHead(200,{'Content-Type':'text/plain'}).end('OK');
 }).listen(PORT, HOST, ()=>console.log(`[restartgate] ${HOST}:${PORT}`));
 EOF
@@ -279,10 +185,7 @@ EOF
   mkdir -p /etc/services.d/restartgate
   cat >/etc/services.d/restartgate/run <<EOF
 #!/usr/bin/env sh
-export FIRSTBOOT_MARKER="$FIRSTBOOT_MARKER"
-export WS_CFG_DIR="$WS_CFG_DIR"
-export USER_DIR="$USER_DIR"
-MARKER="\$FIRSTBOOT_MARKER"
+MARKER="$FIRSTBOOT_MARKER"
 if [ -f "\$MARKER" ]; then
   echo "[restartgate] first-boot marker found; scheduling supervised restart"
   rm -f "\$MARKER" || true
@@ -291,14 +194,13 @@ if [ -f "\$MARKER" ]; then
     s6-svscanctl -t /run/s6 >/dev/null 2>&1 || kill -TERM 1 >/dev/null 2>&1
   ) &
 fi
-exec "${NODE_BIN}" /usr/local/bin/restartgate.js
+exec "$NODE_BIN" /usr/local/bin/restartgate.js
 EOF
   chmod +x /etc/services.d/restartgate/run
   printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/restartgate/finish && chmod +x /etc/services.d/restartgate/finish
-  log "installed restart gate + config mirror service"
+  log "installed restart gate service"
 }
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
-trigger_sync_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/sync" >/dev/null 2>&1 || true; }
 
 # ===== first-boot default password =====
 init_default_password(){
@@ -493,29 +395,26 @@ codestrap_run(){
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
-# ===== settings.json merge (to WS config, then mirror) =====
+# ===== settings.json merge (targets WORKSPACE config) =====
 merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping settings merge"; return 0; }
 
-  ensure_dir "$WS_CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
 
   tmp_user_json="$(mktemp)"
 
-  # Current WS settings (allow comments only; no other repairs)
-  if [ -f "$WS_SETTINGS_PATH" ]; then
-    if jq -e . "$WS_SETTINGS_PATH" >/dev/null 2>&1; then
-      cp "$WS_SETTINGS_PATH" "$tmp_user_json"
-    else
-      strip_jsonc_to_json "$WS_SETTINGS_PATH" >"$tmp_user_json" || true
-      if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-        CTX_TAG="[Bootstrap config]"; err "workspace settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
-        rm -f "$tmp_user_json" 2>/dev/null || true
-        return 1
-      fi
-    fi
+  # User settings (allow comments only; no other repairs)
+  if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+    cp "$SETTINGS_PATH" "$tmp_user_json"
   else
-    printf '{}\n' >"$tmp_user_json"
+    strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
+    if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+      CTX_TAG="[Bootstrap config]"; err "workspace settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+      rm -f "$tmp_user_json" 2>/dev/null || true
+      return 1
+    fi
   fi
 
   # Repo settings (allow comments only)
@@ -573,7 +472,7 @@ merge_codestrap_settings(){
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
 
-  # Build final JSON then write to WS config
+  # Build final JSON, then inject comments with correct END placement
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -582,7 +481,6 @@ merge_codestrap_settings(){
       $managed + {codestrap_preserve: $preserve} + $rest
     ' | jq '.' > "$tmp_final"
 
-  # Inject comments (same as before)
   tmp_with_comments="$(mktemp)"
   {
     first_brace_done=0
@@ -623,38 +521,30 @@ merge_codestrap_settings(){
     done < "$tmp_final"
   } > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$WS_SETTINGS_PATH"
-  chown "${PUID}:${PGID}" "$WS_SETTINGS_PATH" 2>/dev/null || true
+  mv -f "$tmp_with_comments" "$SETTINGS_PATH"
+  chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
-  log "merged settings.json → $WS_SETTINGS_PATH"
-  trigger_sync_gate
+  log "merged settings.json → $SETTINGS_PATH"
 }
 
-# ===== keybindings.json merge (to WS config) =====
+# ===== keybindings.json merge (targets WORKSPACE config) =====
 merge_codestrap_keybindings(){
   REPO_KEYB_SRC="${REPO_KEYB_SRC:-$HOME/codestrap/keybindings.json}"
   [ -f "$REPO_KEYB_SRC" ] || { log "no repo keybindings.json; skipping keybindings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping keybindings merge"; return 0; }
 
-  ensure_dir "$WS_CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+  [ -f "$KEYB_PATH" ] || printf '[]\n' > "$KEYB_PATH"
 
-  # ---- Load WS (allow JSONC comments; no other repairs) ----
+  # ---- Load USER (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
-  if [ -f "$WS_KEYB_PATH" ]; then
-    if [ ! -s "$WS_KEYB_PATH" ]; then
-      printf '[]\n' > "$tmp_user_json"
-    else
-      if jq -e . "$WS_KEYB_PATH" >/dev/null 2>&1; then
-        cp "$WS_KEYB_PATH" "$tmp_user_json"
-      else
-        strip_jsonc_to_json "$WS_KEYB_PATH" >"$tmp_user_json" || true
-        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
-      fi
-    fi
+  if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
+    cp "$KEYB_PATH" "$tmp_user_json"
   else
-    printf '[]\n' > "$tmp_user_json"
+    strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
+    jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
   fi
 
   # ---- Load REPO (allow JSONC comments; no other repairs) ----
@@ -695,7 +585,7 @@ def kstr(x): (x.key|tostring);
 JQ
   )" > "$tmp_final"
 
-  # ---- Inject comments ----
+  # ---- Inject comments with correct placement ----
   tmp_with_comments="$(mktemp)"
   awk '
     BEGIN {
@@ -764,32 +654,28 @@ JQ
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$WS_KEYB_PATH"
-  chown "${PUID}:${PGID}" "$WS_KEYB_PATH" 2>/dev/null || true
+  mv -f "$tmp_with_comments" "$KEYB_PATH"
+  chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
-  log "merged keybindings.json → $WS_KEYB_PATH"
-  trigger_sync_gate
+  log "merged keybindings.json → $KEYB_PATH"
 }
 
-# ===== extensions.json merge (to WS config) =====
+# ===== extensions.json merge (targets WORKSPACE config) =====
 merge_codestrap_extensions(){
   REPO_EXT_SRC="${REPO_EXT_SRC:-$HOME/codestrap/extensions.json}"
   [ -f "$REPO_EXT_SRC" ] || { log "no repo extensions.json; skipping extensions merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping extensions merge"; return 0; }
 
-  ensure_dir "$WS_CFG_DIR"; ensure_dir "$STATE_DIR"
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+  [ -f "$EXT_PATH" ] || printf '{ "recommendations": [] }\n' > "$EXT_PATH"
 
-  # Load WS (allow comments only; no other repairs)
+  # Load USER (allow comments only; no other repairs)
   tmp_user_json="$(mktemp)"
-  if [ -f "$WS_EXT_PATH" ]; then
-    if jq -e . "$WS_EXT_PATH" >/dev/null 2>&1; then
-      cp "$WS_EXT_PATH" "$tmp_user_json"
-    else
-      strip_jsonc_to_json "$WS_EXT_PATH" >"$tmp_user_json" || true
-      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
-    fi
+  if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
+    cp "$EXT_PATH" "$tmp_user_json"
   else
-    printf '{ "recommendations": [] }\n' > "$tmp_user_json"
+    strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
+    jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
   fi
 
   # Load REPO (allow comments only)
@@ -840,11 +726,23 @@ merge_codestrap_extensions(){
     echo "}"
   } > "$tmp_with_comments"
 
-  mv -f "$tmp_with_comments" "$WS_EXT_PATH"
-  chown "${PUID}:${PGID}" "$WS_EXT_PATH" 2>/dev/null || true
+  mv -f "$tmp_with_comments" "$EXT_PATH"
+  chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" 2>/dev/null || true
-  log "merged extensions.json → $WS_EXT_PATH"
-  trigger_sync_gate
+  log "merged extensions.json → $EXT_PATH"
+}
+
+# ===== tasks.json (optional passthrough copy to workspace config) =====
+merge_codestrap_tasks(){
+  [ -f "$REPO_TASKS_SRC" ] || { log "no repo tasks.json; skipping tasks copy"; return 0; }
+  ensure_dir "$USER_DIR"
+  if [ ! -f "$TASKS_PATH" ] || ! cmp -s "$REPO_TASKS_SRC" "$TASKS_PATH"; then
+    cp -f "$REPO_TASKS_SRC" "$TASKS_PATH"
+    chown "${PUID}:${PGID}" "$TASKS_PATH" 2>/dev/null || true
+    log "installed tasks.json → $TASKS_PATH"
+  else
+    log "tasks.json already up to date"
+  fi
 }
 
 # ===== extension management (install/update/uninstall using code-server/VS Code CLI) =====
@@ -855,13 +753,12 @@ detect_code_cli(){
 }
 
 emit_recommended_exts(){
-  # Read from USER (what code-server actually consumes), which is mirrored from WS
-  [ -f "$USER_EXT_PATH" ] || return 0
+  [ -f "$EXT_PATH" ] || return 0
   tmp="$(mktemp)"
-  if jq -e . "$USER_EXT_PATH" >/dev/null 2>&1; then
-    cp "$USER_EXT_PATH" "$tmp"
+  if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
+    cp "$EXT_PATH" "$tmp"
   else
-    strip_jsonc_to_json "$USER_EXT_PATH" >"$tmp" || true
+    strip_jsonc_to_json "$EXT_PATH" >"$tmp" || true
     jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
   fi
   jq -r '.recommendations // [] | .[] | strings' "$tmp" 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
@@ -895,6 +792,7 @@ uninstall_one_ext(){
 }
 
 in_file(){ needle="$1"; file="$2"; grep -F -x -q -- "$needle" "$file" 2>/dev/null; }
+
 normalize_scope(){ case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in a|all) echo "all";; m|missing) echo "missing";; *) echo ""; esac; }
 
 extensions_cmd(){
@@ -904,7 +802,7 @@ extensions_cmd(){
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)
-        cat <<'EHELP'
+        cat <<EHELP
 Usage:
   codestrap extensions
     → interactive: choose install or uninstall, then scope (all/missing)
@@ -916,8 +814,8 @@ Usage:
   # Combine:
   codestrap extensions -i m -u m
 
-This uses extensions listed in:
-  $HOME/data/User/extensions.json  (mirrored from $WORKSPACE_DIR/config/extensions.json)
+This uses extensions listed in your merged extensions.json at:
+  $WORKSPACE_DIR/config/extensions.json
 EHELP
         exit 0;;
       --install|-i)
@@ -979,7 +877,11 @@ EHELP
           log "uninstalling ALL installed extensions"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
-            if uninstall_one_ext "$ext"; then log "uninstalled ${ext}"; else warn "failed to uninstall ${ext}"; fi
+            if uninstall_one_ext "$ext"; then
+              log "uninstalled ${ext}"
+            else
+              warn "failed to uninstall ${ext}"
+            fi
           done <"$tmp_installed"
         else
           log "no installed extensions to uninstall"
@@ -990,7 +892,11 @@ EHELP
           log "uninstalling extensions not in recommendations (cleanup)"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
-            if uninstall_one_ext "$ext"; then log "uninstalled ${ext}"; else warn "failed to uninstall ${ext}"; fi
+            if uninstall_one_ext "$ext"; then
+              log "uninstalled ${ext}"
+            else
+              warn "failed to uninstall ${ext}"
+            fi
           done <"$tmp_not_recommended"
         else
           log "no non-recommended extensions to uninstall"
@@ -1009,7 +915,11 @@ EHELP
           log "installing missing recommended extensions"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "false"; then log "installed ${ext}"; else warn "failed to install ${ext}"; fi
+            if install_one_ext "$ext" "false"; then
+              log "installed ${ext}"
+            else
+              warn "failed to install ${ext}"
+            fi
           done <"$tmp_missing"
         else
           log "no missing recommended extensions"
@@ -1020,7 +930,11 @@ EHELP
           log "installing missing recommended extensions"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "false"; then log "installed ${ext}"; else warn "failed to install ${ext}"; fi
+            if install_one_ext "$ext" "false"; then
+              log "installed ${ext}"
+            else
+              warn "failed to install ${ext}"
+            fi
           done <"$tmp_missing"
         else
           log "no missing recommended extensions"
@@ -1029,7 +943,11 @@ EHELP
           log "updating already-installed recommended extensions to latest"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "true"; then log "updated ${ext}"; else warn "failed to update ${ext}"; fi
+            if install_one_ext "$ext" "true"; then
+              log "updated ${ext}"
+            else
+              warn "failed to update ${ext}"
+            fi
           done <"$tmp_present_rec"
         else
           log "no already-installed recommended extensions to update"
@@ -1074,33 +992,60 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder: real files + defaults (NO SYMLINKS) =====
+# ===== bind-mount workspace config as code-server user-data =====
+bind_user_data_dir(){
+  require_root || { warn "root required for bind-mounting workspace config to code-server user-data; skipping"; return 0; }
+  ensure_dir "$USER_DIR"
+  ensure_dir "$HOME/data"
+
+  # Seed defaults in WORKSPACE config
+  [ -f "$SETTINGS_PATH" ]  || printf '{}\n'                          >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH" ]     || printf '{}\n'                          >"$TASKS_PATH"
+  [ -f "$KEYB_PATH" ]      || printf '[]\n'                          >"$KEYB_PATH"
+  [ -f "$EXT_PATH" ]       || printf '{ "recommendations": [] }\n'   >"$EXT_PATH"
+
+  # If first time and workspace config is empty but code-server user-data has content, import once
+  ensure_dir "$CS_USER_DIR"
+  if [ -z "$(ls -A "$USER_DIR" 2>/dev/null)" ] && [ -n "$(ls -A "$CS_USER_DIR" 2>/dev/null)" ]; then
+    cp -a "$CS_USER_DIR"/. "$USER_DIR"/ 2>/dev/null || true
+    log "imported existing code-server user-data into workspace config"
+  fi
+
+  # Bind mount workspace config -> code-server user-data
+  if command -v mountpoint >/dev/null 2>&1; then
+    already_mp="$(mountpoint -q "$CS_USER_DIR" && echo yes || echo no)"
+  else
+    grep -q " $(printf '%s' "$CS_USER_DIR" | sed 's/[^^]/[&]/g; s/\^/\\^/g') " /proc/self/mounts 2>/dev/null && already_mp="yes" || already_mp="no"
+  fi
+
+  if [ "$already_mp" = "no" ]; then
+    # make sure target exists and is empty directory (remove if needed)
+    if [ -L "$CS_USER_DIR" ] || [ -f "$CS_USER_DIR" ]; then rm -f "$CS_USER_DIR"; fi
+    ensure_dir "$CS_USER_DIR"
+    mount --bind "$USER_DIR" "$CS_USER_DIR"
+    log "bind-mounted $CS_USER_DIR → $USER_DIR"
+  else
+    log "user-data bind mount already active"
+  fi
+
+  chown -R "$PUID:$PGID" "$USER_DIR" "$CS_USER_DIR" 2>/dev/null || true
+}
+
+# ===== workspace config helper (no symlinks) =====
 install_config_shortcuts(){
-  local d="$WS_CFG_DIR"
+  # No symlinks anymore; just ensure files exist in $WORKSPACE_DIR/config.
+  local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
-  [ -f "$WS_SETTINGS_PATH" ] || printf '{}\n' >"$WS_SETTINGS_PATH"
-  [ -f "$WS_TASKS_PATH"  ]   || printf '{}\n' >"$WS_TASKS_PATH"
-  [ -f "$WS_KEYB_PATH"   ]   || printf '[]\n' >"$WS_KEYB_PATH"
-  [ -f "$WS_EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$WS_EXT_PATH"
+  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
 
-  chown "$PUID:$PGID" "$d" "$WS_SETTINGS_PATH" "$WS_TASKS_PATH" "$WS_KEYB_PATH" "$WS_EXT_PATH" 2>/dev/null || true
-
-  [ "$pre_exists" = "0" ] && log "created real config files in workspace (no symlinks)" || true
-
-  # Immediate initial mirror to USER_DIR (in case watcher not yet up)
-  if command -v curl >/dev/null 2>&1; then
-    trigger_sync_gate
-  else
-    # fallback best-effort
-    cp -f "$WS_SETTINGS_PATH" "$USER_SETTINGS_PATH" 2>/dev/null || true
-    cp -f "$WS_TASKS_PATH"    "$USER_TASKS_PATH"    2>/dev/null || true
-    cp -f "$WS_KEYB_PATH"     "$USER_KEYB_PATH"     2>/dev/null || true
-    cp -f "$WS_EXT_PATH"      "$USER_EXT_PATH"      2>/dev/null || true
-    chown "$PUID:$PGID" "$USER_SETTINGS_PATH" "$USER_TASKS_PATH" "$USER_KEYB_PATH" "$USER_EXT_PATH" 2>/dev/null || true
-  fi
+  chown -R "$PUID:$PGID" "$d" 2>/dev/null || true
+  [ "$pre_exists" = "0" ] && log "initialized workspace config folder" || true
 }
 
 # ===== CLI helpers =====
@@ -1185,9 +1130,15 @@ recompute_base(){
     BASE="${WORKSPACE_DIR}"
   fi
   ensure_dir "$BASE"
+  # Refresh dependent paths
+  USER_DIR="$WORKSPACE_DIR/config"
+  SETTINGS_PATH="$USER_DIR/settings.json"
+  TASKS_PATH="$USER_DIR/tasks.json"
+  KEYB_PATH="$USER_DIR/keybindings.json"
+  EXT_PATH="$USER_DIR/extensions.json"
 }
 
-# --- interactive config flow ---
+# --- interactive config flow (manual flow) ---
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
@@ -1209,6 +1160,7 @@ config_interactive(){
     log "skipped extensions merge"
   fi
 
+  merge_codestrap_tasks
   install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
@@ -1265,6 +1217,7 @@ config_hybrid(){
     fi
   fi
 
+  merge_codestrap_tasks
   install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
@@ -1328,6 +1281,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
 cli_entry(){
 
   if [ $# -eq 0 ]; then
+    # Hub flow
     if ! is_tty; then
       echo "No TTY detected. Run a subcommand or provide flags. Examples:
   codestrap github --auto
@@ -1337,6 +1291,7 @@ cli_entry(){
       exit 3
     fi
 
+    # Show banner BEFORE first hub question
     bootstrap_banner
 
     # 1) GitHub?
@@ -1360,7 +1315,7 @@ cli_entry(){
       CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
     fi
 
-    # 3) Password?
+    # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     CTX_TAG="[Change password]"
     if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
@@ -1373,6 +1328,7 @@ cli_entry(){
     exit 0
   fi
 
+  # Subcommands
   case "$1" in
     -h|--help)    print_help; exit 0;;
     -v|--version) print_version; exit 0;;
@@ -1395,26 +1351,39 @@ cli_entry(){
       ;;
     config)
       shift || true
-      unset CFG_SETTINGS CFG_KEYB CFG_EXT
+      # Parse config flags
+      unset CFG_SETTINGS
+      unset CFG_KEYB
+      unset CFG_EXT
       while [ $# -gt 0 ]; do
         case "$1" in
           -h|--help) print_help; exit 0;;
           -s|--settings)
-            shift || true; CFG_SETTINGS="${1:-}"
+            shift || true
+            CFG_SETTINGS="${1:-}"
             [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --settings=*) CFG_SETTINGS="${1#*=}";;
+          --settings=*)
+            CFG_SETTINGS="${1#*=}"
+            ;;
           -k|--keybindings)
-            shift || true; CFG_KEYB="${1:-}"
+            shift || true
+            CFG_KEYB="${1:-}"
             [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --keybindings=*) CFG_KEYB="${1#*=}";;
+          --keybindings=*)
+            CFG_KEYB="${1#*=}"
+            ;;
           -e|--extensions)
-            shift || true; CFG_EXT="${1:-}"
+            shift || true
+            CFG_EXT="${1:-}"
             [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
-          --extensions=*) CFG_EXT="${1#*=}";;
-          *) CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+          --extensions=*)
+            CFG_EXT="${1#*=}"
+            ;;
+          *)
+            CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
         esac
         shift || true
       done
@@ -1439,6 +1408,7 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
+        merge_codestrap_tasks
         install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
@@ -1508,12 +1478,16 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
+    # Ensure workspace config is canonical and bind-mount it as code-server user data:
+    install_config_shortcuts
+    bind_user_data_dir
+    # Perform merges/installs against the canonical workspace config:
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
-    install_config_shortcuts
+    merge_codestrap_tasks
     autorun_env_if_present
-    autorun_install_extensions
+    autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
