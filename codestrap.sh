@@ -132,32 +132,9 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# ===== code-server user-data-dir (we pin to workspace) =====
-configure_user_data_dir(){
-  ensure_dir "$WORKSPACE_DIR/config"
-  # One-time import from legacy $HOME/data/User if new location empty
-  NEW_USER_DIR="$WORKSPACE_DIR/config/User"
-  OLD_USER_DIR="$HOME/data/User"
-  ensure_dir "$NEW_USER_DIR"
-  if [ -d "$OLD_USER_DIR" ] && [ -z "$(ls -A "$NEW_USER_DIR" 2>/dev/null)" ]; then
-    cp -a "$OLD_USER_DIR"/. "$NEW_USER_DIR"/ 2>/dev/null || true
-    chown -R "$PUID:$PGID" "$NEW_USER_DIR" 2>/dev/null || true
-    log "imported legacy user data → $NEW_USER_DIR"
-  fi
-
-  CS_YAML="$HOME/.config/code-server/config.yaml"
-  ensure_dir "$(dirname "$CS_YAML")"
-  if [ -f "$CS_YAML" ]; then
-    grep -v '^[[:space:]]*user-data-dir:' "$CS_YAML" >"${CS_YAML}.tmp" 2>/dev/null || true
-    mv -f "${CS_YAML}.tmp" "$CS_YAML"
-  fi
-  printf 'user-data-dir: %s\n' "$WORKSPACE_DIR/config" >> "$CS_YAML"
-  chown -R "$PUID:$PGID" "$HOME/.config" 2>/dev/null || true
-  log "configured code-server user-data-dir → $WORKSPACE_DIR/config"
-}
-
-# VS Code settings paths — authoritative location is the workspace config *User* dir
-USER_DIR="$WORKSPACE_DIR/config/User"; ensure_dir "$USER_DIR"
+# ===== authoritative VS Code user-data dir (workspace-backed) =====
+USER_DIR="${WORKSPACE_DIR}/config"   # authoritative user-data-dir that code-server will use
+ensure_dir "$USER_DIR"
 SETTINGS_PATH="$USER_DIR/settings.json"
 TASKS_PATH="$USER_DIR/tasks.json"
 KEYB_PATH="$USER_DIR/keybindings.json"
@@ -174,6 +151,28 @@ ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
+
+# ===== set code-server user-data-dir via config.yaml =====
+configure_user_data_dir(){
+  local cfgdir="$HOME/.config/code-server"
+  local cfg="$cfgdir/config.yaml"
+  ensure_dir "$cfgdir"
+
+  # Write or update minimal YAML setting user-data-dir
+  if [ -f "$cfg" ]; then
+    # remove existing user-data-dir key (busybox sed safe)
+    tmp="$(mktemp)"
+    sed '/^[[:space:]]*user-data-dir[[:space:]]*:/d' "$cfg" > "$tmp" || true
+    mv -f "$tmp" "$cfg"
+  fi
+
+  {
+    echo "user-data-dir: \"${USER_DIR}\""
+  } >> "$cfg"
+
+  chown -R "${PUID}:${PGID}" "$cfgdir" 2>/dev/null || true
+  log "configured code-server user-data-dir → ${USER_DIR}"
+}
 
 # ===== restart gate (root-only) =====
 install_restart_gate(){
@@ -693,18 +692,14 @@ merge_codestrap_extensions(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Load USER (allow comments; repair if hopeless)
+  # Load USER (allow comments only; no other repairs)
   tmp_user_json="$(mktemp)"
   if [ -f "$EXT_PATH" ]; then
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
       cp "$EXT_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
-      if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-        warn "workspace extensions.json malformed → backing up and resetting"
-        cp -f "$EXT_PATH" "${EXT_PATH}.bak.$(date +%s)" 2>/dev/null || true
-        printf '{ "recommendations": [] }\n' > "$tmp_user_json"
-      fi
+      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
     fi
   else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
@@ -737,12 +732,16 @@ merge_codestrap_extensions(){
   {
     echo "{"
     echo '  "recommendations": ['
+    # START comment
     echo '    // START codestrap extensions'
+    # repo items
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
     done < "$tmp_repo_list"
+    # END comment just after repo segment
     echo '    // END codestrap extensions'
+    # user extras (no trailing comma on last)
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
     idx=0
     while IFS= read -r item; do
@@ -834,7 +833,7 @@ Usage:
   codestrap extensions -i m -u m
 
 This uses extensions listed in your merged extensions.json at:
-  $WORKSPACE_DIR/config/User/extensions.json
+  $WORKSPACE_DIR/config/extensions.json
 EHELP
         exit 0;;
       --install|-i)
@@ -1014,15 +1013,21 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== ensure workspace config files (real files, no symlinks) =====
-ensure_workspace_config_files(){
-  ensure_dir "$WORKSPACE_DIR/config"
-  ensure_dir "$USER_DIR"
+# ===== workspace config folder (real files only; no symlinks) =====
+install_config_shortcuts(){
+  local d="$WORKSPACE_DIR/config"
+  local pre_exists="0"
+  [ -d "$d" ] && pre_exists="1"
+  ensure_dir "$d"
+
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
   [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
-  chown -R "$PUID:$PGID" "$WORKSPACE_DIR/config" 2>/dev/null || true
+
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
 }
 
 # ===== CLI helpers =====
@@ -1034,8 +1039,7 @@ install_cli_shim(){
 #!/usr/bin/env sh
 set -eu
 for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
-  if [ -e "$TARGET" ] <<<''
-  then
+  if [ -e "$TARGET" ]; then
     if [ -x "$TARGET" ]; then
       exec "$TARGET" cli "$@"
     else
@@ -1110,8 +1114,8 @@ recompute_base(){
     BASE="${WORKSPACE_DIR}"
   fi
   ensure_dir "$BASE"
-  # update dependent paths
-  USER_DIR="$WORKSPACE_DIR/config/User"; ensure_dir "$USER_DIR"
+  USER_DIR="${WORKSPACE_DIR}/config"
+  ensure_dir "$USER_DIR"
   SETTINGS_PATH="$USER_DIR/settings.json"
   TASKS_PATH="$USER_DIR/tasks.json"
   KEYB_PATH="$USER_DIR/keybindings.json"
@@ -1122,25 +1126,25 @@ recompute_base(){
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  if [ "$(prompt_yn "merge strapped settings.json to workspace settings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
     log "skipped settings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped keybindings.json to workspace keybindings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_keybindings
   else
     log "skipped keybindings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped extensions.json to workspace extensions.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_extensions
   else
     log "skipped extensions merge"
   fi
 
-  ensure_workspace_config_files
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1159,7 +1163,7 @@ config_hybrid(){
       log "skipped settings merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped settings.json to workspace settings.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_settings
     else
       log "skipped settings merge"
@@ -1174,7 +1178,7 @@ config_hybrid(){
       log "skipped keybindings merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped keybindings.json to workspace keybindings.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
@@ -1189,14 +1193,14 @@ config_hybrid(){
       log "skipped extensions merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped extensions.json to workspace extensions.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_extensions
     else
       log "skipped extensions merge"
     fi
   fi
 
-  ensure_workspace_config_files
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1271,7 +1275,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner
+    bootstrap_banner()
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -1388,7 +1392,7 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
-        ensure_workspace_config_files
+        install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
@@ -1455,14 +1459,14 @@ autorun_install_extensions(){
 # ===== entrypoint =====
 case "${1:-init}" in
   init)
+    configure_user_data_dir
     install_restart_gate
     install_cli_shim
     init_default_password
-    configure_user_data_dir
-    ensure_workspace_config_files
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
+    install_config_shortcuts
     autorun_env_if_present
     autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
