@@ -132,7 +132,7 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# VS Code settings paths (operate directly on real files, no symlinks)
+# VS Code settings paths
 USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
 SETTINGS_PATH="$USER_DIR/settings.json"
 TASKS_PATH="$USER_DIR/tasks.json"
@@ -162,7 +162,7 @@ install_restart_gate(){
 const http = require('http'); const { exec } = require('child_process');
 const PORT = 9000, HOST = '127.0.0.1';
 function supervisedRestart(){
-  const cmd = "sh -c 'for i in 1 2 3 4 5; do [ - p /run/s6/scan-control ] && break; sleep 0.4; done; s6-svscanctl -t /run/s6 >/dev/null 2>&1 || kill -TERM 1 >/dev/null 2>&1'";
+  const cmd = "sh -c 'for i in 1 2 3 4 5; do [ -p /run/s6/scan-control ] && break; sleep 0.4; done; s6-svscanctl -t /run/s6 >/dev/null 2>&1 || kill -TERM 1 >/dev/null 2>&1'";
   exec(cmd, () => {});
 }
 http.createServer((req,res)=>{
@@ -386,23 +386,12 @@ codestrap_run(){
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
-# ===== ensure real user config files (no symlinks) =====
-ensure_user_config_files(){
-  ensure_dir "$USER_DIR"
-  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
-  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
-  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
-  chown "${PUID}:${PGID}" "$SETTINGS_PATH" "$TASKS_PATH" "$KEYB_PATH" "$EXT_PATH" 2>/dev/null || true
-}
-
 # ===== settings.json merge =====
 merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping settings merge"; return 0; }
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
-  ensure_user_config_files
 
   tmp_user_json="$(mktemp)"
 
@@ -541,7 +530,6 @@ merge_codestrap_keybindings(){
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping keybindings merge"; return 0; }
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
-  ensure_user_config_files
 
   # ---- Load USER (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
@@ -680,7 +668,6 @@ merge_codestrap_extensions(){
   command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping extensions merge"; return 0; }
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
-  ensure_user_config_files
 
   # Load USER (allow comments only; no other repairs)
   tmp_user_json="$(mktemp)"
@@ -725,9 +712,11 @@ merge_codestrap_extensions(){
     # START comment
     echo '    // START codestrap extensions'
     # repo items
+    REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
+      REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
     # END comment just after repo segment
     echo '    // END codestrap extensions'
@@ -1003,6 +992,30 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
+# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
+install_config_shortcuts(){
+  local d="$WORKSPACE_DIR/config"
+  local pre_exists="0"
+  [ -d "$d" ] && pre_exists="1"
+  ensure_dir "$d"
+
+  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
+
+  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
+
+  mklink "$SETTINGS_PATH" "$d/settings.json"
+  mklink "$TASKS_PATH"    "$d/tasks.json"
+  mklink "$KEYB_PATH"     "$d/keybindings.json"
+  mklink "$EXT_PATH"      "$d/extensions.json"
+
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
+}
+
 # ===== CLI helpers =====
 install_cli_shim(){
   # System-wide install when root, else user-level install into ~/.local/bin
@@ -1111,7 +1124,7 @@ config_interactive(){
     log "skipped extensions merge"
   fi
 
-  ensure_user_config_files
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1167,7 +1180,7 @@ config_hybrid(){
     fi
   fi
 
-  ensure_user_config_files
+  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1242,7 +1255,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner
+    bootstrap_banner()
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -1359,7 +1372,7 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
-        ensure_user_config_files
+        install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
@@ -1429,12 +1442,10 @@ case "${1:-init}" in
     install_restart_gate
     install_cli_shim
     init_default_password
-    # Merge config (repo → user); always operate on real files
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
-    # Ensure the real user files exist (no symlinks)
-    ensure_user_config_files
+    install_config_shortcuts
     autorun_env_if_present
     autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
