@@ -34,11 +34,12 @@ services:
       - ./keybindings.json:/config/codestrap/keybindings.json:ro
       - ./extensions.json:/config/codestrap/extensions.json:ro
       - ./tasks.json:/config/codestrap/tasks.json:ro
+      - ./09-userdatadir.sh:/custom-cont-init.d/09-userdatadir.sh:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     ports:
       - ":8443"
       #- "8443:8443"
-    command: --user-data-dir ${HOME}/config/workspace/config
+    #command: --user-data-dir ${HOME}/config/workspace/config
     restart: always
 
 volumes:
