@@ -40,6 +40,6 @@ services:
       #- "8443:8443"
     restart: always
 
-volumes:
+#volumes:
   #code-config:
   #projects:
