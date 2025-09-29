@@ -38,6 +38,7 @@ services:
     ports:
       - ":8443"
       #- "8443:8443"
+    command: --user-data-dir /config/workspace/config
     restart: always
 
 volumes:
