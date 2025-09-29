@@ -992,28 +992,68 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
+# ===== workspace config folder (User files -> symlink to workspace files) =====
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
-  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
-  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
-  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
+  # Workspace "real" file paths
+  local WS_SETTINGS="$d/settings.json"
+  local WS_TASKS="$d/tasks.json"
+  local WS_KEYB="$d/keybindings.json"
+  local WS_EXT="$d/extensions.json"
 
-  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
+  # 1) Ensure workspace REAL files exist.
+  #    Prefer copying current user files if present; else create sensible defaults.
+  seed_or_default(){
+    # $1: user_path, $2: ws_path, $3: default_content
+    if [ ! -e "$2" ]; then
+      if [ -s "$1" ]; then
+        cp -f "$1" "$2"
+      else
+        printf '%s\n' "$3" > "$2"
+      fi
+    fi
+    chown "${PUID}:${PGID}" "$2" 2>/dev/null || true
+  }
 
-  mklink "$SETTINGS_PATH" "$d/settings.json"
-  mklink "$TASKS_PATH"    "$d/tasks.json"
-  mklink "$KEYB_PATH"     "$d/keybindings.json"
-  mklink "$EXT_PATH"      "$d/extensions.json"
+  seed_or_default "$SETTINGS_PATH" "$WS_SETTINGS"       '{}'
+  seed_or_default "$TASKS_PATH"    "$WS_TASKS"          '{}'
+  seed_or_default "$KEYB_PATH"     "$WS_KEYB"           '[]'
+  seed_or_default "$EXT_PATH"      "$WS_EXT"            '{ "recommendations": [] }'
 
-  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+  # 2) Make USER files symlink to the workspace real files (flip direction).
+  link_user_to_ws(){
+    # $1: ws_file, $2: user_file
+    if [ -L "$2" ]; then
+      # If already the correct link, keep. If not, replace.
+      target="$(readlink "$2" || true)"
+      if [ "$target" != "$1" ]; then
+        rm -f "$2"
+        ln -s "$1" "$2"
+      fi
+    else
+      if [ -e "$2" ]; then
+        # Backup once if it's a regular file (preserve user data already seeded).
+        [ -f "$2" ] && cp -f "$2" "$2.bak" || true
+        rm -f "$2"
+      fi
+      ln -s "$1" "$2"
+    fi
+    chown -h "${PUID}:${PGID}" "$2" 2>/dev/null || true
+  }
 
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
+  link_user_to_ws "$WS_SETTINGS" "$SETTINGS_PATH"
+  link_user_to_ws "$WS_TASKS"    "$TASKS_PATH"
+  link_user_to_ws "$WS_KEYB"     "$KEYB_PATH"
+  link_user_to_ws "$WS_EXT"      "$EXT_PATH"
+
+  # 3) Make sure workspace dir is owned correctly (and links visible to users).
+  chown -R "${PUID}:${PGID}" "$d" 2>/dev/null || true
+
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace (user files now symlink to it)" || log "verified config symlinks (user → workspace)"
 }
 
 # ===== CLI helpers =====
