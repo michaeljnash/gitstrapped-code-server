@@ -992,30 +992,6 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
-install_config_shortcuts(){
-  local d="$WORKSPACE_DIR/config"
-  local pre_exists="0"
-  [ -d "$d" ] && pre_exists="1"
-  ensure_dir "$d"
-
-  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
-  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
-  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
-  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
-
-  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
-
-  mklink "$SETTINGS_PATH" "$d/settings.json"
-  mklink "$TASKS_PATH"    "$d/tasks.json"
-  mklink "$KEYB_PATH"     "$d/keybindings.json"
-  mklink "$EXT_PATH"      "$d/extensions.json"
-
-  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
-
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
-}
-
 # ===== CLI helpers =====
 install_cli_shim(){
   # System-wide install when root, else user-level install into ~/.local/bin
@@ -1124,7 +1100,6 @@ config_interactive(){
     log "skipped extensions merge"
   fi
 
-  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1180,7 +1155,6 @@ config_hybrid(){
     fi
   fi
 
-  install_config_shortcuts
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
@@ -1372,7 +1346,6 @@ cli_entry(){
         else
           merge_codestrap_extensions
         fi
-        install_config_shortcuts
         log "Bootstrap config completed"
         CTX_TAG=""
       fi
@@ -1445,7 +1418,6 @@ case "${1:-init}" in
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
-    install_config_shortcuts
     autorun_env_if_present
     autorun_install_extensions   # uninstall (if set) then install (if set)
     log "Codestrap initialized. Use: codestrap -h"
