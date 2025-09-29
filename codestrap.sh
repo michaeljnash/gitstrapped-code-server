@@ -709,14 +709,18 @@ merge_codestrap_extensions(){
   {
     echo "{"
     echo '  "recommendations": ['
+    # START comment
     echo '    // START codestrap extensions'
+    # repo items
     REPO_COUNT=0
     while IFS= read -r item; do
       [ -n "$item" ] || continue
       echo "    $item,"
       REPO_COUNT=$((REPO_COUNT+1))
     done < "$tmp_repo_list"
+    # END comment just after repo segment
     echo '    // END codestrap extensions'
+    # user extras (no trailing comma on last)
     EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
     idx=0
     while IFS= read -r item; do
@@ -988,58 +992,28 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (REAL files in WORKSPACE, symlinks in USER_DIR) =====
+# ===== workspace config folder (symlinks in WORKSPACE_DIR only) =====
 install_config_shortcuts(){
-  # Real files live here:
   local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
-  # Paths of real files in workspace
-  local WS_SETTINGS="$d/settings.json"
-  local WS_TASKS="$d/tasks.json"
-  local WS_KEYB="$d/keybindings.json"
-  local WS_EXT="$d/extensions.json"
+  [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
+  [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
+  [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
+  [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
 
-  # Helper: initialize a workspace file with (1) existing USER file content if present,
-  # else a sensible default JSON/JSON array.
-  init_ws_file(){
-    local ws="$1" user="$2" default_content="$3"
-    if [ -f "$ws" ] && [ -s "$ws" ]; then
-      : # keep existing workspace file
-    else
-      if [ -f "$user" ] && [ -s "$user" ] && [ ! -L "$user" ]; then
-        cp -f "$user" "$ws"
-      else
-        printf '%s\n' "$default_content" >"$ws"
-      fi
-    fi
-    chown "${PUID}:${PGID}" "$ws" 2>/dev/null || true
-  }
+  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
 
-  init_ws_file "$WS_SETTINGS" "$SETTINGS_PATH" '{}'
-  init_ws_file "$WS_TASKS"    "$TASKS_PATH"    '{}'
-  init_ws_file "$WS_KEYB"     "$KEYB_PATH"     '[]'
-  init_ws_file "$WS_EXT"      "$EXT_PATH"      '{ "recommendations": [] }'
+  mklink "$SETTINGS_PATH" "$d/settings.json"
+  mklink "$TASKS_PATH"    "$d/tasks.json"
+  mklink "$KEYB_PATH"     "$d/keybindings.json"
+  mklink "$EXT_PATH"      "$d/extensions.json"
 
-  # Now force USER_DIR files to symlink to the workspace "real" files
-  force_link(){
-    local src="$1" dst="$2"
-    rm -f "$dst" 2>/dev/null || true
-    ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"
-    chown -h "${PUID}:${PGID}" "$dst" 2>/dev/null || true
-  }
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
 
-  force_link "$WS_SETTINGS" "$SETTINGS_PATH"
-  force_link "$WS_TASKS"    "$TASKS_PATH"
-  force_link "$WS_KEYB"     "$KEYB_PATH"
-  force_link "$WS_EXT"      "$EXT_PATH"
-
-  # Make sure the workspace config folder is owned correctly
-  chown -h "${PUID}:${PGID}" "$d" "$d/"* 2>/dev/null || true
-
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace (real files) and linked user config → workspace" || true
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
 }
 
 # ===== CLI helpers =====
