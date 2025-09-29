@@ -46,7 +46,7 @@ codestrap — bootstrap GitHub + manage code-server auth
 
 Usage (subcommands):
   codestrap                      # Interactive hub: ask GitHub? Config? Change password?
-  codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--env)
+  codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--auto)
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
   codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
   codestrap passwd               # Interactive password change (secure prompts)
@@ -60,10 +60,10 @@ Flags for 'codestrap github' (hyphenated only; envs shown at right):
   -u, --username <val>           → GITHUB_USERNAME
   -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
   -n, --name <val>               → GITHUB_NAME
-  -m, --email <val>              → GITHUB_EMAIL
+  -e, --email <val>              → GITHUB_EMAIL
   -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   -p, --pull <true|false>        → GITHUB_PULL    (default: true)
-  -e, --env                      Use environment variables only (no prompts)
+  -a, --auto                     Use environment variables only (no prompts)
 
 Env-only (no flags):
   WORKSPACE_DIR (default: /config/workspace)
@@ -89,7 +89,7 @@ Env vars (init-time automation; uninstall runs BEFORE install):
   EXTENSIONS_INSTALL=<all|a|missing|m|none>     # default none
 
 Interactive tip (github):
-  At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
+  At any 'github' prompt you can type -a or --auto to use the corresponding environment variable (the hint appears only if that env var is set).
 
 Examples:
   codestrap
@@ -206,11 +206,11 @@ init_default_password(){
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
 }
 
-# ===== helpers for interactive -e/--env =====
-env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -e/--env to use env %s)" "$1" || true; }
-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -e|--env) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --env at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
+# ===== helpers for interactive -a/--auto =====
+env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -a/--auto to use env %s)" "$1" || true; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
@@ -1063,7 +1063,7 @@ EOF
   fi
 }
 
-bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --env."; fi; }
+bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
@@ -1195,11 +1195,11 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
     case "$1" in
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
-      -e|--env)      USE_ENV=true;;
+      -a|--auto)     USE_ENV=true;;
       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
       -n|--name)     shift || true; GITHUB_NAME="${1:-}";;
-      -m|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
+      -e|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
       -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
       -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
       --*)           err "Unknown flag '$1'"; print_help; exit 1;;
@@ -1215,8 +1215,8 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
     ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
   else
     if ! is_tty; then
-      echo "No TTY available for prompts. Use flags or --env. Examples:
-  GITHUB_USERNAME=alice GITHUB_TOKEN=ghp_xxx codestrap github --env
+      echo "No TTY available for prompts. Use flags or --auto. Examples:
+  GITHUB_USERNAME=alice GITHUB_TOKEN=ghp_xxx codestrap github --auto
   codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
 " >&2
       exit 3
@@ -1247,7 +1247,7 @@ cli_entry(){
     # Hub flow
     if ! is_tty; then
       echo "No TTY detected. Run a subcommand or provide flags. Examples:
-  codestrap github --env
+  codestrap github --auto
   codestrap config
   codestrap passwd
 " >&2
@@ -1306,7 +1306,7 @@ cli_entry(){
           PROMPT_TAG=""
           CTX_TAG=""
         else
-          echo "Use flags or --env for non-interactive github flow."; exit 3
+          echo "Use flags or --auto for non-interactive github flow."; exit 3
         fi
       else
         bootstrap_from_args "$@"
@@ -1381,7 +1381,7 @@ cli_entry(){
       shift || true
       extensions_cmd "$@"
       ;;
-    --env|-e)
+    --auto|-a)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
       bootstrap_banner
