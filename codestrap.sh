@@ -53,46 +53,50 @@ Usage (subcommands):
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
 
-Flags for 'codestrap github' (map 1:1 to env vars; dash/underscore both accepted):
-  --gh-username | --gh_username <val>        → GH_USERNAME
-  --gh-pat      | --gh_pat      <val>        → GH_PAT   (classic; scopes: user:email, admin:public_key)
-  --git-name    | --git_name    <val>        → GIT_NAME
-  --git-email   | --git_email   <val>        → GIT_EMAIL
-  --gh-repos    | --gh_repos    "<specs>"    → GH_REPOS (owner/repo, owner/repo#branch, https://github.com/owner/repo)
-  --pull-existing-repos | --pull_existing_repos <true|false> → PULL_EXISTING_REPOS (default: true)
-  --workspace-dir       | --workspace_dir <dir>              → WORKSPACE_DIR (default: /config/workspace)
-  --repos-subdir        | --repos_subdir  <rel>              → REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
-  --env                                                Use environment variables only (no prompts)
+NOTE: For any flag that expects a boolean or scope value, you can use the first letter:
+  true/false → t/f, yes/no → y/n, all/missing → a/m.
+
+Flags for 'codestrap github' (hyphenated only; envs shown at right):
+  -u, --username <val>           → GITHUB_USERNAME
+  -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
+  -n, --name <val>               → GITHUB_NAME
+  -m, --email <val>              → GITHUB_EMAIL
+  -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
+  -p, --pull <true|false>        → GITHUB_PULL    (default: true)
+  -e, --env                      Use environment variables only (no prompts)
+
+Env-only (no flags):
+  WORKSPACE_DIR (default: /config/workspace)
+  REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
 
 Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
-  --settings <true|false>       Merge strapped settings.json into user settings.json
-  --keybindings <true|false>    Merge strapped keybindings.json into user keybindings.json
-  --extensions <true|false>     Merge strapped extensions.json into user extensions.json
-                                (Interactive default: ask; Non-interactive default: true)
+  -s, --settings <true|false>    Merge strapped settings.json into user settings.json
+  -k, --keybindings <true|false> Merge strapped keybindings.json into user keybindings.json
+  -e, --extensions <true|false>  Merge strapped extensions.json into user extensions.json
+                                 (Interactive default: ask; Non-interactive default: true)
 
 Flags for 'codestrap extensions':
-  --install <all|missing|a|m>     Install/update extensions from merged extensions.json:
-                                  all/a     → install missing + update already-installed to latest
-                                  missing/m → install only those not yet installed
-  --uninstall <all|missing|a|m>   Uninstall extensions:
-                                  all/a     → uninstall *all* installed extensions
-                                  missing/m → uninstall extensions NOT in recommendations (cleanup)
+  -i, --install <all|missing|a|m>     Install/update extensions from merged extensions.json:
+                                      all/a     → install missing + update already-installed to latest
+                                      missing/m → install only those not yet installed
+  -u, --uninstall <all|missing|a|m>   Uninstall extensions:
+                                      all/a     → uninstall *all* installed extensions
+                                      missing/m → uninstall extensions NOT in recommendations (cleanup)
   (No flags) → interactive: choose install or uninstall, then scope.
 
-Env vars (init-time automation):
-  INSTALL_EXTENSIONS=<all|missing|none>      # default none
-  UNINSTALL_EXTENSIONS=<all|missing|none>    # default none; runs BEFORE install
+Env vars (init-time automation; uninstall runs BEFORE install):
+  EXTENSIONS_UNINSTALL=<all|a|missing|m|none>   # default none
+  EXTENSIONS_INSTALL=<all|a|missing|m|none>     # default none
 
 Interactive tip (github):
   At any 'github' prompt you can type -e or --env to use the corresponding environment variable (the hint appears only if that env var is set).
 
 Examples:
   codestrap
-  codestrap github
-  codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos "alice/app#main, org/infra"
-  codestrap config
-  codestrap extensions --install all
-  codestrap extensions --install missing --uninstall missing   # sync to recommendations
+  codestrap github -u alice -t ghp_xxx -r "alice/app#main, org/infra"
+  codestrap config -s t -k f -e t
+  codestrap extensions -i all
+  codestrap extensions -i m -u m          # sync to recommendations
   codestrap passwd
 HLP
 }
@@ -141,8 +145,8 @@ REPO_EXT_SRC="$HOME/codestrap/extensions.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
 # Track origins for nicer errors
-ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-}"
-ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-}"
+ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
+ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
@@ -210,45 +214,45 @@ read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$
 
 # ===== GitHub validation (fatal on failure) =====
 validate_github_username(){
-  [ -n "${GH_USERNAME:-}" ] || return 0
-  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GH_USERNAME}" || echo "000")"
+  [ -n "${GITHUB_USERNAME:-}" ] || return 0
+  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || echo "000")"
   if [ "$code" = "404" ]; then
-    src="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
-    err "GitHub username '${GH_USERNAME}' appears invalid (HTTP 404). Check ${src}."
+    src="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+    err "GitHub username '${GITHUB_USERNAME}' appears invalid (HTTP 404). Check ${src}."
     return 1
   elif [ "$code" != "200" ]; then
-    err "Could not verify GitHub username '${GH_USERNAME}' (HTTP $code)."
+    err "Could not verify GitHub username '${GITHUB_USERNAME}' (HTTP $code)."
     return 1
   fi
 }
 
-validate_github_pat(){
-  [ -n "${GH_PAT:-}" ] || return 0
+validate_github_token(){
+  [ -n "${GITHUB_TOKEN:-}" ] || return 0
   code="$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: token ${GH_PAT}" \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: codestrap" \
     https://api.github.com/user || echo "000")"
-  src="${ORIGIN_GH_PAT:-env GH_PAT}"
+  src="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
   if [ "$code" = "401" ]; then
-    err "Provided GH_PAT (${src}) is invalid or expired (HTTP 401). Please provide a valid classic PAT with scopes: user:email, admin:public_key."
+    err "Provided GITHUB_TOKEN (${src}) is invalid or expired (HTTP 401). Please provide a valid classic token with scopes: user:email, admin:public_key."
     return 1
   elif [ "$code" = "403" ]; then
-    err "Provided GH_PAT (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
+    err "Provided GITHUB_TOKEN (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
     return 1
   elif [ "$code" != "200" ]; then
-    err "Could not verify GH_PAT (${src}) (HTTP $code)."
+    err "Could not verify GITHUB_TOKEN (${src}) (HTTP $code)."
     return 1
   fi
   headers="$(curl -fsS -D - -o /dev/null \
-    -H "Authorization: token ${GH_PAT}" \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: codestrap" \
     https://api.github.com/user 2>/dev/null || true)"
   scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
   if [ -n "$scopes" ]; then
-    echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GH_PAT may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: $scopes")"
-    echo "$scopes" | grep -q 'user:email'       || warn "$(ylw "GH_PAT may be missing 'user:email' (needed to resolve your primary email). Current scopes: $scopes")"
+    echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GITHUB_TOKEN may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: $scopes")"
+    echo "$scopes" | grep -q 'user:email'       || warn "$(ylw "GITHUB_TOKEN may be missing 'user:email' (needed to resolve your primary email). Current scopes: $scopes")"
   fi
 }
 
@@ -281,25 +285,25 @@ password_change_interactive(){
 
 # ===== github bootstrap internals =====
 resolve_email(){
-  GH_USERNAME="${GH_USERNAME:-}"; GH_PAT="${GH_PAT:-}"
-  [ -n "$GH_PAT" ] || { echo "${GH_USERNAME:-unknown}@users.noreply.github.com"; return; }
-  EMAILS="$(curl -fsS -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
+  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
+  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
   PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
   [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
   VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
   [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
-  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GH_USERNAME}" || true)"
+  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
   PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
   [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
-  echo "${GH_USERNAME:-unknown}@users.noreply.github.com"
+  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
 }
 git_upload_key(){
-  GH_PAT="${GH_PAT:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-codestrapped-code-server SSH Key}"
-  [ -n "$GH_PAT" ] || { warn "GH_PAT empty; cannot upload SSH key"; return 0; }
+  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-codestrapped-code-server SSH Key}"
+  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
-  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
   echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
-  RESP="$(curl -fsS -X POST -H "Authorization: token ${GH_PAT}" -H "Accept: application/vnd.github+json" -d "{\"title\":\"$GH_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" https://api.github.com/user/keys || true)"
+  RESP="$(curl -fsS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "{\"title\":\"$GH_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" https://api.github.com/user/keys || true)"
   echo "$RESP" | grep -q '"id"' && log "SSH key added" || warn "Key upload failed: $(redact "$RESP")"
 }
 clone_one(){
@@ -340,33 +344,33 @@ clone_one(){
 }
 
 codestrap_run(){
-  GH_USERNAME="${GH_USERNAME:-}"; GH_PAT="${GH_PAT:-}"
-  GIT_NAME="${GIT_NAME:-${GH_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
-  GH_REPOS="${GH_REPOS:-}"; PULL_EXISTING_REPOS="${PULL_EXISTING_REPOS:-true}"
+  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+  GITHUB_NAME="${GITHUB_NAME:-${GITHUB_USERNAME:-}}"; GITHUB_EMAIL="${GITHUB_EMAIL:-}"
+  GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
 
   validate_github_username
-  validate_github_pat
+  validate_github_token
 
   git config --global init.defaultBranch main || true
   git config --global pull.ff only || true
   git config --global advice.detachedHead false || true
   git config --global --add safe.directory "*"
-  git config --global user.name "${GIT_NAME:-codestrap}" || true
-  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
-  git config --global user.email "$GIT_EMAIL" || true
-  log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
+  git config --global user.name "${GITHUB_NAME:-codestrap}" || true
+  if [ -z "${GITHUB_EMAIL:-}" ]; then GITHUB_EMAIL="$(resolve_email || true)"; fi
+  git config --global user.email "$GITHUB_EMAIL" || true
+  log "identity: ${GITHUB_NAME:-} <${GITHUB_EMAIL:-}>"
   umask 077
-  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GIT_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
+  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GITHUB_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
   touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
   if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
   git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
   git_upload_key || true
 
-  if [ -n "${GH_REPOS:-}" ]; then
-    IFS=,; set -- $GH_REPOS; unset IFS
+  if [ -n "${GITHUB_REPOS:-}" ]; then
+    IFS=,; set -- $GITHUB_REPOS; unset IFS
     CLONE_ERRORS=0
     for spec in "$@"; do
-      if ! clone_one "$spec" "$PULL_EXISTING_REPOS"; then
+      if ! clone_one "$spec" "$GITHUB_PULL"; then
         CLONE_ERRORS=$((CLONE_ERRORS+1))
       fi
     done
@@ -375,7 +379,7 @@ codestrap_run(){
       exit 5
     fi
   else
-    log "GH_REPOS empty; skip clone"
+    log "GITHUB_REPOS empty; skip clone"
   fi
 }
 
@@ -800,30 +804,28 @@ Usage:
   codestrap extensions
     → interactive: choose install or uninstall, then scope (all/missing)
 
-  codestrap extensions --install all|a
-  codestrap extensions --install missing|m
-  codestrap extensions --uninstall all|a
-  codestrap extensions --uninstall missing|m
+  codestrap extensions -i all|a
+  codestrap extensions -i missing|m
+  codestrap extensions -u all|a
+  codestrap extensions -u missing|m
   # Combine:
-  codestrap extensions --install missing --uninstall missing
+  codestrap extensions -i m -u m
 
 This uses extensions listed in your merged extensions.json at:
   $HOME/data/User/extensions.json
 EHELP
         exit 0;;
-      --install)
-        shift || true
-        MODE="$(normalize_scope "${1:-}")"
-        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
+      --install|-i)
+        if [ "$1" = "-i" ]; then shift || true; MODE="$(normalize_scope "${1:-}")"; else shift || true; MODE="$(normalize_scope "${1:-}")"; fi
+        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install|-i' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
       --install=*)
         MODE="$(normalize_scope "${1#*=}")"
         [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
-      --uninstall)
-        shift || true
-        UNMODE="$(normalize_scope "${1:-}")"
-        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
+      --uninstall|-u)
+        if [ "$1" = "-u" ]; then shift || true; UNMODE="$(normalize_scope "${1:-}")"; else shift || true; UNMODE="$(normalize_scope "${1:-}")"; fi
+        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall|-u' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
       --uninstall=*)
         UNMODE="$(normalize_scope "${1#*=}")"
@@ -922,7 +924,6 @@ EHELP
         fi
         ;;
       all)
-        # Install any missing …
         if [ -s "$tmp_missing" ]; then
           log "installing missing recommended extensions"
           while IFS= read -r ext; do
@@ -936,7 +937,6 @@ EHELP
         else
           log "no missing recommended extensions"
         fi
-        # …then update present
         if [ -s "$tmp_present_rec" ]; then
           log "updating already-installed recommended extensions to latest"
           while IFS= read -r ext; do
@@ -960,7 +960,6 @@ EHELP
     PROMPT_TAG="[Extensions] ? "
     CTX_TAG="[Extensions]"
 
-    # Choose action (install/uninstall)
     act_raw="$(prompt_def "Action (install|uninstall) [install]: " "install")"
     act="$(printf "%s" "$act_raw" | tr '[:upper:]' '[:lower:]')"
     case "$act" in
@@ -969,7 +968,6 @@ EHELP
       *) log "unknown action '$act_raw' → defaulting to install"; act="install" ;;
     esac
 
-    # Choose scope based on action
     if [ "$act" = "install" ]; then
       scope_raw="$(prompt_def "Install scope (all|missing) [missing]: " "missing")"
       MODE="$(normalize_scope "$scope_raw")"; [ -n "$MODE" ] || MODE="missing"
@@ -980,7 +978,6 @@ EHELP
       if [ "$UNMODE" = "all" ]; then
         conf="$(prompt_def "This will remove ALL installed extensions. Continue? (y/N) " "n")"
         [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }
-      end_if=true
       fi
       do_uninstall "$UNMODE"
     fi
@@ -1070,41 +1067,25 @@ bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
-  GH_USERNAME="$(read_or_env "GitHub username" GH_USERNAME "")"; ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-prompt}"
-  GH_PAT="$(read_secret_or_env "GitHub PAT (classic: user:email, admin:public_key)" GH_PAT)"; ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-prompt}"
-  GIT_NAME="$(read_or_env "Git name [${GIT_NAME:-${GH_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GH_USERNAME:-}}")"
-  GIT_EMAIL="$(read_or_env "Git email (blank=auto)" GIT_EMAIL "")"
-  GH_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GH_REPOS "${GH_REPOS:-}")"
-  PULL_EXISTING_REPOS="$(read_bool_or_env "Pull existing repos? [Y/n]" PULL_EXISTING_REPOS "y")"
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required." >&2; exit 2; }
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS ORIGIN_GH_USERNAME ORIGIN_GH_PAT
+  GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
+  GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
+  GITHUB_NAME="$(read_or_env "GitHub name [${GITHUB_NAME:-${GITHUB_USERNAME:-}}]" GITHUB_NAME "${GITHUB_NAME:-${GITHUB_USERNAME:-}}")"
+  GITHUB_EMAIL="$(read_or_env "GitHub email (blank=auto)" GITHUB_EMAIL "")"
+  GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
+  GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required." >&2; exit 2; }
+  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run; log "bootstrap complete"
 }
 
 bootstrap_env_only(){
-  ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
-  ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-env GH_PAT}"
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (env)." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (env)." >&2; exit 2; }
-  export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
+  ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+  ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (env)." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (env)." >&2; exit 2; }
+  export ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run; log "bootstrap complete (env)"
-}
-
-# ===== flag → env mapping (1:1, dash/underscore agnostic) =====
-ALLOWED_FLAG_VARS="GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS WORKSPACE_DIR REPOS_SUBDIR"
-set_flag_env(){
-  norm="$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]' | sed 's/-/_/g')"
-  envname="$(printf "%s" "$norm" | tr '[:lower:]' '[:upper:]')"
-  case " $ALLOWED_FLAG_VARS " in
-    *" $envname "*)
-      eval "export $envname=\$2"
-      [ "$envname" = "GH_USERNAME" ] && ORIGIN_GH_USERNAME="--gh-username"
-      [ "$envname" = "GH_PAT" ] && ORIGIN_GH_PAT="--gh-pat"
-      export ORIGIN_GH_USERNAME ORIGIN_GH_PAT
-      ;;
-    *) err "Unknown or disallowed flag '--$1'"; print_help; exit 1;;
-  esac
 }
 
 recompute_base(){
@@ -1131,13 +1112,13 @@ config_interactive(){
     log "skipped settings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_keybindings
   else
     log "skipped keybindings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_extensions
   else
     log "skipped extensions merge"
@@ -1177,7 +1158,7 @@ config_hybrid(){
       log "skipped keybindings merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
@@ -1192,7 +1173,7 @@ config_hybrid(){
       log "skipped extensions merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_extensions
     else
       log "skipped extensions merge"
@@ -1208,19 +1189,21 @@ config_hybrid(){
 # ===== github flags handler =====
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
+  # Clear any old values (so flags fully control when provided)
+  unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
-      --env)         USE_ENV=true;;
-      --*)
-        key="${1#--}"; shift || true
-        val="${1:-}"
-        [ -n "$val" ] && [ "${val#--}" = "$val" ] || { err "Flag '--$key' requires a value."; exit 2; }
-        set_flag_env "$key" "$val"
-        ;;
-      *)
-        err "Unknown argument: $1"; print_help; exit 1;;
+      -e|--env)      USE_ENV=true;;
+      -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
+      -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
+      -n|--name)     shift || true; GITHUB_NAME="${1:-}";;
+      -m|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
+      -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
+      -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
+      --*)           err "Unknown flag '$1'"; print_help; exit 1;;
+      *)             err "Unknown argument: $1"; print_help; exit 1;;
     esac
     shift || true
   done
@@ -1228,13 +1211,13 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
   recompute_base
 
   if [ "$USE_ENV" = "true" ]; then
-    ORIGIN_GH_USERNAME="${ORIGIN_GH_USERNAME:-env GH_USERNAME}"
-    ORIGIN_GH_PAT="${ORIGIN_GH_PAT:-env GH_PAT}"
+    ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+    ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
   else
     if ! is_tty; then
       echo "No TTY available for prompts. Use flags or --env. Examples:
-  GH_USERNAME=alice GH_PAT=ghp_xxx codestrap github --env
-  codestrap github --gh-username alice --gh-pat ghp_xxx --gh-repos \"alice/app#main\"
+  GITHUB_USERNAME=alice GITHUB_TOKEN=ghp_xxx codestrap github --env
+  codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
 " >&2
       exit 3
     fi
@@ -1247,11 +1230,11 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
     return 0
   fi
 
-  [ -n "${GH_USERNAME:-}" ] || { echo "GH_USERNAME or --gh-username required (flag/env/prompt)." >&2; exit 2; }
-  [ -n "${GH_PAT:-}" ]     || { echo "GH_PAT or --gh-pat required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (flag/env/prompt)." >&2; exit 2; }
 
   CTX_TAG="[Bootstrap GitHub]"
-  export GH_USERNAME GH_PAT GIT_NAME GIT_EMAIL GH_REPOS PULL_EXISTING_REPOS BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GH_USERNAME ORIGIN_GH_PAT
+  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run
   log "bootstrap complete"
   CTX_TAG=""
@@ -1272,7 +1255,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner
+    bootstrap_banner()
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -1338,26 +1321,26 @@ cli_entry(){
       while [ $# -gt 0 ]; do
         case "$1" in
           -h|--help) print_help; exit 0;;
-          --settings)
+          -s|--settings)
             shift || true
             CFG_SETTINGS="${1:-}"
-            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
           --settings=*)
             CFG_SETTINGS="${1#*=}"
             ;;
-          --keybindings)
+          -k|--keybindings)
             shift || true
             CFG_KEYB="${1:-}"
-            [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings' requires <true|false>"; CTX_TAG=""; exit 2; }
+            [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
           --keybindings=*)
             CFG_KEYB="${1#*=}"
             ;;
-          --extensions)
+          -e|--extensions)
             shift || true
             CFG_EXT="${1:-}"
-            [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions' requires <true|false>"; CTX_TAG=""; exit 2; }
+            [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; }
             ;;
           --extensions=*)
             CFG_EXT="${1#*=}"
@@ -1398,7 +1381,7 @@ cli_entry(){
       shift || true
       extensions_cmd "$@"
       ;;
-    --env)
+    --env|-e)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
       bootstrap_banner
@@ -1413,25 +1396,23 @@ cli_entry(){
 
 # ===== autorun at container start (env-driven) =====
 autorun_env_if_present(){
-  if [ -n "${GH_USERNAME:-}" ] && [ -n "${GH_PAT:-}" ] && [ ! -f "$LOCK_FILE" ]; then
+  if [ -n "${GITHUB_USERNAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
     log "env present and no lock → running bootstrap"
     codestrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
-    { [ -z "${GH_USERNAME:-}" ] || [ -z "${GH_PAT:-}" ] ; } && log "GH_USERNAME/GH_PAT missing → no autorun"
+    { [ -z "${GITHUB_USERNAME:-}" ] || [ -z "${GITHUB_TOKEN:-}" ] ; } && log "GITHUB_USERNAME/GITHUB_TOKEN missing → no autorun"
   fi
 }
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
   # Normalize envs
-  inst_mode="$(printf "%s" "${INSTALL_EXTENSIONS:-}"   | tr '[:upper:]' '[:lower:]')"
-  uninst_mode="$(printf "%s" "${UNINSTALL_EXTENSIONS:-}" | tr '[:upper:]' '[:lower:]')"
+  inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
+  uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
 
-  # Helper to reuse command logic without prompts
   run_noninteractive(){
-    # args: uninstall_mode install_mode
     um="$1"; im="$2"
     args=""
     case "$um" in all|a) args="$args --uninstall all";; missing|m) args="$args --uninstall missing";; esac
@@ -1440,19 +1421,16 @@ autorun_install_extensions(){
       CTX_TAG="[Extensions]"
       log "env automation → codestrap extensions$args"
       CTX_TAG=""
-      # call directly to avoid re-parsing entrypoint
       extensions_cmd $args
     fi
   }
 
-  # If both set, uninstall FIRST then install (clear-then-install behavior)
-  case "$uninst_mode" in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "UNINSTALL_EXTENSIONS invalid: '$uninst_mode' (use all|missing|none)"; CTX_TAG=""; uninst_mode="";; esac
-  case "$inst_mode"   in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "INSTALL_EXTENSIONS invalid: '$inst_mode' (use all|missing|none)";     CTX_TAG=""; inst_mode="";; esac
+  case "$uninst_mode" in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "EXTENSIONS_UNINSTALL invalid: '$uninst_mode' (use all|missing|none)"; CTX_TAG=""; uninst_mode="";; esac
+  case "$inst_mode"   in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "EXTENSIONS_INSTALL invalid: '$inst_mode' (use all|missing|none)";     CTX_TAG=""; inst_mode="";; esac
 
   [ "$uninst_mode" = "none" ] && uninst_mode=""
   [ "$inst_mode"   = "none" ] && inst_mode=""
 
-  # nothing to do?
   [ -z "$uninst_mode$inst_mode" ] && return 0
 
   run_noninteractive "$uninst_mode" "$inst_mode"
