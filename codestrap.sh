@@ -45,65 +45,19 @@ cat <<'HLP'
 codestrap — bootstrap GitHub + manage code-server auth
 
 Usage (subcommands):
-  codestrap                      # Interactive hub: ask GitHub? Config? Change password?
+  codestrap                      # Interactive hub
   codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--auto)
-  codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
-  codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
-  codestrap passwd               # Interactive password change (secure prompts)
+  codestrap config [flags...]    # Merge strapped configs into user configs
+  codestrap extensions [flags...]# Install/update/uninstall extensions
+  codestrap passwd               # Interactive password change
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
-
-NOTE: For any flag that expects a boolean or scope value, you can use the first letter:
-  true/false → t/f, yes/no → y/n, all/missing → a/m.
-
-Flags for 'codestrap github' (hyphenated only; envs shown at right):
-  -u, --username <val>           → GITHUB_USERNAME
-  -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
-  -n, --name <val>               → GITHUB_NAME
-  -e, --email <val>              → GITHUB_EMAIL
-  -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
-  -p, --pull <true|false>        → GITHUB_PULL    (default: true)
-  -a, --auto                     Use environment variables only (no prompts)
-
-Env-only (no flags):
-  WORKSPACE_DIR (default: /config/workspace)
-  REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
-
-Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
-  -s, --settings <true|false>    Merge strapped settings.json into user settings.json
-  -k, --keybindings <true|false> Merge strapped keybindings.json into user keybindings.json
-  -e, --extensions <true|false>  Merge strapped extensions.json into user extensions.json
-                                 (Interactive default: ask; Non-interactive default: true)
-
-Flags for 'codestrap extensions':
-  -i, --install <all|missing|a|m>     Install/update extensions from merged extensions.json:
-                                      all/a     → install missing + update already-installed to latest
-                                      missing/m → install only those not yet installed
-  -u, --uninstall <all|missing|a|m>   Uninstall extensions:
-                                      all/a     → uninstall *all* installed extensions
-                                      missing/m → uninstall extensions NOT in recommendations (cleanup)
-  (No flags) → interactive: choose install or uninstall, then scope.
-
-Env vars (init-time automation; uninstall runs BEFORE install):
-  EXTENSIONS_UNINSTALL=<all|a|missing|m|none>   # default none
-  EXTENSIONS_INSTALL=<all|a|missing|m|none>     # default none
-
-Interactive tip (github):
-  At any 'github' prompt you can type -a or --auto to use the corresponding environment variable (the hint appears only if that env var is set).
-
-Examples:
-  codestrap
-  codestrap github -u alice -t ghp_xxx -r "alice/app#main, org/infra"
-  codestrap config -s t -k f -e t
-  codestrap extensions -i all
-  codestrap extensions -i m -u m          # sync to recommendations
-  codestrap passwd
 HLP
 }
 
 print_version(){ echo "codestrap ${VERSION}"; }
 
-# ===== paths / state =====
+# ===== paths / state (BASELINE) =====
 export HOME="${HOME:-/config}"
 PUID="${PUID:-1000}"; PGID="${PGID:-1000}"
 
@@ -132,47 +86,14 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# ===== authoritative VS Code user-data dir (workspace-backed) =====
-USER_DIR="${WORKSPACE_DIR}/config"   # authoritative user-data-dir that code-server will use
-ensure_dir "$USER_DIR"
-SETTINGS_PATH="$USER_DIR/settings.json"
-TASKS_PATH="$USER_DIR/tasks.json"
-KEYB_PATH="$USER_DIR/keybindings.json"
-EXT_PATH="$USER_DIR/extensions.json"
-
+# These source files are supplied by you (mounted read-only)
 REPO_SETTINGS_SRC="$HOME/codestrap/settings.json"
 REPO_KEYB_SRC="$HOME/codestrap/keybindings.json"
 REPO_EXT_SRC="$HOME/codestrap/extensions.json"
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
-# Track origins for nicer errors
-ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
-ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
-
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
-
-# ===== set code-server user-data-dir via config.yaml =====
-configure_user_data_dir(){
-  local cfgdir="$HOME/.config/code-server"
-  local cfg="$cfgdir/config.yaml"
-  ensure_dir "$cfgdir"
-
-  # Write or update minimal YAML setting user-data-dir
-  if [ -f "$cfg" ]; then
-    # remove existing user-data-dir key (busybox sed safe)
-    tmp="$(mktemp)"
-    sed '/^[[:space:]]*user-data-dir[[:space:]]*:/d' "$cfg" > "$tmp" || true
-    mv -f "$tmp" "$cfg"
-  fi
-
-  {
-    echo "user-data-dir: \"${USER_DIR}\""
-  } >> "$cfg"
-
-  chown -R "${PUID}:${PGID}" "$cfgdir" 2>/dev/null || true
-  log "configured code-server user-data-dir → ${USER_DIR}"
-}
 
 # ===== restart gate (root-only) =====
 install_restart_gate(){
@@ -306,105 +227,51 @@ password_change_interactive(){
   CTX_TAG="$_OLD_CTX_TAG"
 }
 
-# ===== github bootstrap internals =====
-resolve_email(){
-  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
-  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
-  PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
-  [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
-  VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
-  [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
-  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
-  PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
-  [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
-  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
-}
-git_upload_key(){
-  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-codestrapped-code-server SSH Key}"
-  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
-  LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
-  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
-  echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
-  RESP="$(curl -fsS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "{\"title\":\"$GH_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" https://api.github.com/user/keys || true)"
-  echo "$RESP" | grep -q '"id"' && log "SSH key added" || warn "Key upload failed: $(redact "$RESP")"
-}
-clone_one(){
-  spec="$1"; PULL="${2:-true}"
-  spec="$(echo "$spec" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"; [ -n "$spec" ] || return 0
-  repo="$spec"; branch=""
-  case "$spec" in *'#'*) branch="${spec#*#}"; repo="${spec%%#*}";; esac
-  case "$repo" in
-    *"git@github.com:"*) url="$repo"; name="$(basename "$repo" .git)";;
-    http*://github.com/*|ssh://git@github.com/*) name="$(basename "$repo" .git)"; owner_repo="$(echo "$repo" | sed -E 's#^https?://github\.com/##; s#^ssh://git@github\.com/##')"; owner_repo="${owner_repo%.git}"; url="git@github.com:${owner_repo}.git";;
-    */*) name="$(basename "$repo")"; url="git@github.com:${repo}.git";;
-    *) err "Invalid repo spec: '$spec'. Use owner/repo, owner/repo#branch, or a GitHub URL."; return 1;;
-  esac
-  dest="${BASE}/${name}"
-  safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
-  if [ -d "$dest/.git" ]; then
-    if [ "$(normalize_bool "$PULL")" = "true" ] && command -v git >/dev/null 2>&1; then
-      log "pull: ${name}"
-      git -C "$dest" fetch --all -p || warn "fetch failed for ${name}"
-      if [ -n "$branch" ]; then
-        git -C "$dest" checkout "$branch" || warn "checkout ${branch} failed for ${name}"
-        git -C "$dest" reset --hard "origin/${branch}" || warn "hard reset origin/${branch} failed for ${name}"
-      else
-        git -C "$dest" pull --ff-only || warn "pull --ff-only failed for ${name}"
-      fi
+# ===== ensure /config/data points to /config/workspace/config =====
+force_user_data_dir_symlink(){
+  WANT_BASE="${WORKSPACE_DIR}/config"     # /config/workspace/config
+  SRC_BASE="/config/data"                 # LSIO always launches with this
+  ensure_dir "$WANT_BASE"
+
+  if [ -L "$SRC_BASE" ]; then
+    t="$(readlink -f "$SRC_BASE" || true)"
+    if [ "$t" != "$WANT_BASE" ]; then
+      rm -f "$SRC_BASE"
+      ln -s "$WANT_BASE" "$SRC_BASE"
+      log "re-linked $SRC_BASE → $WANT_BASE"
     else
-      log "skip pull: ${name}"
+      log "$SRC_BASE already points to $WANT_BASE"
     fi
   else
-    log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
-    if [ -n "$branch" ]; then
-      git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
-    else
-      git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
+    if [ -d "$SRC_BASE" ]; then
+      # migrate non-existing files/dirs (no clobber)
+      (cd "$SRC_BASE" && find . -type f -print0 2>/dev/null | xargs -0 -I{} sh -c '
+        dest="'"$WANT_BASE"'/{}"; mkdir -p "$(dirname "$dest")"; [ -e "$dest" ] || cp -p "{}" "$dest"
+      ' || true)
+      rm -rf "$SRC_BASE"
     fi
+    ln -s "$WANT_BASE" "$SRC_BASE"
+    log "linked $SRC_BASE → $WANT_BASE"
   fi
-  chown -R "$PUID:$PGID" "$dest" || true
+
+  chown -h "${PUID}:${PGID}" "$SRC_BASE" 2>/dev/null || true
+  chown -R "${PUID}:${PGID}" "$WANT_BASE" 2>/dev/null || true
 }
 
-codestrap_run(){
-  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-  GITHUB_NAME="${GITHUB_NAME:-${GITHUB_USERNAME:-}}"; GITHUB_EMAIL="${GITHUB_EMAIL:-}"
-  GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
-
-  validate_github_username
-  validate_github_token
-
-  git config --global init.defaultBranch main || true
-  git config --global pull.ff only || true
-  git config --global advice.detachedHead false || true
-  git config --global --add safe.directory "*"
-  git config --global user.name "${GITHUB_NAME:-codestrap}" || true
-  if [ -z "${GITHUB_EMAIL:-}" ]; then GITHUB_EMAIL="$(resolve_email || true)"; fi
-  git config --global user.email "$GITHUB_EMAIL" || true
-  log "identity: ${GITHUB_NAME:-} <${GITHUB_EMAIL:-}>"
-  umask 077
-  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GITHUB_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
-  touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
-  if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
-  git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
-  git_upload_key || true
-
-  if [ -n "${GITHUB_REPOS:-}" ]; then
-    IFS=,; set -- $GITHUB_REPOS; unset IFS
-    CLONE_ERRORS=0
-    for spec in "$@"; do
-      if ! clone_one "$spec" "$GITHUB_PULL"; then
-        CLONE_ERRORS=$((CLONE_ERRORS+1))
-      fi
-    done
-    if [ "$CLONE_ERRORS" -gt 0 ]; then
-      err "One or more repositories failed to clone ($CLONE_ERRORS failure(s)). Aborting."
-      exit 5
-    fi
-  else
-    log "GITHUB_REPOS empty; skip clone"
-  fi
+# Recompute user-data dependent paths (must be called AFTER symlink is in place)
+recompute_user_paths(){
+  USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
+  SETTINGS_PATH="$USER_DIR/settings.json"
+  TASKS_PATH="$USER_DIR/tasks.json"
+  KEYB_PATH="$USER_DIR/keybindings.json"
+  EXT_PATH="$USER_DIR/extensions.json"
+  export USER_DIR SETTINGS_PATH TASKS_PATH KEYB_PATH EXT_PATH
 }
+
+# ===== repo paths reminder =====
+REPO_SETTINGS_SRC="${REPO_SETTINGS_SRC:-$HOME/codestrap/settings.json}"
+REPO_KEYB_SRC="${REPO_KEYB_SRC:-$HOME/codestrap/keybindings.json}"
+REPO_EXT_SRC="${REPO_EXT_SRC:-$HOME/codestrap/extensions.json}"
 
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
@@ -418,14 +285,13 @@ merge_codestrap_settings(){
 
   tmp_user_json="$(mktemp)"
 
-  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-        CTX_TAG="[Bootstrap config]"; err "workspace settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
+        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
         rm -f "$tmp_user_json" 2>/dev/null || true
         return 1
       fi
@@ -434,7 +300,6 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -489,7 +354,6 @@ merge_codestrap_settings(){
 
   preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
 
-  # Build final JSON, then inject comments with correct END placement
   tmp_final="$(mktemp)"
   jq -n \
     --argjson managed "$(cat "$tmp_managed")" \
@@ -554,7 +418,6 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER (allow JSONC comments; no other repairs) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -564,14 +427,13 @@ merge_codestrap_keybindings(){
         cp "$KEYB_PATH" "$tmp_user_json"
       else
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
       fi
     fi
   else
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO (allow JSONC comments; no other repairs) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -580,7 +442,6 @@ merge_codestrap_keybindings(){
     jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
-  # ---- Merge arrays (honor codestrap_preserve) ----
   tmp_final="$(mktemp)"
   jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" "$(cat <<'JQ'
 def arr(v): if (v|type)=="array" then v else [] end;
@@ -609,7 +470,6 @@ def kstr(x): (x.key|tostring);
 JQ
   )" > "$tmp_final"
 
-  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
   tmp_with_comments="$(mktemp)"
   awk '
     BEGIN {
@@ -619,63 +479,36 @@ JQ
       preserve_level=-1
       depth=0
     }
-
     {
       line = $0
-
       if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
         print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         print "  // START codestrap keybindings"
         seen_array_start=1
         next
       }
-
       if (have_prev && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         print prev
-        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         in_preserve=1
-        preserve_level=depth
-        have_prev=0
         next
       }
-
-      if (have_prev) {
-        print prev
-        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        have_prev=0
-      }
-
-      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
-        prev=line
-        have_prev=1
-        next
-      }
-
+      if (have_prev) { print prev; have_prev=0 }
+      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) { prev=line; have_prev=1; next }
       if (line ~ /\{[[:space:]]*"codestrap_preserve"[[:space:]]*:/) {
         print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
         print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
         in_preserve=1
-        preserve_level=depth
         next
       }
-
       print line
-      tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-
-      if (in_preserve && depth < preserve_level) {
+      if (in_preserve && line ~ /\][[:space:]]*\}[[:space:]]*(,)?[[:space:]]*$/) {
         print "  // END codestrap keybindings"
         in_preserve=0
       }
     }
-
-    END {
-      if (have_prev) { print prev }
-    }
+    END { if (have_prev) print prev }
   ' "$tmp_final" > "$tmp_with_comments"
 
   mv -f "$tmp_with_comments" "$KEYB_PATH"
@@ -684,7 +517,7 @@ JQ
   log "merged keybindings.json → $KEYB_PATH"
 }
 
-# ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
+# ===== extensions.json merge (no trailing commas) =====
 merge_codestrap_extensions(){
   REPO_EXT_SRC="${REPO_EXT_SRC:-$HOME/codestrap/extensions.json}"
   [ -f "$REPO_EXT_SRC" ] || { log "no repo extensions.json; skipping extensions merge"; return 0; }
@@ -692,20 +525,20 @@ merge_codestrap_extensions(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Load USER (allow comments only; no other repairs)
+  # Load USER (allow comments)
   tmp_user_json="$(mktemp)"
   if [ -f "$EXT_PATH" ]; then
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
       cp "$EXT_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
-      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
     fi
   else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
   fi
 
-  # Load REPO (allow comments only)
+  # Load REPO (allow comments)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
     cp "$REPO_EXT_SRC" "$tmp_repo_json"
@@ -714,73 +547,67 @@ merge_codestrap_extensions(){
     jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo extensions JSON invalid → $REPO_EXT_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
-  # Extract repo list (de-dup preserving order)
-  tmp_repo_list="$(mktemp)"
-  jq -r '.recommendations // [] | .[] | @json' "$tmp_repo_json" | awk '!seen[$0]++' > "$tmp_repo_list"
-  REPO_COUNT="$(wc -l < "$tmp_repo_list" | tr -d ' ')"
-
-  # Extract user extras (those NOT in repo list, preserving order)
-  tmp_user_extras="$(mktemp)"
+  # Build merged JSON (pure JSON first)
+  tmp_json_clean="$(mktemp)"
   jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" '
     def arr(v): if (v|type)=="array" then v else [] end;
     ( $r[0].recommendations // [] ) as $RR
     | ( $u[0].recommendations // [] ) as $UR
-    | [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ]
-  ' | jq -r '.[] | @json' > "$tmp_user_extras"
-  EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
+    | { recommendations:
+        ( ($RR | unique) + [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ] )
+      }
+  ' > "$tmp_json_clean"
 
-  # Compose final with inline comments around repo segment
+  # Now inject START/END comments inside the array, without creating trailing commas
   tmp_with_comments="$(mktemp)"
   {
     echo "{"
     echo '  "recommendations": ['
     echo '    // START codestrap extensions'
-
-    # repo items: add commas between elements, but…
-    # - if EXTRAS_COUNT == 0 → no trailing comma on the LAST repo item
-    # - if EXTRAS_COUNT > 0  → comma on ALL repo items (extras follow)
-    if [ "$REPO_COUNT" -gt 0 ]; then
-      idx=0
-      while IFS= read -r item; do
-        [ -n "$item" ] || { idx=$((idx+1)); continue; }
-        idx=$((idx+1))
-        if [ "$EXTRAS_COUNT" -gt 0 ]; then
-          # extras exist → always comma (since not final element overall)
-          echo "    $item,"
-        else
-          # no extras → comma only if not the last repo item
-          if [ "$idx" -lt "$REPO_COUNT" ]; then
-            echo "    $item,"
-          else
-            echo "    $item"
-          fi
-        fi
-      done < "$tmp_repo_list"
+    # print repo items exactly as they appear (deduped already)
+    count_repo="$(jq -r '.recommendations | length' "$tmp_repo_json" 2>/dev/null || echo 0)"
+    if [ "$count_repo" -gt 0 ]; then
+      # get repo recs unique, in order
+      jq -r '.recommendations // [] | .[]' "$tmp_repo_json" | awk '!seen[$0]++' | while IFS= read -r ext; do
+        [ -n "$ext" ] || continue
+        printf '    "%s",\n' "$ext"
+      done
     fi
-
     echo '    // END codestrap extensions'
+    # extras = merged - repo
+    jq -r '
+      def arr(v): if (v|type)=="array" then v else [] end;
+      .recommendations as $M
+      | input | .recommendations as $R
+      | [ $M[] | select( . as $x | ($R | index($x)) | not ) ] | .[]
+    ' "$tmp_json_clean" "$tmp_repo_json" | awk 'NF' | awk '{printf "    \"%s\",\n",$0}' >"$tmp_with_comments.tmp" || true
 
-    # user extras (no trailing comma on the last)
-    if [ "$EXTRAS_COUNT" -gt 0 ]; then
-      idx=0
-      while IFS= read -r item; do
-        [ -n "$item" ] || { idx=$((idx+1)); continue; }
-        idx=$((idx+1))
-        if [ "$idx" -lt "$EXTRAS_COUNT" ]; then
-          echo "    $item,"
-        else
-          echo "    $item"
-        fi
-      done < "$tmp_user_extras"
+    # We must avoid trailing comma before closing ]
+    if [ -s "$tmp_with_comments.tmp" ]; then
+      # remove last comma from the extras block
+      sed '$ s/,$//' "$tmp_with_comments.tmp"
+    else
+      # no extras: if last printed line (END comment) ended with a comma from repo loop,
+      # remove it by re-emitting the array body cleanly:
+      true
     fi
-
     echo "  ]"
     echo "}"
   } > "$tmp_with_comments"
 
+  # Final sanity: ensure JSONC parses after stripping comments
+  tmp_check="$(mktemp)"
+  strip_jsonc_to_json "$tmp_with_comments" >"$tmp_check" || true
+  if ! jq -e . "$tmp_check" >/dev/null 2>&1; then
+    CTX_TAG="[Bootstrap config]"; err "workspace extensions.json is malformed after merge; aborting to avoid data loss."; CTX_TAG=""
+    rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_json_clean" "$tmp_with_comments" "$tmp_with_comments.tmp" "$tmp_check" 2>/dev/null || true
+    return 1
+  fi
+  rm -f "$tmp_check" 2>/dev/null || true
+
   mv -f "$tmp_with_comments" "$EXT_PATH"
   chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_json_clean" "$tmp_with_comments.tmp" 2>/dev/null || true
   log "merged extensions.json → $EXT_PATH"
 }
 
@@ -835,7 +662,6 @@ in_file(){ needle="$1"; file="$2"; grep -F -x -q -- "$needle" "$file" 2>/dev/nul
 normalize_scope(){ case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in a|all) echo "all";; m|missing) echo "missing";; *) echo ""; esac; }
 
 extensions_cmd(){
-  # Parse flags
   MODE=""         # install scope: "", "all", "missing"
   UNMODE=""       # uninstall scope: "", "all", "missing"
   while [ $# -gt 0 ]; do
@@ -850,31 +676,19 @@ Usage:
   codestrap extensions -i missing|m
   codestrap extensions -u all|a
   codestrap extensions -u missing|m
-  # Combine:
-  codestrap extensions -i m -u m
-
-This uses extensions listed in your merged extensions.json at:
-  $WORKSPACE_DIR/config/extensions.json
 EHELP
         exit 0;;
       --install|-i)
         if [ "$1" = "-i" ]; then shift || true; MODE="$(normalize_scope "${1:-}")"; else shift || true; MODE="$(normalize_scope "${1:-}")"; fi
         [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install|-i' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
-      --install=*)
-        MODE="$(normalize_scope "${1#*=}")"
-        [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
-        ;;
+      --install=*) MODE="$(normalize_scope "${1#*=}")"; [ -n "$MODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--install' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; } ;;
       --uninstall|-u)
         if [ "$1" = "-u" ]; then shift || true; UNMODE="$(normalize_scope "${1:-}")"; else shift || true; UNMODE="$(normalize_scope "${1:-}")"; fi
         [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall|-u' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
         ;;
-      --uninstall=*)
-        UNMODE="$(normalize_scope "${1#*=}")"
-        [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; }
-        ;;
-      *)
-        CTX_TAG="[Extensions]"; err "Unknown flag for 'extensions': $1"; CTX_TAG=""; exit 1;;
+      --uninstall=*) UNMODE="$(normalize_scope "${1#*=}")"; [ -n "$UNMODE" ] || { CTX_TAG="[Extensions]"; err "Flag '--uninstall' requires <all|a|missing|m>"; CTX_TAG=""; exit 2; } ;;
+      *) CTX_TAG="[Extensions]"; err "Unknown flag for 'extensions': $1"; CTX_TAG=""; exit 1;;
     esac
     shift || true
   done
@@ -886,12 +700,10 @@ EHELP
   emit_recommended_exts >"$tmp_recs" || true
   emit_installed_exts >"$tmp_installed" || true
 
-  # Build sets
-  tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
-  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec" # in recs and installed
-  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended" # installed but NOT in recs
+  tmp_missing="$(mktemp)"; : >"$tmp_missing"
+  tmp_present_rec="$(mktemp)"; : >"$tmp_present_rec"
+  tmp_not_recommended="$(mktemp)"; : >"$tmp_not_recommended"
 
-  # Index installed for quick checks
   while IFS= read -r ext; do
     [ -n "$ext" ] || continue
     if in_file "$ext" "$tmp_recs"; then
@@ -915,33 +727,13 @@ EHELP
       all)
         if [ -s "$tmp_installed" ]; then
           log "uninstalling ALL installed extensions"
-          while IFS= read -r ext; do
-            [ -n "$ext" ] || continue
-            if uninstall_one_ext "$ext"; then
-              log "uninstalled ${ext}"
-            else
-              warn "failed to uninstall ${ext}"
-            fi
-          done <"$tmp_installed"
-        else
-          log "no installed extensions to uninstall"
-        fi
-        ;;
+          while IFS= read -r ext; do [ -n "$ext" ] || continue; uninstall_one_ext "$ext" && log "uninstalled ${ext}" || warn "failed to uninstall ${ext}"; done <"$tmp_installed"
+        else log "no installed extensions to uninstall"; fi;;
       missing)
         if [ -s "$tmp_not_recommended" ]; then
           log "uninstalling extensions not in recommendations (cleanup)"
-          while IFS= read -r ext; do
-            [ -n "$ext" ] || continue
-            if uninstall_one_ext "$ext"; then
-              log "uninstalled ${ext}"
-            else
-              warn "failed to uninstall ${ext}"
-            fi
-          done <"$tmp_not_recommended"
-        else
-          log "no non-recommended extensions to uninstall"
-        fi
-        ;;
+          while IFS= read -r ext; do [ -n "$ext" ] || continue; uninstall_one_ext "$ext" && log "uninstalled ${ext}" || warn "failed to uninstall ${ext}"; done <"$tmp_not_recommended"
+        else log "no non-recommended extensions to uninstall"; fi;;
     esac
     CTX_TAG=""
   }
@@ -953,107 +745,69 @@ EHELP
       missing)
         if [ -s "$tmp_missing" ]; then
           log "installing missing recommended extensions"
-          while IFS= read -r ext; do
-            [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "false"; then
-              log "installed ${ext}"
-            else
-              warn "failed to install ${ext}"
-            fi
-          done <"$tmp_missing"
-        else
-          log "no missing recommended extensions"
-        fi
-        ;;
+          while IFS= read -r ext; do [ -n "$ext" ] || continue; install_one_ext "$ext" "false" && log "installed ${ext}" || warn "failed to install ${ext}"; done <"$tmp_missing"
+        else log "no missing recommended extensions"; fi;;
       all)
         if [ -s "$tmp_missing" ]; then
           log "installing missing recommended extensions"
-          while IFS= read -r ext; do
-            [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "false"; then
-              log "installed ${ext}"
-            else
-              warn "failed to install ${ext}"
-            fi
-          done <"$tmp_missing"
-        else
-          log "no missing recommended extensions"
-        fi
+          while IFS= read -r ext; do [ -n "$ext" ] || continue; install_one_ext "$ext" "false" && log "installed ${ext}" || warn "failed to install ${ext}"; done <"$tmp_missing"
+        else log "no missing recommended extensions"; fi
         if [ -s "$tmp_present_rec" ]; then
           log "updating already-installed recommended extensions to latest"
-          while IFS= read -r ext; do
-            [ -n "$ext" ] || continue
-            if install_one_ext "$ext" "true"; then
-              log "updated ${ext}"
-            else
-              warn "failed to update ${ext}"
-            fi
-          done <"$tmp_present_rec"
-        else
-          log "no already-installed recommended extensions to update"
-        fi
-        ;;
+          while IFS= read -r ext; do [ -n "$ext" ] || continue; install_one_ext "$ext" "true" && log "updated ${ext}" || warn "failed to update ${ext}"; done <"$tmp_present_rec"
+        else log "no already-installed recommended extensions to update"; fi;;
     esac
     CTX_TAG=""
   }
 
   if [ -z "$MODE" ] && [ -z "$UNMODE" ]; then
-    # Interactive: pick action then scope
     PROMPT_TAG="[Extensions] ? "
     CTX_TAG="[Extensions]"
-
     act_raw="$(prompt_def "Action (install|uninstall) [install]: " "install")"
     act="$(printf "%s" "$act_raw" | tr '[:upper:]' '[:lower:]')"
-    case "$act" in
-      i|install|"") act="install" ;;
-      u|uninstall)  act="uninstall" ;;
-      *) log "unknown action '$act_raw' → defaulting to install"; act="install" ;;
-    esac
-
+    case "$act" in i|install|"") act="install";; u|uninstall) act="uninstall";; *) log "unknown action '$act_raw' → defaulting to install"; act="install";; esac
     if [ "$act" = "install" ]; then
-      scope_raw="$(prompt_def "Install scope (all|missing) [missing]: " "missing")"
-      MODE="$(normalize_scope "$scope_raw")"; [ -n "$MODE" ] || MODE="missing"
-      do_install "$MODE"
+      scope_raw="$(prompt_def "Install scope (all|missing) [missing]: " "missing")"; MODE="$(normalize_scope "$scope_raw")"; [ -n "$MODE" ] || MODE="missing"; do_install "$MODE"
     else
-      scope_raw="$(prompt_def "Uninstall scope (all|missing) [missing]: " "missing")"
-      UNMODE="$(normalize_scope "$scope_raw")"; [ -n "$UNMODE" ] || UNMODE="missing"
-      if [ "$UNMODE" = "all" ]; then
-        conf="$(prompt_def "This will remove ALL installed extensions. Continue? (y/N) " "n")"
-        [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }
-      fi
+      scope_raw="$(prompt_def "Uninstall scope (all|missing) [missing]: " "missing")"; UNMODE="$(normalize_scope "$scope_raw")"; [ -n "$UNMODE" ] || UNMODE="missing"
+      if [ "$UNMODE" = "all" ]; then conf="$(prompt_def "This will remove ALL installed extensions. Continue? (y/N) " "n")"; [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }; fi
       do_uninstall "$UNMODE"
     fi
-    PROMPT_TAG=""
-    CTX_TAG=""
+    PROMPT_TAG=""; CTX_TAG=""
   else
-    # Non-interactive: ALWAYS uninstall first (if requested), then install (if requested)
-    if [ -n "$UNMODE" ]; then do_uninstall "$UNMODE"; fi
-    if [ -n "$MODE" ]; then do_install "$MODE"; fi
+    [ -n "$UNMODE" ] && do_uninstall "$UNMODE"
+    [ -n "$MODE" ] && do_install "$MODE"
   fi
 
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
-# ===== workspace config folder (real files only; no symlinks) =====
+# ===== workspace config folder (convenience links in WORKSPACE_DIR) =====
 install_config_shortcuts(){
   local d="$WORKSPACE_DIR/config"
   local pre_exists="0"
   [ -d "$d" ] && pre_exists="1"
   ensure_dir "$d"
 
+  # Ensure REAL files exist in the official place (User/)
   [ -f "$SETTINGS_PATH" ] || printf '{}\n' >"$SETTINGS_PATH"
   [ -f "$TASKS_PATH"  ]   || printf '{}\n' >"$TASKS_PATH"
   [ -f "$KEYB_PATH"   ]   || printf '[]\n' >"$KEYB_PATH"
   [ -f "$EXT_PATH"    ]   || printf '{ "recommendations": [] }\n' >"$EXT_PATH"
 
-  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+  # Make convenience links at /config/workspace/config/*.json → User/*.json
+  mklink(){ src="$1"; dst="$2"; rm -f "$dst" 2>/dev/null || true; ln -s "$src" "$dst" 2>/dev/null || cp -f "$src" "$dst"; }
+  mklink "$SETTINGS_PATH" "$d/settings.json"
+  mklink "$TASKS_PATH"    "$d/tasks.json"
+  mklink "$KEYB_PATH"     "$d/keybindings.json"
+  mklink "$EXT_PATH"      "$d/extensions.json"
 
-  [ "$pre_exists" = "0" ] && log "created config folder in workspace" || true
+  chown -h "$PUID:$PGID" "$d" "$d/"* 2>/dev/null || true
+  [ "$pre_exists" = "0" ] && log "created config folder in workspace (convenience links)" || true
 }
 
 # ===== CLI helpers =====
 install_cli_shim(){
-  # System-wide install when root, else user-level install into ~/.local/bin
   if require_root; then
     mkdir -p /usr/local/bin
     cat >/usr/local/bin/codestrap <<'EOF'
@@ -1075,7 +829,6 @@ EOF
     echo "${CODESTRAP_VERSION:-0.3.9}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
   else
-    # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
@@ -1101,136 +854,145 @@ EOF
 bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
 
 # --- interactive GitHub flow ---
-bootstrap_interactive(){
-  GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
-  GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
-  GITHUB_NAME="$(read_or_env "GitHub name [${GITHUB_NAME:-${GITHUB_USERNAME:-}}]" GITHUB_NAME "${GITHUB_NAME:-${GITHUB_USERNAME:-}}")"
-  GITHUB_EMAIL="$(read_or_env "GitHub email (blank=auto)" GITHUB_EMAIL "")"
-  GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
-  GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required." >&2; exit 2; }
-  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required." >&2; exit 2; }
-  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
-  codestrap_run; log "bootstrap complete"
+resolve_email(){
+  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
+  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
+  PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
+  [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
+  VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
+  [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
+  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
+  PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
+  [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
+  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
 }
-
-bootstrap_env_only(){
-  ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
-  ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (env)." >&2; exit 2; }
-  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (env)." >&2; exit 2; }
-  export ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
-  codestrap_run; log "bootstrap complete (env)"
+git_upload_key(){
+  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GH_KEY_TITLE="${GH_KEY_TITLE:-codestrapped-code-server SSH Key}"
+  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
+  LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
+  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+  echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
+  RESP="$(curl -fsS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "{\"title\":\"$GH_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" https://api.github.com/user/keys || true)"
+  echo "$RESP" | grep -q '"id"' && log "SSH key added" || warn "Key upload failed: $(redact "$RESP")"
 }
-
-recompute_base(){
-  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
-  WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
-  ensure_dir "$WORKSPACE_DIR"
-  REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
-  REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
-  if [ -n "$REPOS_SUBDIR" ]; then
-    BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
+clone_one(){
+  spec="$1"; PULL="${2:-true}"
+  spec="$(echo "$spec" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"; [ -n "$spec" ] || return 0
+  repo="$spec"; branch=""
+  case "$spec" in *'#'*) branch="${spec#*#}"; repo="${spec%%#*}";; esac
+  case "$repo" in
+    *"git@github.com:"*) url="$repo"; name="$(basename "$repo" .git)";;
+    http*://github.com/*|ssh://git@github.com/*) name="$(basename "$repo" .git)"; owner_repo="$(echo "$repo" | sed -E 's#^https?://github\.com/##; s#^ssh://git@github\.com/##')"; owner_repo="${owner_repo%.git}"; url="git@github.com:${owner_repo}.git";;
+    */*) name="$(basename "$repo")"; url="git@github.com:${repo}.git";;
+    *) err "Invalid repo spec: '$spec'. Use owner/repo, owner/repo#branch, or a GitHub URL."; return 1;;
+  esac
+  dest="${BASE}/${name}"
+  safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
+  if [ -d "$dest/.git" ]; then
+    if [ "$(normalize_bool "$PULL")" = "true" ] && command -v git >/dev/null 2>&1; then
+      log "pull: ${name}"
+      git -C "$dest" fetch --all -p || warn "fetch failed for ${name}"
+      if [ -n "$branch" ]; then
+        git -C "$dest" checkout "$branch" || warn "checkout ${branch} failed for ${name}"
+        git -C "$dest" reset --hard "origin/${branch}" || warn "hard reset origin/${branch} failed for ${name}"
+      else
+        git -C "$dest" pull --ff-only || warn "pull --ff-only failed for ${name}"
+      fi
+    else
+      log "skip pull: ${name}"
+    fi
   else
-    BASE="${WORKSPACE_DIR}"
+    log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
+    if [ -n "$branch" ]; then git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
+    else git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
+    fi
   fi
-  ensure_dir "$BASE"
-  USER_DIR="${WORKSPACE_DIR}/config"
-  ensure_dir "$USER_DIR"
-  SETTINGS_PATH="$USER_DIR/settings.json"
-  TASKS_PATH="$USER_DIR/tasks.json"
-  KEYB_PATH="$USER_DIR/keybindings.json"
-  EXT_PATH="$USER_DIR/extensions.json"
+  chown -R "$PUID:$PGID" "$dest" || true
 }
 
-# --- interactive config flow (manual flow) ---
+codestrap_run(){
+  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+  GITHUB_NAME="${GITHUB_NAME:-${GITHUB_USERNAME:-}}"; GITHUB_EMAIL="${GITHUB_EMAIL:-}"
+  GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
+
+  validate_github_username
+  validate_github_token
+
+  git config --global init.defaultBranch main || true
+  git config --global pull.ff only || true
+  git config --global advice.detachedHead false || true
+  git config --global --add safe.directory "*"
+  git config --global user.name "${GITHUB_NAME:-codestrap}" || true
+  if [ -z "${GITHUB_EMAIL:-}" ]; then GITHUB_EMAIL="$(resolve_email || true)"; fi
+  git config --global user.email "$GITHUB_EMAIL" || true
+  log "identity: ${GITHUB_NAME:-} <${GITHUB_EMAIL:-}>"
+  umask 077
+  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GITHUB_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
+  touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
+  if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
+  git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
+  git_upload_key || true
+
+  if [ -n "${GITHUB_REPOS:-}" ]; then
+    IFS=,; set -- $GITHUB_REPOS; unset IFS
+    CLONE_ERRORS=0
+    for spec in "$@"; do
+      if ! clone_one "$spec" "$GITHUB_PULL"; then
+        CLONE_ERRORS=$((CLONE_ERRORS+1))
+      fi
+    done
+    if [ "$CLONE_ERRORS" -gt 0 ]; then
+      err "One or more repositories failed to clone ($CLONE_ERRORS failure(s)). Aborting."
+      exit 5
+    fi
+  else
+    log "GITHUB_REPOS empty; skip clone"
+  fi
+}
+
+# ===== hybrid config flow (interactive or flags) =====
+bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
+
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-    merge_codestrap_settings
-  else
-    log "skipped settings merge"
-  fi
-
-  if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-    merge_codestrap_keybindings
-  else
-    log "skipped keybindings merge"
-  fi
-
-  if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-    merge_codestrap_extensions
-  else
-    log "skipped extensions merge"
-  fi
-
+  if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
+  if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
+  if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
   install_config_shortcuts
   log "Bootstrap config completed"
-  PROMPT_TAG=""
-  CTX_TAG=""
+  PROMPT_TAG=""; CTX_TAG=""
 }
 
-# --- hybrid / flag-aware config flow ---
 config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-
-  # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
-    if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
-      merge_codestrap_settings
-    else
-      log "skipped settings merge"
-    fi
+    if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
   else
-    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-      merge_codestrap_settings
-    else
-      log "skipped settings merge"
-    fi
+    if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
   fi
 
-  # --keybindings
   if [ -n "${CFG_KEYB+x}" ]; then
-    if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then
-      merge_codestrap_keybindings
-    else
-      log "skipped keybindings merge"
-    fi
+    if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
   else
-    if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-      merge_codestrap_keybindings
-    else
-      log "skipped keybindings merge"
-    fi
+    if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
   fi
 
-  # --extensions
   if [ -n "${CFG_EXT+x}" ]; then
-    if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then
-      merge_codestrap_extensions
-    else
-      log "skipped extensions merge"
-    fi
+    if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
   else
-    if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
-      merge_codestrap_extensions
-    else
-      log "skipped extensions merge"
-    fi
+    if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
   fi
 
   install_config_shortcuts
   log "Bootstrap config completed"
-  PROMPT_TAG=""
-  CTX_TAG=""
+  PROMPT_TAG=""; CTX_TAG=""
 }
 
-# ===== github flags handler =====
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
-  # Clear any old values (so flags fully control when provided)
   unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -1249,8 +1011,6 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
     shift || true
   done
 
-  recompute_base
-
   if [ "$USE_ENV" = "true" ]; then
     ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
     ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
@@ -1265,9 +1025,15 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
     bootstrap_banner
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
-    bootstrap_interactive
-    PROMPT_TAG=""
-    CTX_TAG=""
+    GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
+    GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
+    GITHUB_NAME="$(read_or_env "GitHub name [${GITHUB_NAME:-${GITHUB_USERNAME:-}}]" GITHUB_NAME "${GITHUB_NAME:-${GITHUB_USERNAME:-}}")"
+    GITHUB_EMAIL="$(read_or_env "GitHub email (blank=auto)" GITHUB_EMAIL "")"
+    GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
+    GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
+    export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+    codestrap_run; log "bootstrap complete"
+    PROMPT_TAG=""; CTX_TAG=""
     return 0
   fi
 
@@ -1281,176 +1047,25 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
   CTX_TAG=""
 }
 
-# ===== top-level CLI entry with subcommands =====
-cli_entry(){
-
-  if [ $# -eq 0 ]; then
-    # Hub flow
-    if ! is_tty; then
-      echo "No TTY detected. Run a subcommand or provide flags. Examples:
-  codestrap github --auto
-  codestrap config
-  codestrap passwd
-" >&2
-      exit 3
-    fi
-
-    # Show banner BEFORE first hub question
-    bootstrap_banner()
-
-    # 1) GitHub?
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
-    if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
-      PROMPT_TAG="[Bootstrap GitHub] ? "
-      CTX_TAG="[Bootstrap GitHub]"
-      bootstrap_interactive
-      PROMPT_TAG=""
-      CTX_TAG=""
-    else
-      CTX_TAG="[Bootstrap GitHub]"
-      log "skipped bootstrap GitHub"
-      CTX_TAG=""
-    fi
-    # 2) Config?
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
-    if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
-      config_interactive
-    else
-      CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
-    fi
-
-    # 3) Password?  (no prefix on question; default YES)
-    if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
-    CTX_TAG="[Change password]"
-    if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then
-      password_change_interactive
-    else
-      log "skipped change password"
-    fi
-    PROMPT_TAG=""
-    CTX_TAG=""
-    exit 0
-  fi
-
-  # Subcommands
-  case "$1" in
-    -h|--help)    print_help; exit 0;;
-    -v|--version) print_version; exit 0;;
-    github)
-      shift || true
-      if [ $# -eq 0 ]; then
-        if is_tty; then
-          bootstrap_banner
-          PROMPT_TAG="[Bootstrap GitHub] ? "
-          CTX_TAG="[Bootstrap GitHub]"
-          bootstrap_interactive
-          PROMPT_TAG=""
-          CTX_TAG=""
-        else
-          echo "Use flags or --auto for non-interactive github flow."; exit 3
-        fi
-      else
-        bootstrap_from_args "$@"
-      fi
-      ;;
-    config)
-      shift || true
-      # Parse config flags
-      unset CFG_SETTINGS
-      unset CFG_KEYB
-      unset CFG_EXT
-      while [ $# -gt 0 ]; do
-        case "$1" in
-          -h|--help) print_help; exit 0;;
-          -s|--settings)
-            shift || true
-            CFG_SETTINGS="${1:-}"
-            [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; }
-            ;;
-          --settings=*)
-            CFG_SETTINGS="${1#*=}"
-            ;;
-          -k|--keybindings)
-            shift || true
-            CFG_KEYB="${1:-}"
-            [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; }
-            ;;
-          --keybindings=*)
-            CFG_KEYB="${1#*=}"
-            ;;
-          -e|--extensions)
-            shift || true
-            CFG_EXT="${1:-}"
-            [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; }
-            ;;
-          --extensions=*)
-            CFG_EXT="${1#*=}"
-            ;;
-          *)
-            CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
-        esac
-        shift || true
-      done
-
-      if is_tty; then
-        bootstrap_banner
-        config_hybrid
-      else
-        CTX_TAG="[Bootstrap config]"
-        # Non-interactive defaults to true unless explicitly set
-        if [ -n "${CFG_SETTINGS+x}" ]; then
-          if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
-        else
-          merge_codestrap_settings
-        fi
-        if [ -n "${CFG_KEYB+x}" ]; then
-          if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
-        else
-          merge_codestrap_keybindings
-        fi
-        if [ -n "${CFG_EXT+x}" ]; then
-          if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
-        else
-          merge_codestrap_extensions
-        fi
-        install_config_shortcuts
-        log "Bootstrap config completed"
-        CTX_TAG=""
-      fi
-      ;;
-    extensions)
-      shift || true
-      extensions_cmd "$@"
-      ;;
-    --auto|-a)
-      CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
-    passwd)
-      bootstrap_banner
-      CTX_TAG="[Change password]"
-      password_change_interactive
-      CTX_TAG=""
-      exit 0;;
-    *)
-      err "Unknown subcommand: $1"; print_help; exit 1;;
-  esac
-}
-
 # ===== autorun at container start (env-driven) =====
 autorun_env_if_present(){
-  if [ -n "${GITHUB_USERNAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ ! -f "$LOCK_FILE" ]; then
+  if [ -n "${GITHUB_USERNAME:-${GH_USERNAME:-}}" ] && [ -n "${GITHUB_TOKEN:-${GH_PAT:-}}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
+    # map alternate envs if used
+    GITHUB_USERNAME="${GITHUB_USERNAME:-${GH_USERNAME:-}}"
+    GITHUB_TOKEN="${GITHUB_TOKEN:-${GH_PAT:-}}"
+    export GITHUB_USERNAME GITHUB_TOKEN
     log "env present and no lock → running bootstrap"
     codestrap_run || exit $?
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
-    { [ -z "${GITHUB_USERNAME:-}" ] || [ -z "${GITHUB_TOKEN:-}" ] ; } && log "GITHUB_USERNAME/GITHUB_TOKEN missing → no autorun"
+    { [ -z "${GITHUB_USERNAME:-${GH_USERNAME:-}}" ] || [ -z "${GITHUB_TOKEN:-${GH_PAT:-}}" ] ; } && log "GITHUB_USERNAME/GITHUB_TOKEN missing → no autorun"
   fi
 }
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 autorun_install_extensions(){
-  # Normalize envs
-  inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
+  inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-${INSTALL_EXTENSIONS:-}}"   | tr '[:upper:]' '[:lower:]')"
   uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
 
   run_noninteractive(){
@@ -1480,10 +1095,15 @@ autorun_install_extensions(){
 # ===== entrypoint =====
 case "${1:-init}" in
   init)
-    configure_user_data_dir
     install_restart_gate
     install_cli_shim
     init_default_password
+
+    # CRITICAL: ensure /config/data → /config/workspace/config
+    force_user_data_dir_symlink
+    # any path under /config/data must be (re)computed now
+    recompute_user_paths
+
     merge_codestrap_settings
     merge_codestrap_keybindings
     merge_codestrap_extensions
@@ -1493,7 +1113,62 @@ case "${1:-init}" in
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
-    shift; cli_entry "$@";;
+    shift; # fallthrough to CLI hub/subcommands
+    # Very small CLI hub (only github/config/extensions/passwd)
+    if [ $# -eq 0 ]; then
+      if ! is_tty; then echo "No TTY detected. Run a subcommand or provide flags."; exit 3; fi
+      bootstrap_banner
+      if [ "$(prompt_yn "Bootstrap GitHub? (Y/n)" "y")" = "true" ]; then
+        PROMPT_TAG="[Bootstrap GitHub] ? "; CTX_TAG="[Bootstrap GitHub]"
+        GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="prompt"
+        GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="prompt"
+        GITHUB_NAME="$(read_or_env "GitHub name [${GITHUB_NAME:-${GITHUB_USERNAME:-}}]" GITHUB_NAME "${GITHUB_NAME:-${GITHUB_USERNAME:-}}")"
+        GITHUB_EMAIL="$(read_or_env "GitHub email (blank=auto)" GITHUB_EMAIL "")"
+        GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
+        GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
+        export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+        codestrap_run; log "bootstrap complete"
+      else
+        CTX_TAG="[Bootstrap GitHub]"; log "skipped bootstrap GitHub"; CTX_TAG=""
+      fi
+      if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then config_interactive; else CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""; fi
+      if [ "$(prompt_yn "Change password? (Y/n)" "y")" = "true" ]; then CTX_TAG="[Change password]"; password_change_interactive; CTX_TAG=""; else log "skipped change password"; fi
+      exit 0
+    fi
+    case "$1" in
+      github) shift || true; bootstrap_from_args "$@";;
+      config)
+        shift || true
+        unset CFG_SETTINGS CFG_KEYB CFG_EXT
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            -h|--help) print_help; exit 0;;
+            -s|--settings) shift || true; CFG_SETTINGS="${1:-}"; [ -n "${CFG_SETTINGS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--settings|-s' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
+            --settings=*) CFG_SETTINGS="${1#*=}" ;;
+            -k|--keybindings) shift || true; CFG_KEYB="${1:-}"; [ -n "${CFG_KEYB:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--keybindings|-k' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
+            --keybindings=*) CFG_KEYB="${1#*=}" ;;
+            -e|--extensions) shift || true; CFG_EXT="${1:-}"; [ -n "${CFG_EXT:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--extensions|-e' requires <true|false>"; CTX_TAG=""; exit 2; } ;;
+            --extensions=*) CFG_EXT="${1#*=}" ;;
+            *) CTX_TAG="[Bootstrap config]"; err "Unknown flag for 'config': $1"; CTX_TAG=""; print_help; exit 1;;
+          esac
+          shift || true
+        done
+        if is_tty; then bootstrap_banner; config_hybrid
+        else
+          CTX_TAG="[Bootstrap config]"
+          if [ -n "${CFG_SETTINGS+x}" ]; then [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ] && merge_codestrap_settings || log "skipped settings merge"; else merge_codestrap_settings; fi
+          if [ -n "${CFG_KEYB+x}" ]; then [ "$(normalize_bool "$CFG_KEYB")" = "true" ] && merge_codestrap_keybindings || log "skipped keybindings merge"; else merge_codestrap_keybindings; fi
+          if [ -n "${CFG_EXT+x}" ]; then [ "$(normalize_bool "$CFG_EXT")" = "true" ] && merge_codestrap_extensions || log "skipped extensions merge"; else merge_codestrap_extensions; fi
+          install_config_shortcuts
+          log "Bootstrap config completed"
+          CTX_TAG=""
+        fi
+        ;;
+      extensions) shift || true; extensions_cmd "$@";;
+      passwd) bootstrap_banner; CTX_TAG="[Change password]"; password_change_interactive; CTX_TAG="";;
+      *) err "Unknown subcommand: $1"; print_help; exit 1;;
+    esac
+    ;;
   *)
     if [ $# -gt 0 ]; then set -- cli "$@"; exec "$0" "$@"; else set -- init; exec "$0" "$@"; fi
     ;;
