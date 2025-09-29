@@ -27,20 +27,14 @@ services:
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
 
     volumes:
-      - code-config:/config1234567890
+      - code-config:/config123456789
       - code-config:/config
-      #- projects:/config/workspace
+      - projects:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
       - ./keybindings.json:/config/codestrap/keybindings.json:ro
       - ./extensions.json:/config/codestrap/extensions.json:ro
       - ./tasks.json:/config/codestrap/tasks.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
-
-      - ./00-link-settings.sh:/custom-cont-init.d/00-link-settings.sh:ro
-
-      - ${SETTINGS_FILE:-./runtime/settings.json}:/config/data/User/settings.json
-      - ${SETTINGS_FILE:-./runtime/settings.json}:/config/workspace/settings.json
-
     ports:
       - ":8443"
       #- "8443:8443"
@@ -48,4 +42,4 @@ services:
 
 volumes:
   code-config:
-  #projects:
+  projects:
