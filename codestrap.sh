@@ -508,6 +508,31 @@ codestrap_run(){
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
 
+# Return 0 if "stripped" file content (remove // and /* */) is empty/whitespace
+_jsonc_stripped_is_empty(){ # usage: _jsonc_stripped_is_empty <path>
+  [ -f "$1" ] || return 1
+  tmp="$(mktemp)"
+  strip_jsonc_to_json "$1" >"$tmp" || true
+  # remove whitespace to test emptiness
+  if [ -z "$(tr -d ' \t\r\n' <"$tmp")" ]; then rm -f "$tmp"; return 0; fi
+  rm -f "$tmp"
+  return 1
+}
+
+# If file is comments-only or empty, append a valid JSON literal to the real file
+ensure_valid_json_literal(){ # usage: ensure_valid_json_literal <path> <literal>
+  f="$1"; lit="$2"
+  if [ -f "$f" ]; then
+    if _jsonc_stripped_is_empty "$f"; then
+      # append literal at the end so existing comments remain intact
+      printf "\n%s\n" "$lit" >>"$f"
+      chown "${PUID}:${PGID}" "$f" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  return 1
+}
+
 write_inplace(){
   # usage: write_inplace <tmp_src> <dest_path>
   tmp="$1"; dest="$2"
@@ -567,8 +592,12 @@ merge_codestrap_settings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # --- USER settings: accept comments; if comments-only, append {} to the real file ---
   tmp_user_json="$(mktemp)"
   if [ -f "$SETTINGS_PATH" ]; then
+    # if comments-only, append {} to the file so it becomes valid JSON
+    ensure_valid_json_literal "$SETTINGS_PATH" "{}" || true
+
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
@@ -682,9 +711,12 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # USER
+  # ----- USER -----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
+    # if comments-only, append [] to the file so it becomes valid JSON
+    ensure_valid_json_literal "$KEYB_PATH" "[]" || true
+
     if [ ! -s "$KEYB_PATH" ]; then
       printf '[]\n' > "$tmp_user_json"
     else
@@ -704,7 +736,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # REPO
+  # ----- REPO -----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -720,7 +752,7 @@ merge_codestrap_keybindings(){
 
   PRESERVE_KEYB_JSON="$(read_preserve_array_json keybindings)"
 
-  # Compute applied (repo takes effect) and others (user-preserved + user extras)
+  # Compute which repo entries apply, and which entries we keep from user
   tmp_split="$(mktemp)"
   jq -n \
     --slurpfile U "$tmp_user_json" \
@@ -741,7 +773,7 @@ merge_codestrap_keybindings(){
             | select( ( ($pres | index($k)) and ($u_by_key[$k]? != null) ) | not )
             | $o ] ) as $applied
 
-      # others = user-preserved version (if repo has that key) + user extras
+      # others = user-preserved version (if repo has that key) + user-only extras
       | ( [ $U[] | select(is_kb) as $o
             | (kstr($o)) as $k
             | if ($r_by_key[$k]? != null)
@@ -751,6 +783,10 @@ merge_codestrap_keybindings(){
       | {applied:$applied, others:$others}
     ' > "$tmp_split"
 
+  # Materialize lists so we can loop without pipes (avoid subshells)
+  tmp_applied="$(mktemp)";  jq -c '.applied[]' "$tmp_split" >"$tmp_applied" 2>/dev/null || : 
+  tmp_others="$(mktemp)";   jq -c '.others[]'  "$tmp_split" >"$tmp_others"  2>/dev/null || : 
+
   tmp_out="$(mktemp)"
   {
     echo "["
@@ -759,21 +795,11 @@ merge_codestrap_keybindings(){
     print_obj_applied(){
       obj="$1"
       if [ $first -eq 0 ]; then printf ",\n"; fi
-      # pretty print then add the comment as the *second* line inside the object
+      # pretty print then add the comment as the second line inside the object
       printf "%s" "$obj" | jq '.' | awk '
         NR==1 { print; next }
-        NR==2 && $0 ~ /^[[:space:]]*"/ {
-          # if jq printed `{` on line 1, line 2 is the first property: insert comment before it
-          print "    //codestrap merged keybinding"
-          print
-          next
-        }
-        NR==2 && $0 ~ /^[[:space:]]*}$/ {
-          # empty object edge-case (unlikely for keybindings)
-          print "    //codestrap merged keybinding"
-          print
-          next
-        }
+        NR==2 && $0 ~ /^[[:space:]]*"/ { print "    //codestrap merged keybinding"; print; next }
+        NR==2 && $0 ~ /^[[:space:]]*}$/ { print "    //codestrap merged keybinding"; print; next }
         { print }
       '
       first=0
@@ -787,16 +813,16 @@ merge_codestrap_keybindings(){
     }
 
     # applied first
-    jq -c '.applied[]' "$tmp_split" 2>/dev/null | while IFS= read -r line; do
+    while IFS= read -r line; do
       [ -n "$line" ] || continue
       print_obj_applied "$line"
-    done
+    done <"$tmp_applied"
 
-    # then others
-    jq -c '.others[]' "$tmp_split" 2>/dev/null | while IFS= read -r line; do
+    # then preserved/extras
+    while IFS= read -r line; do
       [ -n "$line" ] || continue
       print_obj_plain "$line"
-    done
+    done <"$tmp_others"
 
     echo
     echo "]"
@@ -806,7 +832,7 @@ merge_codestrap_keybindings(){
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_split" "$tmp_out" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_split" "$tmp_applied" "$tmp_others" "$tmp_out" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
 
@@ -1416,7 +1442,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner()
+    bootstrap_banner
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
