@@ -812,22 +812,31 @@ merge_codestrap_extensions(){
       first=0
     done < "$tmp_repo_list"
 
-    # marker between sections (doesn't affect commas)
-    [ $first -eq 0 ] && printf "\n"
+    # If we printed at least one repo item and there WILL be extras,
+    # print the comma NOW so it's on the same line as the last repo item.
+    if [ $first -eq 0 ]; then
+      if [ -s "$tmp_user_extras" ]; then
+        printf ",\n"
+      else
+        printf "\n"
+      fi
+    fi
+
     echo '    // END codestrap extensions'
 
-    # then user extras (continue comma sequence)
+    # then user extras (own comma handling)
+    first_e=1
     while IFS= read -r item; do
       [ -n "$item" ] || continue
-      if [ $first -eq 0 ]; then
+      if [ $first_e -eq 0 ]; then
         printf ",\n"
       fi
       printf "    %s" "$item"
-      first=0
+      first_e=0
     done < "$tmp_user_extras"
 
     # close the array/object
-    [ $first -eq 0 ] && printf "\n"
+    [ $first -eq 0 -o $first_e -eq 0 ] && printf "\n"
     echo "  ]"
     echo "}"
   } > "$tmp_with_comments"
