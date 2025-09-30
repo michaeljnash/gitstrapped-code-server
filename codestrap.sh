@@ -189,6 +189,68 @@ MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
 ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
 
+# ===== external preserve store =====
+PRESERVE_MAIN="$HOME/codestrap/codestrap_preserve.json"
+PRESERVE_LINK="$USER_DIR/codestrap_preserve.json"
+
+read_preserve_array_json(){ # usage: read_preserve_array_json settings|keybindings
+  kind="$1"
+  [ -f "$PRESERVE_MAIN" ] || { echo '[]'; return 0; }
+  if jq -e . "$PRESERVE_MAIN" >/dev/null 2>&1; then
+    jq -c --arg k "$kind" '.[$k] // []' "$PRESERVE_MAIN" 2>/dev/null || echo '[]'
+  else
+    echo '[]'
+  fi
+}
+
+merge_preserve_files_union(){
+  # If both a user copy and a main copy exist (and are valid JSON), union arrays per key.
+  u="$1"; m="$2"; tmp="$(mktemp)"
+  if jq -e . "$u" >/dev/null 2>&1 && jq -e . "$m" >/dev/null 2>&1; then
+    jq -n --slurpfile U "$u" --slurpfile M "$m" '
+      def keys_all: ([$U[0]|keys[], $M[0]|keys[]] | add | unique);
+      def arr(x): if (x|type)=="array" then x else [] end;
+      reduce (keys_all[]) as $k ({}; .[$k] = ( (arr($U[0][$k]) + arr($M[0][$k])) | unique ))
+    ' >"$tmp" || cp -f "$m" "$tmp"
+    mv -f "$tmp" "$m"
+  else
+    # prefer the one that parses; otherwise create empty
+    if jq -e . "$u" >/dev/null 2>&1; then cp -f "$u" "$m"
+    elif jq -e . "$m" >/dev/null 2>&1; then : # keep main
+    else echo '{}' >"$m"
+    fi
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+ensure_preserve_store(){
+  ensure_dir "$(dirname "$PRESERVE_MAIN")"
+  ensure_dir "$USER_DIR"
+
+  # If neither exists, seed an empty object
+  if [ ! -e "$PRESERVE_MAIN" ] && [ ! -e "$PRESERVE_LINK" ]; then
+    printf '%s\n' '{ "settings": [], "keybindings": [] }' >"$PRESERVE_MAIN"
+    chown "${PUID}:${PGID}" "$PRESERVE_MAIN" 2>/dev/null || true
+  fi
+
+  # If a regular file exists in the user dir, migrate/merge it
+  if [ -e "$PRESERVE_LINK" ] && [ ! -L "$PRESERVE_LINK" ]; then
+    ensure_dir "$(dirname "$PRESERVE_MAIN")"
+    [ -e "$PRESERVE_MAIN" ] || printf '%s\n' '{}' >"$PRESERVE_MAIN"
+    merge_preserve_files_union "$PRESERVE_LINK" "$PRESERVE_MAIN"
+    rm -f "$PRESERVE_LINK" 2>/dev/null || true
+  fi
+
+  # Create/refresh symlink; if symlink creation fails (FS limitation), fall back to copy
+  if ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null; then
+    :
+  else
+    cp -f "$PRESERVE_MAIN" "$PRESERVE_LINK"
+  fi
+
+  chown -h "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || true
+}
+
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
 
@@ -499,7 +561,6 @@ merge_codestrap_settings(){
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
-      # user settings invalid → skip on init, exit on cli
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
         rm -f "$tmp_user_json" 2>/dev/null || true
@@ -517,7 +578,6 @@ merge_codestrap_settings(){
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
   else
-    # repo settings invalid → skip on init, exit on cli
     strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
@@ -527,6 +587,7 @@ merge_codestrap_settings(){
     fi
   fi
 
+  # managed keys bookkeeping from repo
   RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
@@ -534,26 +595,30 @@ merge_codestrap_settings(){
     OLD_KEYS_JSON='[]'
   fi
 
+  # get external preserve array (keys to preserve from user file)
+  PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
+
+  # ----- merge honoring external preserve -----
   tmp_merged="$(mktemp)"
   jq \
     --argjson repo "$(cat "$tmp_repo_json")" \
     --argjson rskeys "$RS_KEYS_JSON" \
-    --argjson oldkeys "$OLD_KEYS_JSON" '
+    --argjson oldkeys "$OLD_KEYS_JSON" \
+    --argjson pres "$PRESERVE_SETTINGS_JSON" '
       def arr(v): if (v|type)=="array" then v else [] end;
       def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
       (. // {}) as $user
-      | ($user.codestrap_preserve // []) as $pres
       | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
       | reduce $rskeys[] as $k (
           $user_without_repo;
           .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
         )
-      | .codestrap_preserve = arr($pres)
     ' "$tmp_user_json" > "$tmp_merged"
 
+  # managed snapshot (for future cleanups)
   tmp_managed="$(mktemp)"
   jq \
     --argjson ks "$RS_KEYS_JSON" '
@@ -561,28 +626,16 @@ merge_codestrap_settings(){
       | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
     ' "$tmp_merged" > "$tmp_managed"
 
-  tmp_rest="$(mktemp)"
-  jq --argjson ks "$RS_KEYS_JSON" '
-    def delKeys($o;$ks): reduce $ks[] as $k ($o; del(.[$k]));
-    delKeys(.; ($ks + ["codestrap_preserve"]))
-  ' "$tmp_merged" > "$tmp_rest"
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  preserve_json="$(jq -c '.codestrap_preserve // []' "$tmp_merged")"
-
-  # Build final JSON, then inject comments with correct END placement
+  # final (no in-file codestrap_preserve)
   tmp_final="$(mktemp)"
-  jq -n \
-    --argjson managed "$(cat "$tmp_managed")" \
-    --argjson preserve "$preserve_json" \
-    --argjson rest "$(cat "$tmp_rest")" '
-      $managed + {codestrap_preserve: $preserve} + $rest
-    ' | jq '.' > "$tmp_final"
+  jq '.' "$tmp_merged" > "$tmp_final"
 
+  # inject START/END comments only
   tmp_with_comments="$(mktemp)"
   {
     first_brace_done=0
-    in_preserve=0
-    depth=0
     while IFS= read -r line; do
       if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
         echo "$line"
@@ -590,40 +643,28 @@ merge_codestrap_settings(){
         first_brace_done=1
         continue
       fi
-      if [ $in_preserve -eq 1 ]; then
-        echo "$line"
-        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
-        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
-        depth=$((depth + inc - dec))
-        if [ "$depth" -le 0 ]; then
-          echo "  // END codestrap settings"
-          in_preserve=0
-        fi
-        continue
-      fi
-      if echo "$line" | grep -q '^[[:space:]]*"codestrap_preserve"[[:space:]]*:'; then
-        echo "  // codestrap_preserve - enter key names of codestrap merged settings here which you wish the codestrap script not to overwrite"
-        echo "$line"
-        inc=$(printf "%s" "$line" | tr -cd '[' | wc -c | tr -d ' ')
-        dec=$(printf "%s" "$line" | tr -cd ']' | wc -c | tr -d ' ')
-        depth=$((inc - dec))
-        if [ "$depth" -le 0 ]; then
-          echo "  // END codestrap settings"
-        else
-          in_preserve=1
-        fi
-        continue
-      fi
       echo "$line"
     done < "$tmp_final"
   } > "$tmp_with_comments"
 
+  # ensure END marker exists (append before last line)
+  if ! grep -q '// END codestrap settings' "$tmp_with_comments"; then
+    awk '
+      BEGIN{n=0}
+      {buf[++n]=$0}
+      END{
+        for(i=1;i<=n;i++){
+          if(i==n){ print "  // END codestrap settings" }
+          print buf[i]
+        }
+      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
+  fi
+
   write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
-  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -644,7 +685,6 @@ merge_codestrap_keybindings(){
       if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
         cp "$KEYB_PATH" "$tmp_user_json"
       else
-        # user keybindings invalid → skip on init, exit on cli
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
         if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
           rm -f "$tmp_user_json" 2>/dev/null || true
@@ -663,7 +703,6 @@ merge_codestrap_keybindings(){
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
   else
-    # repo keybindings invalid → skip on init, exit on cli
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
@@ -673,16 +712,21 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # ---- Merge arrays (honor codestrap_preserve) ----
+  # read external preserve array (keys to preserve)
+  PRESERVE_KEYB_JSON="$(read_preserve_array_json keybindings)"
+
+  # ---- Merge arrays (honor external preserve) ----
   tmp_final="$(mktemp)"
-  jq -n --slurpfile u "$tmp_user_json" --slurpfile r "$tmp_repo_json" "$(cat <<'JQ'
-def arr(v): if (v|type)=="array" then v else [] end;
-def is_kb: (type=="object") and (.key? != null);
-def kstr(x): (x.key|tostring);
+  jq -n \
+    --slurpfile u "$tmp_user_json" \
+    --slurpfile r "$tmp_repo_json" \
+    --argjson pres "$PRESERVE_KEYB_JSON" \
+'def arr(v): if (v|type)=="array" then v else [] end;
+ def is_kb: (type=="object") and (.key? != null);
+ def kstr(x): (x.key|tostring);
 
 ($u[0] | arr(.)) as $U
 | ($r[0] | arr(.)) as $R
-| ($U | map(select(type=="object" and has("codestrap_preserve")) | .codestrap_preserve) | last // []) as $pres
 | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
 | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
 | ($R
@@ -698,83 +742,31 @@ def kstr(x): (x.key|tostring);
             | (kstr($o)) as $k
             | select(($seen[$k]? // false)|not)
             | $o)) as $extras
-| ($managed + [ { "codestrap_preserve": $pres } ] + $extras)
-JQ
-  )" > "$tmp_final"
+| ($managed + $extras)
+' > "$tmp_final"
 
-  # ---- Inject comments with correct placement (busybox/mawk-safe) ----
+  # ---- Inject comments (no sentinel object) ----
   tmp_with_comments="$(mktemp)"
   awk '
-    BEGIN {
-      seen_array_start=0
-      have_prev=0
-      in_preserve=0
-      preserve_level=-1
-      depth=0
-    }
-
+    BEGIN{ started=0 }
     {
-      line = $0
-
-      if (!seen_array_start && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
-        print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
+      if (!started && $0 ~ /^[[:space:]]*\[[[:space:]]*$/) {
+        print $0
         print "  // START codestrap keybindings"
-        seen_array_start=1
+        started=1
         next
       }
-
-      if (have_prev && prev ~ /^[[:space:]]*\{[[:space:]]*$/ && line ~ /"codestrap_preserve"[[:space:]]*:/) {
-        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        print prev
-        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        in_preserve=1
-        preserve_level=depth
-        have_prev=0
-        next
-      }
-
-      if (have_prev) {
-        print prev
-        tmp=prev; opens=gsub(/\{/,"",tmp); tmp=prev; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        have_prev=0
-      }
-
-      if (line ~ /^[[:space:]]*\{[[:space:]]*$/) {
-        prev=line
-        have_prev=1
-        next
-      }
-
-      if (line ~ /\{[[:space:]]*"codestrap_preserve"[[:space:]]*:/) {
-        print "  // codestrap_preserve - enter key values of codestrap merged keybindings here which you wish the codestrap script not to overwrite"
-        print line
-        tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-        in_preserve=1
-        preserve_level=depth
-        next
-      }
-
-      print line
-      tmp=line; opens=gsub(/\{/,"",tmp); tmp=line; closes=gsub(/\}/,"",tmp); depth += (opens - closes)
-
-      if (in_preserve && depth < preserve_level) {
-        print "  // END codestrap keybindings"
-        in_preserve=0
-      }
+      print $0
     }
-
-    END {
-      if (have_prev) { print prev }
+    END{
+      if(started){ print "  // END codestrap keybindings" }
     }
   ' "$tmp_final" > "$tmp_with_comments"
 
   write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
 
@@ -1235,6 +1227,7 @@ recompute_base(){
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
+  ensure_preserve_store
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
@@ -1262,7 +1255,8 @@ config_interactive(){
 config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-
+  ensure_preserve_store
+  
   # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
     if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then
@@ -1483,6 +1477,7 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
+        ensure_preserve_store
         # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
@@ -1571,6 +1566,7 @@ case "${1:-init}" in
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
+    safe_run "[Preserve store]"          ensure_preserve_store
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_extensions
