@@ -25,13 +25,13 @@ services:
       PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS}
       INSTALL_EXTENSIONS: ${INSTALL_EXTENSIONS}
       UNINSTALL_EXTENSIONS: ${UNINSTALL_EXTENSIONS}
-      WORKSPACE_DIR: ${GIT_BASE_DIR:-/workspace}
+      WORKSPACE_DIR: ${GIT_BASE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${GIT_BASE_DIR:-/repos}
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
 
     volumes:
 #      - config:/config
-      - workspace:/workspace
+      - workspace:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
       - ./keybindings.json:/config/codestrap/keybindings.json:ro
       - ./extensions.json:/config/codestrap/extensions.json:ro
@@ -42,6 +42,6 @@ services:
       #- "8443:8443"
     restart: always
 
-#volumes:
+volumes:
 #  config:
   workspace:
