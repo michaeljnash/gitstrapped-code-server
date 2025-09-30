@@ -447,6 +447,44 @@ write_inplace(){
   fi
 }
 
+# ===== top-of-file error banner =====
+_banner_strip_first_if_error(){
+  # strip the first line if it is our banner
+  awk 'NR==1 && $0 ~ /^\/\/ CODESTRAP-ERROR:/ { next } { print }'
+}
+
+put_error_banner_with_hint(){ # usage: put_error_banner_with_hint <file> "<base-msg>" "<hint>"
+  file="$1"; shift; base="$1"; shift; hint="$*"
+  ensure_dir "$(dirname "$file")"
+  ts="$(date -u '+%Y-%m-%d %H:%M:%SZ')"
+  tmp="$(mktemp)"
+  {
+    printf '%s\n' "// CODESTRAP-ERROR: ${ts} - ${base} ***${hint}***"
+    [ -f "$file" ] && _banner_strip_first_if_error <"$file"
+  } >"$tmp"
+  write_inplace "$tmp" "$file"
+  rm -f "$tmp" 2>/dev/null || true
+}
+
+put_error_banner_this(){ # usage: put_error_banner_this <file> "<base-msg>"
+  put_error_banner_with_hint "$1" "$2" "Fix errors in this file and run \`codestrap config\` again!"
+}
+
+put_error_banner_repo(){ # usage: put_error_banner_repo <file> "<base-msg>" "<repo-kind>" "<repo-abs-path>"
+  # repo-kind examples: "repo settings.json", "repo keybindings.json", "repo extensions.json"
+  # repo-abs-path is the actual $REPO_*_SRC path we tried to read (already absolute via $HOME)
+  put_error_banner_with_hint "$1" "$2" "Fix errors in ${3} file or ${4} file and run \`codestrap config\` again!"
+}
+
+clear_error_banner(){ # usage: clear_error_banner <file>
+  file="$1"
+  [ -f "$file" ] || return 0
+  tmp="$(mktemp)"
+  _banner_strip_first_if_error <"$file" >"$tmp"
+  write_inplace "$tmp" "$file"
+  rm -f "$tmp" 2>/dev/null || true
+}
+
 # ===== settings.json merge =====
 merge_codestrap_settings(){
   [ -f "$REPO_SETTINGS_SRC" ] || { log "no repo settings.json; skipping settings merge"; return 0; }
@@ -465,7 +503,8 @@ merge_codestrap_settings(){
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
         rm -f "$tmp_user_json" 2>/dev/null || true
-        abort_or_continue "[Bootstrap config]" "user settings.json is malformed; skipping merge to avoid data loss."
+        put_error_banner_this "$SETTINGS_PATH" "user settings.json is malformed; skipped merge to avoid data loss."
+        abort_or_continue "[Bootstrap config]" "user settings.json is malformed; skipped merge to avoid data loss."
         return 0
       fi
     fi
@@ -482,7 +521,8 @@ merge_codestrap_settings(){
     strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-      abort_or_continue "[Bootstrap config]" "repo settings JSON invalid → $REPO_SETTINGS_SRC"
+      put_error_banner_repo "$SETTINGS_PATH" "repo settings JSON invalid → $REPO_SETTINGS_SRC; skipped merge." "repo settings.json" "$REPO_SETTINGS_SRC"
+      abort_or_continue "[Bootstrap config]" "repo settings JSON invalid → $REPO_SETTINGS_SRC; skipped merge."
       return 0
     fi
   fi
@@ -581,6 +621,7 @@ merge_codestrap_settings(){
   write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
+  clear_error_banner "$SETTINGS_PATH"
 
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_rest" "$tmp_final" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
@@ -607,7 +648,8 @@ merge_codestrap_keybindings(){
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
         if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
           rm -f "$tmp_user_json" 2>/dev/null || true
-          abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipping merge to avoid data loss."
+          put_error_banner_this "$KEYB_PATH" "user keybindings.json is malformed; skipped merge to avoid data loss."
+          abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipped merge to avoid data loss."
           return 0
         fi
       fi
@@ -625,7 +667,8 @@ merge_codestrap_keybindings(){
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-      abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC"
+      put_error_banner_repo "$KEYB_PATH" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge." "repo keybindings.json" "$REPO_KEYB_SRC"
+      abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge."
       return 0
     fi
   fi
@@ -730,6 +773,7 @@ JQ
 
   write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
+  clear_error_banner "$KEYB_PATH"
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
@@ -759,7 +803,8 @@ merge_codestrap_extensions(){
       _strip_jsonc_trailing "$EXT_PATH" > "$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
         rm -f "$tmp_user_json" 2>/dev/null || true
-        abort_or_continue "[Bootstrap config]" "user extensions.json is malformed; skipping merge to avoid data loss."
+        put_error_banner_this "$EXT_PATH" "user extensions.json is malformed; skipped merge to avoid data loss."
+        abort_or_continue "[Bootstrap config]" "user extensions.json is malformed; skipped merge to avoid data loss."
         return 0
       fi
     fi
@@ -776,7 +821,8 @@ merge_codestrap_extensions(){
     _strip_jsonc_trailing "$REPO_EXT_SRC" > "$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-      abort_or_continue "[Bootstrap config]" "repo extensions JSON invalid → $REPO_EXT_SRC"
+      put_error_banner_repo "$EXT_PATH" "repo extensions JSON invalid → $REPO_EXT_SRC; skipped merge." "repo extensions.json" "$REPO_EXT_SRC"
+      abort_or_continue "[Bootstrap config]" "repo extensions JSON invalid → $REPO_EXT_SRC; skipped merge."
       return 0
     fi
   fi
@@ -844,7 +890,7 @@ merge_codestrap_extensions(){
   # Write result (preserve inode to keep watchers alive)
   write_inplace "$tmp_with_comments" "$EXT_PATH"
   chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
-
+  clear_error_banner "$EXT_PATH"
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" "$tmp_with_comments" 2>/dev/null || true
   log "merged extensions.json → $EXT_PATH"
 }
