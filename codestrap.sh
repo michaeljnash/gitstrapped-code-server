@@ -683,25 +683,32 @@ merge_codestrap_extensions(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # Load USER (allow comments only; no other repairs)
+  # --- helper: strip JSONC & trailing commas ---
+  _strip_jsonc_trailing(){
+    # removes //... and /*...*/ then trims trailing commas before ] or }
+    sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1" \
+    | sed -E ':a; s/,\s*([}\]])/\1/g; ta'
+  }
+
+  # Load USER (allow comments + trailing commas; validate after repair)
   tmp_user_json="$(mktemp)"
   if [ -f "$EXT_PATH" ]; then
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
       cp "$EXT_PATH" "$tmp_user_json"
     else
-      strip_jsonc_to_json "$EXT_PATH" >"$tmp_user_json" || true
+      _strip_jsonc_trailing "$EXT_PATH" > "$tmp_user_json" || true
       jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
     fi
   else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
   fi
 
-  # Load REPO (allow comments only)
+  # Load REPO (allow comments + trailing commas; validate after repair)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
     cp "$REPO_EXT_SRC" "$tmp_repo_json"
   else
-    strip_jsonc_to_json "$REPO_EXT_SRC" >"$tmp_repo_json" || true
+    _strip_jsonc_trailing "$REPO_EXT_SRC" > "$tmp_repo_json" || true
     jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo extensions JSON invalid → $REPO_EXT_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
   fi
 
@@ -718,41 +725,49 @@ merge_codestrap_extensions(){
     | [ $UR[] | select( . as $x | ($RR | index($x)) | not ) ]
   ' | jq -r '.[] | @json' > "$tmp_user_extras"
 
-  # Compose final with inline comments around repo segment (no preserve needed)
+  # Compose final WITH inline comments around repo segment, but NEVER emit trailing commas.
   tmp_with_comments="$(mktemp)"
   {
     echo "{"
     echo '  "recommendations": ['
-    # START comment
     echo '    // START codestrap extensions'
-    # repo items
-    REPO_COUNT=0
+
+    first=1
+    # repo items first
     while IFS= read -r item; do
       [ -n "$item" ] || continue
-      echo "    $item,"
-      REPO_COUNT=$((REPO_COUNT+1))
-    done < "$tmp_repo_list"
-    # END comment just after repo segment
-    echo '    // END codestrap extensions'
-    # user extras (no trailing comma on last)
-    EXTRAS_COUNT="$(wc -l < "$tmp_user_extras" | tr -d ' ')"
-    idx=0
-    while IFS= read -r item; do
-      [ -n "$item" ] || { idx=$((idx+1)); continue; }
-      idx=$((idx+1))
-      if [ "$idx" -lt "$EXTRAS_COUNT" ]; then
-        echo "    $item,"
-      else
-        echo "    $item"
+      if [ $first -eq 0 ]; then
+        printf ",\n"
       fi
+      printf "    %s" "$item"
+      first=0
+    done < "$tmp_repo_list"
+
+    # marker between sections (doesn't affect commas)
+    [ $first -eq 0 ] && printf "\n"
+    echo '    // END codestrap extensions'
+
+    # then user extras (continue comma sequence)
+    while IFS= read -r item; do
+      [ -n "$item" ] || continue
+      if [ $first -eq 0 ]; then
+        printf ",\n"
+      fi
+      printf "    %s" "$item"
+      first=0
     done < "$tmp_user_extras"
+
+    # close the array/object
+    [ $first -eq 0 ] && printf "\n"
     echo "  ]"
     echo "}"
   } > "$tmp_with_comments"
 
+  # Write result (preserve inode to keep watchers alive)
   write_inplace "$tmp_with_comments" "$EXT_PATH"
   chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" 2>/dev/null || true
+
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" "$tmp_with_comments" 2>/dev/null || true
   log "merged extensions.json → $EXT_PATH"
 }
 
