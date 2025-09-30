@@ -30,7 +30,7 @@ services:
       GH_KEY_TITLE: ${GH_KEY_TITLE:-codestrap-code-server SSH Key}
 
     volumes:
-#      - config:/config
+      - config:/config
       - workspace:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
       - ./keybindings.json:/config/codestrap/keybindings.json:ro
@@ -43,5 +43,5 @@ services:
     restart: always
 
 volumes:
-#  config:
+  config:
   workspace:
