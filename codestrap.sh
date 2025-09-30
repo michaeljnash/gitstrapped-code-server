@@ -604,18 +604,15 @@ merge_codestrap_settings(){
 
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
-      | (arr($P[0])) as $PRES    # keys to preserve from user
-
-      # Ordered list of repo keys
+      | (arr($P[0])) as $PRES    # keys to preserve from user (array of strings)
       | ($RO | keys) as $RK
 
-      # Build the "managed" (repo-defined) part, in repo order,
-      # choosing user value when preserved+exists, else repo value.
+      # Repo keys first, respecting preserve (use user value if preserved+exists)
       | reduce $RK[] as $k (
           {};
           . + {
             ($k):
-              if (($PRES | index($k)) and ($UO | has($k))) then
+              if ((($PRES | index($k)) != null) and ($UO | has($k))) then
                 $UO[$k]
               else
                 $RO[$k]
@@ -623,7 +620,7 @@ merge_codestrap_settings(){
           }
         ) as $MANAGED
 
-      # Add remaining user keys not in repo list
+      # Then user keys not defined by repo
       | ($UO | to_entries | map(select( ($RK | index(.key)) | not ))) as $UREST
       | ($MANAGED + ( $UREST | from_entries ))
     ' > "$tmp_merged"
@@ -641,8 +638,10 @@ merge_codestrap_settings(){
       | (obj($R[0])) as $RO
       | (arr($P[0])) as $PRES
       | ($RO | keys) as $RK
+
+      # Pick only those repo keys we actually took from repo (i.e., NOT preserved)
       | [ $RK[]
-          | select( not (($PRES | index(.)) and ($UO | has(.))) )
+          | select( ( ((($PRES | index(.)) != null) and ($UO | has(.))) | not ) )
         ]
     ' > "$tmp_repo_merged_keys"
 
@@ -662,9 +661,8 @@ merge_codestrap_settings(){
     }
     {
       line=$0
-      # Match top-level key lines (2 spaces then "key":
+      # jq pretty-print uses 2-space indent for top-level keys
       if (match(line,/^[[:space:]]{2}"/)) {
-        # extract the JSON key token between first quotes
         key=line
         sub(/^[[:space:]]*"/,"",key)
         sub(/".*/,"",key)
@@ -784,8 +782,10 @@ merge_codestrap_keybindings(){
   awk '
     {
       if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
-        indent = gensub(/(^[[:space:]]*).*/, "\\1", 1, $0)
-        print indent "//codestrap merged keybinding"
+        # portable indent capture
+        match($0,/^[[:space:]]*/);
+        indent=substr($0,1,RLENGTH);
+        print indent "//codestrap merged keybinding";
         next
       }
       print $0
