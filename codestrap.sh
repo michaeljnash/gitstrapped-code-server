@@ -555,8 +555,6 @@ merge_codestrap_settings(){
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
   tmp_user_json="$(mktemp)"
-
-  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -570,10 +568,9 @@ merge_codestrap_settings(){
       fi
     fi
   else
-    printf '{}\n' >"$tmp_user_json"
+    printf '{}\n' > "$tmp_user_json"
   fi
 
-  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -587,84 +584,104 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # managed keys bookkeeping from repo
+  # managed keys bookkeeping (ordered by repo file)
   RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
-  if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
-    OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
-  else
-    OLD_KEYS_JSON='[]'
-  fi
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE" 2>/dev/null || true
+  chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  # get external preserve array (keys to preserve from user file)
-  PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
+  # external preserve list → temp file so we can --slurpfile it
+  tmp_preserve="$(mktemp)"
+  printf '%s\n' "$(read_preserve_array_json settings)" > "$tmp_preserve"
 
-  # ----- merge honoring external preserve -----
+  # 1) Build merged object (repo keys first; respect preserve)
   tmp_merged="$(mktemp)"
-  jq \
-    --argjson repo "$(cat "$tmp_repo_json")" \
-    --argjson rskeys "$RS_KEYS_JSON" \
-    --argjson oldkeys "$OLD_KEYS_JSON" \
-    --argjson pres "$PRESERVE_SETTINGS_JSON" '
-      def arr(v): if (v|type)=="array" then v else [] end;
-      def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
-      def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
+  jq -n \
+    --slurpfile U "$tmp_user_json" \
+    --slurpfile R "$tmp_repo_json" \
+    --slurpfile P "$tmp_preserve" '
+      def obj(x): if (x|type)=="object" then x else {} end;
+      def arr(x): if (x|type)=="array" then x else [] end;
 
-      (. // {}) as $user
-      | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
-      | (delKeys($tmp_user; $rskeys)) as $user_without_repo
-      | reduce $rskeys[] as $k (
-          $user_without_repo;
-          .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
-        )
-    ' "$tmp_user_json" > "$tmp_merged"
+      (obj($U[0])) as $UO
+      | (obj($R[0])) as $RO
+      | (arr($P[0])) as $PRES    # keys to preserve from user
 
-  # managed snapshot (for future cleanups)
-  tmp_managed="$(mktemp)"
-  jq \
-    --argjson ks "$RS_KEYS_JSON" '
-      . as $src
-      | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
-    ' "$tmp_merged" > "$tmp_managed"
+      # Ordered list of repo keys
+      | ($RO | keys) as $RK
 
-  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
+      # Build the "managed" (repo-defined) part, in repo order,
+      # choosing user value when preserved+exists, else repo value.
+      | reduce $RK[] as $k (
+          {};
+          . + {
+            ($k):
+              if (($PRES | index($k)) and ($UO | has($k))) then
+                $UO[$k]
+              else
+                $RO[$k]
+              end
+          }
+        ) as $MANAGED
 
-  # final (no in-file codestrap_preserve)
-  tmp_final="$(mktemp)"
-  jq '.' "$tmp_merged" > "$tmp_final"
+      # Add remaining user keys not in repo list
+      | ($UO | to_entries | map(select( ($RK | index(.key)) | not ))) as $UREST
+      | ($MANAGED + ( $UREST | from_entries ))
+    ' > "$tmp_merged"
 
-  # inject START/END comments only
-  tmp_with_comments="$(mktemp)"
-  {
-    first_brace_done=0
-    while IFS= read -r line; do
-      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
-        echo "$line"
-        echo "  // START codestrap settings"
-        first_brace_done=1
-        continue
-      fi
-      echo "$line"
-    done < "$tmp_final"
-  } > "$tmp_with_comments"
+  # 2) Compute which repo keys actually came **from repo** (not preserved)
+  tmp_repo_merged_keys="$(mktemp)"
+  jq -n \
+    --slurpfile U "$tmp_user_json" \
+    --slurpfile R "$tmp_repo_json" \
+    --slurpfile P "$tmp_preserve" '
+      def obj(x): if (x|type)=="object" then x else {} end;
+      def arr(x): if (x|type)=="array" then x else [] end;
 
-  # ensure END marker exists (append before last line)
-  if ! grep -q '// END codestrap settings' "$tmp_with_comments"; then
-    awk '
-      BEGIN{n=0}
-      {buf[++n]=$0}
-      END{
-        for(i=1;i<=n;i++){
-          if(i==n){ print "  // END codestrap settings" }
-          print buf[i]
+      (obj($U[0])) as $UO
+      | (obj($R[0])) as $RO
+      | (arr($P[0])) as $PRES
+      | ($RO | keys) as $RK
+      | [ $RK[]
+          | select( not (($PRES | index(.)) and ($UO | has(.))) )
+        ]
+    ' > "$tmp_repo_merged_keys"
+
+  # 3) Pretty print merged
+  tmp_pretty="$(mktemp)"
+  jq '.' "$tmp_merged" > "$tmp_pretty"
+
+  # 4) Append inline comment to lines with those repo-merged keys (top-level only)
+  tmp_annotated="$(mktemp)"
+  awk -v KSFILE="$tmp_repo_merged_keys" '
+    BEGIN{
+      while((getline k < KSFILE)>0){
+        gsub(/\r/,"",k);
+        if(k!=""){ seen[k]=1 }
+      }
+      close(KSFILE)
+    }
+    {
+      line=$0
+      # Match top-level key lines (2 spaces then "key":
+      if (match(line,/^[[:space:]]{2}"/)) {
+        # extract the JSON key token between first quotes
+        key=line
+        sub(/^[[:space:]]*"/,"",key)
+        sub(/".*/,"",key)
+        if (key in seen) {
+          print line " //codestrap merged setting"
+          next
         }
-      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
-  fi
+      }
+      print line
+    }
+  ' "$tmp_pretty" > "$tmp_annotated"
 
-  write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
+  write_inplace "$tmp_annotated" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" "$tmp_merged" "$tmp_repo_merged_keys" "$tmp_pretty" "$tmp_annotated" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -676,7 +693,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER (allow JSONC comments; no other repairs) ----
+  # ---- Load USER ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -698,7 +715,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO (allow JSONC comments; no other repairs) ----
+  # ---- Load REPO ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -712,61 +729,74 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # read external preserve array (keys to preserve)
-  PRESERVE_KEYB_JSON="$(read_preserve_array_json keybindings)"
+  # external preserve list → temp file
+  tmp_preserve="$(mktemp)"
+  printf '%s\n' "$(read_preserve_array_json keybindings)" > "$tmp_preserve"
 
-  # ---- Merge arrays (honor external preserve) ----
-  tmp_final="$(mktemp)"
+  # 1) Build merged array with marker on repo-sourced objects
+  tmp_merged="$(mktemp)"
   jq -n \
-    --slurpfile u "$tmp_user_json" \
-    --slurpfile r "$tmp_repo_json" \
-    --argjson pres "$PRESERVE_KEYB_JSON" \
-'def arr(v): if (v|type)=="array" then v else [] end;
- def is_kb: (type=="object") and (.key? != null);
- def kstr(x): (x.key|tostring);
+    --slurpfile U "$tmp_user_json" \
+    --slurpfile R "$tmp_repo_json" \
+    --slurpfile P "$tmp_preserve" '
+      def arr(x): if (x|type)=="array" then x else [] end;
+      def is_kb: (type=="object") and (.key? != null);
+      def kstr(x): (x.key|tostring);
 
-($u[0] | arr(.)) as $U
-| ($r[0] | arr(.)) as $R
-| ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
-| ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
-| ($R
-    | map(select(is_kb) as $o
-          | (kstr($o)) as $k
-          | if (($pres | index($k)) and ($u_by_key[$k]? != null))
-            then $u_by_key[$k]
-            else $o
-            end)
-  ) as $managed
-| ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
-| ($U | map(select(is_kb) as $o
-            | (kstr($o)) as $k
-            | select(($seen[$k]? // false)|not)
-            | $o)) as $extras
-| ($managed + $extras)
-' > "$tmp_final"
+      (arr($U[0])) as $U
+      | (arr($R[0])) as $R
+      | (arr($P[0])) as $PRES
 
-  # ---- Inject comments (no sentinel object) ----
-  tmp_with_comments="$(mktemp)"
+      # Build maps by key for quick lookup
+      | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
+      | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
+
+      # Repo list first, with choice (preserved user vs repo). When repo chosen, insert marker prop first.
+      | ($R
+          | map(select(is_kb) as $o
+                | (kstr($o)) as $k
+                | if (($PRES | index($k)) and ($u_by_key[$k]? != null))
+                  then $u_by_key[$k]
+                  else ( { "__codestrapMerged": true } + $o )
+                  end)
+        ) as $managed
+
+      # Add user extras (keys not already present)
+      | ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
+      | ($U
+          | map(select(is_kb) as $o
+                | (kstr($o)) as $k
+                | select(($seen[$k]? // false)|not)
+                | $o)
+        ) as $extras
+
+      | ($managed + $extras)
+    ' > "$tmp_merged"
+
+  # 2) Pretty print
+  tmp_pretty="$(mktemp)"
+  jq '.' "$tmp_merged" > "$tmp_pretty"
+
+  # 3) Convert the marker property line into a comment INSIDE each object
+  #    Line will look like:    ".__codestrapMerged": true,
+  #    We replace the *entire line* with:    //codestrap merged keybinding
+  tmp_annotated="$(mktemp)"
   awk '
-    BEGIN{ started=0 }
     {
-      if (!started && $0 ~ /^[[:space:]]*\[[[:space:]]*$/) {
-        print $0
-        print "  // START codestrap keybindings"
-        started=1
+      if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
+        indent = gensub(/(^[[:space:]]*).*/, "\\1", 1, $0)
+        print indent "//codestrap merged keybinding"
         next
       }
       print $0
     }
-    END{
-      if(started){ print "  // END codestrap keybindings" }
-    }
-  ' "$tmp_final" > "$tmp_with_comments"
+  ' "$tmp_pretty" > "$tmp_annotated"
 
-  write_inplace "$tmp_with_comments" "$KEYB_PATH"
+  write_inplace "$tmp_annotated" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
+
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" "$tmp_merged" "$tmp_pretty" "$tmp_annotated" 2>/dev/null || true
   log "merged keybindings.json → $KEYB_PATH"
 }
 
