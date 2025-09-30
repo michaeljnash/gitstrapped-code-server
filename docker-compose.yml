@@ -6,7 +6,7 @@ services:
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
-      INSTALL_PACKAGES: argon2 inotify-tools #jq curl git python3-venv
+      INSTALL_PACKAGES: argon2 jq #curl git python3-venv
       PUID: ${PUID:-1000}
       PGID: ${PGID:-1000}
       TZ: ${TZ:-Etc/UTC}
