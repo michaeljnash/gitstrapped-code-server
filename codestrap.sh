@@ -18,6 +18,47 @@ log(){  printf "%s %s\n" "${CTX_TAG:-[codestrap]}" "$*"; }
 warn(){ printf "%s\n" "$(ylw "${CTX_TAG:-[codestrap]}[WARN] $*")" >&2; }
 err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
 
+# ----- run-mode + generic helpers -----
+# Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
+RUN_MODE="${RUN_MODE:-cli}"
+
+# Run a step safely: in CLI, exit on failure; in INIT, log + continue.
+safe_run(){ # usage: safe_run "<ctx-tag>" <command> [args...]
+  _ctx="$1"; shift
+  CTX_TAG="$_ctx"
+  if ! "$@"; then
+    if [ "$RUN_MODE" = "cli" ]; then
+      err "step failed: $*"
+      CTX_TAG=""
+      exit 1
+    else
+      err "step failed (continuing): $*"
+      CTX_TAG=""
+      return 0
+    fi
+  fi
+  CTX_TAG=""
+}
+
+# Use this *inside* functions when you detect a condition that should
+# abort the current function:
+#  - CLI: print error and exit 1
+#  - INIT: print error and return 0 (so caller continues)
+abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
+  _ctx="${1:-[codestrap]}"; shift || true
+  _msg="$*"
+  CTX_TAG="$_ctx"
+  if [ "$RUN_MODE" = "cli" ]; then
+    err "$_msg"
+    CTX_TAG=""
+    exit 1
+  else
+    err "$_msg"
+    CTX_TAG=""
+    return 0
+  fi
+}
+
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
@@ -348,8 +389,14 @@ codestrap_run(){
   GITHUB_NAME="${GITHUB_NAME:-${GITHUB_USERNAME:-}}"; GITHUB_EMAIL="${GITHUB_EMAIL:-}"
   GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
 
-  validate_github_username
-  validate_github_token
+  if ! validate_github_username; then
+    abort_or_continue "[Bootstrap GitHub]" "GitHub username validation failed."
+    return 0
+  fi
+  if ! validate_github_token; then
+    abort_or_continue "[Bootstrap GitHub]" "GitHub token validation failed."
+    return 0
+  fi
 
   git config --global init.defaultBranch main || true
   git config --global pull.ff only || true
@@ -375,8 +422,8 @@ codestrap_run(){
       fi
     done
     if [ "$CLONE_ERRORS" -gt 0 ]; then
-      err "One or more repositories failed to clone ($CLONE_ERRORS failure(s)). Aborting."
-      exit 5
+      abort_or_continue "[Bootstrap GitHub]" "One or more repositories failed to clone ($CLONE_ERRORS)."
+      return 0
     fi
   else
     log "GITHUB_REPOS empty; skip clone"
@@ -414,11 +461,12 @@ merge_codestrap_settings(){
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
     else
+      # user settings invalid → skip on init, exit on cli
       strip_jsonc_to_json "$SETTINGS_PATH" >"$tmp_user_json" || true
       if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-        CTX_TAG="[Bootstrap config]"; err "user settings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""
         rm -f "$tmp_user_json" 2>/dev/null || true
-        return 1
+        abort_or_continue "[Bootstrap config]" "user settings.json is malformed; skipping merge to avoid data loss."
+        return 0
       fi
     fi
   else
@@ -430,11 +478,12 @@ merge_codestrap_settings(){
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
   else
+    # repo settings invalid → skip on init, exit on cli
     strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
-      CTX_TAG="[Bootstrap config]"; err "repo settings JSON invalid → $REPO_SETTINGS_SRC"; CTX_TAG=""
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
-      exit 6
+      abort_or_continue "[Bootstrap config]" "repo settings JSON invalid → $REPO_SETTINGS_SRC"
+      return 0
     fi
   fi
 
@@ -554,8 +603,13 @@ merge_codestrap_keybindings(){
       if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
         cp "$KEYB_PATH" "$tmp_user_json"
       else
+        # user keybindings invalid → skip on init, exit on cli
         strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-        jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user keybindings.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+          rm -f "$tmp_user_json" 2>/dev/null || true
+          abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipping merge to avoid data loss."
+          return 0
+        fi
       fi
     fi
   else
@@ -567,8 +621,13 @@ merge_codestrap_keybindings(){
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
   else
+    # repo keybindings invalid → skip on init, exit on cli
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
-    jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo keybindings JSON invalid → $REPO_KEYB_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+      abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC"
+      return 0
+    fi
   fi
 
   # ---- Merge arrays (honor codestrap_preserve) ----
@@ -696,8 +755,13 @@ merge_codestrap_extensions(){
     if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
       cp "$EXT_PATH" "$tmp_user_json"
     else
+      # user extensions invalid → skip on init, exit on cli
       _strip_jsonc_trailing "$EXT_PATH" > "$tmp_user_json" || true
-      jq -e . "$tmp_user_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "user extensions.json is malformed; aborting merge to avoid data loss."; CTX_TAG=""; rm -f "$tmp_user_json"; return 1; }
+      if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+        rm -f "$tmp_user_json" 2>/dev/null || true
+        abort_or_continue "[Bootstrap config]" "user extensions.json is malformed; skipping merge to avoid data loss."
+        return 0
+      fi
     fi
   else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
@@ -708,8 +772,13 @@ merge_codestrap_extensions(){
   if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
     cp "$REPO_EXT_SRC" "$tmp_repo_json"
   else
+    # repo extensions invalid → skip on init, exit on cli
     _strip_jsonc_trailing "$REPO_EXT_SRC" > "$tmp_repo_json" || true
-    jq -e . "$tmp_repo_json" >/dev/null 2>&1 || { CTX_TAG="[Bootstrap config]"; err "repo extensions JSON invalid → $REPO_EXT_SRC"; CTX_TAG=""; rm -f "$tmp_user_json" "$tmp_repo_json"; return 1; }
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+      abort_or_continue "[Bootstrap config]" "repo extensions JSON invalid → $REPO_EXT_SRC"
+      return 0
+    fi
   fi
 
   # Extract repo list (de-dup preserving order)
@@ -1401,7 +1470,9 @@ autorun_env_if_present(){
   if [ -n "${GITHUB_USERNAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
     log "env present and no lock → running bootstrap"
-    codestrap_run || exit $?
+    if ! codestrap_run; then
+      CTX_TAG="[Bootstrap GitHub]"; err "env bootstrap failed (continuing)"; CTX_TAG=""
+    fi
   else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
     { [ -z "${GITHUB_USERNAME:-}" ] || [ -z "${GITHUB_TOKEN:-}" ] ; } && log "GITHUB_USERNAME/GITHUB_TOKEN missing → no autorun"
@@ -1441,18 +1512,21 @@ autorun_install_extensions(){
 # ===== entrypoint =====
 case "${1:-init}" in
   init)
-    install_restart_gate
-    install_cli_shim
-    init_default_password
-    merge_codestrap_settings
-    merge_codestrap_keybindings
-    merge_codestrap_extensions
-    autorun_env_if_present
-    autorun_install_extensions   # uninstall (if set) then install (if set)
+    RUN_MODE="init"
+    safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[CLI shim]"                install_cli_shim
+    safe_run "[Default password]"        init_default_password
+    safe_run "[Bootstrap config]"        merge_codestrap_settings
+    safe_run "[Bootstrap config]"        merge_codestrap_keybindings
+    safe_run "[Bootstrap config]"        merge_codestrap_extensions
+    safe_run "[Bootstrap GitHub]"        autorun_env_if_present
+    safe_run "[Extensions env]"          autorun_install_extensions
     log "Codestrap initialized. Use: codestrap -h"
     ;;
   cli)
-    shift; cli_entry "$@";;
+    RUN_MODE="cli"
+    shift; cli_entry "$@"
+    ;;
   *)
     if [ $# -gt 0 ]; then set -- cli "$@"; exec "$0" "$@"; else set -- init; exec "$0" "$@"; fi
     ;;
