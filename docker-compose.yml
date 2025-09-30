@@ -4,6 +4,7 @@ services:
     labels:
       - "recreate-tag=1"
     environment:
+      LOG_LEVEL: warn
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
       INSTALL_PACKAGES: argon2 jq #curl git python3-venv
