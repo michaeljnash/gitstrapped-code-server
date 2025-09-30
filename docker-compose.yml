@@ -31,7 +31,7 @@ services:
 
     volumes:
       - config:/config
-      - projects:/config/workspace
+      - workspace:/config/workspace
       - ./settings.json:/config/codestrap/settings.json:ro
       - ./keybindings.json:/config/codestrap/keybindings.json:ro
       - ./extensions.json:/config/codestrap/extensions.json:ro
@@ -44,4 +44,4 @@ services:
 
 volumes:
   config:
-  projects:
+  workspace:
