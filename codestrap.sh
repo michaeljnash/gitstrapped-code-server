@@ -635,26 +635,41 @@ merge_codestrap_settings(){
 
   PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
 
+  # Build applied+merged using slurpfile (never --argjson)
+  tmp_pres="$(mktemp)"; printf '%s' "$PRESERVE_SETTINGS_JSON" > "$tmp_pres"
   tmp_calc="$(mktemp)"
-  jq \
-    --argjson repo "$(cat "$tmp_repo_json")" \
-    --argjson rskeys "$RS_KEYS_JSON" \
-    --argjson oldkeys "$OLD_KEYS_JSON" \
-    --argjson pres "$PRESERVE_SETTINGS_JSON" \
-    --argjson user "$(cat "$tmp_user_json")" '
+  jq -n \
+    --slurpfile repo "$tmp_repo_json" \
+    --slurpfile user "$tmp_user_json" \
+    --slurpfile old  "$MANAGED_KEYS_FILE" \
+    --slurpfile pres "$tmp_pres" '
       def arr(v): if (v|type)=="array" then v else [] end;
       def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
-      ($user // {}) as $U
+      ($repo[0])         as $R
+      | ($user[0] // {}) as $U
+      | ($R | keys)      as $rskeys
+      | ($old[0]  // []) as $oldkeys
+      | ($pres[0] // []) as $pres
+
       | (delKeys($U; minus($oldkeys; $rskeys))) as $tmpU
-      | (delKeys($tmpU; $rskeys)) as $U_wo_repo
+      | (delKeys($tmpU; $rskeys))               as $U_wo_repo
+
       | reduce $rskeys[] as $k (
           {merged: $U_wo_repo, applied: []};
-          .merged[$k] = ( if ($pres | index($k)) and ($U | has($k)) then $U[$k] else $repo[$k] end )
-          | if ( ((($pres | index($k)) and ($U | has($k)))|not) ) then .applied += [$k] else . end
+          .merged[$k] =
+            ( if ($pres | index($k)) and ($U | has($k))
+              then $U[$k]
+              else $R[$k]
+              end )
+          | if ( ((($pres | index($k)) and ($U | has($k)))|not) )
+            then .applied += [$k]
+            else .
+            end
         )
     ' > "$tmp_calc"
+  rm -f "$tmp_pres" 2>/dev/null || true
 
   tmp_merged="$(mktemp)"
   jq -c '.merged' "$tmp_calc" | jq '.' > "$tmp_merged"
@@ -687,9 +702,15 @@ merge_codestrap_settings(){
     }
     {
       line=$0
-      if (match(line, /^[[:space:]]*"([^"]+)"[[:space:]]*:/, a)) {
-        k=a[1]
-        if (k in m) { print line " //codestrap merged setting"; next }
+      # detect JSON key: "theKey"   :
+      if (line ~ /^[[:space:]]*\"[^"]+\"[[:space:]]*:/) {
+        key=line
+        sub(/^[[:space:]]*\"/, "", key)
+        sub(/\"[[:space:]]*:.*$/, "", key)
+        if (key in m) {
+          print line " //codestrap merged setting"
+          next
+        }
       }
       print line
     }
@@ -798,8 +819,12 @@ merge_codestrap_keybindings(){
       # pretty print then add the comment as the second line inside the object
       printf "%s" "$obj" | jq '.' | awk '
         NR==1 { print; next }
-        NR==2 && $0 ~ /^[[:space:]]*"/ { print "    //codestrap merged keybinding"; print; next }
-        NR==2 && $0 ~ /^[[:space:]]*}$/ { print "    //codestrap merged keybinding"; print; next }
+        NR==2 {
+          if ($0 ~ /^[[:space:]]*}$/ || $0 ~ /^[[:space:]]*\"/) {
+            print "    //codestrap merged keybinding"
+          }
+          print; next
+        }
         { print }
       '
       first=0
