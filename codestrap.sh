@@ -565,20 +565,24 @@ merge_codestrap_settings(){
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
     --rawfile PK "$tmp_preserved_keys" '
-      def obj(x): if (x|type)=="object" then x else {} end;
+      def obj(x):  if (x|type)=="object" then x else {} end;
+      def keys_of(o): if (o|type)=="object" then (o|keys) else [] end;
+      def getk(o;k): if (o|type)=="object" then (o[k] // null) else null end;
 
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
-      | ($RO | (if (type=="object") then keys else [] end)) as $RK
+      | (keys_of($RO)) as $RK
       | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
 
       # repo-managed first unless preserved
       | (reduce $RK[] as $k (
           {};
-          . + { ($k): ( if ( ($PRES | index($k)) and ($UO[$k]? != null) )
-                        then $UO[$k]
-                        else $RO[$k]?
-                      end ) }
+          . + { ($k): (
+                if ($PRES | index($k)) and (getk($UO;$k) != null)
+                then getk($UO;$k)
+                else getk($RO;$k)
+                end
+              ) }
         )) as $MANAGED
 
       # user extras (keys not present in repo)
@@ -589,7 +593,7 @@ merge_codestrap_settings(){
         ) as $UREST
 
       | ($MANAGED + $UREST)
-  ' > "$tmp_merged"
+    ' > "$tmp_merged"
 
   # ---- Pretty + bracket comments (no trailing comma games) ----
   tmp_pretty="$(mktemp)"; jq '.' "$tmp_merged" > "$tmp_pretty"
