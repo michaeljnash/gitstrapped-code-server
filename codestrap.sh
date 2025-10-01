@@ -1371,7 +1371,6 @@ recompute_base(){
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  ensure_preserve_store
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
@@ -1399,7 +1398,6 @@ config_interactive(){
 config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  ensure_preserve_store
   
   # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
@@ -1621,7 +1619,6 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
-        ensure_preserve_store
         # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
@@ -1710,7 +1707,6 @@ case "${1:-init}" in
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
-    safe_run "[Preserve store]"          ensure_preserve_store
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_extensions
