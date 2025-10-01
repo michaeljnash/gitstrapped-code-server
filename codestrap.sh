@@ -961,10 +961,6 @@ merge_codestrap_keybindings(){
         ]
       | map(select(type=="object"))
     ' > "$tmp_extras"
-  else
-    # no ids → all user entries are extras
-    jq '[ .[] | select(type=="object") ]' "$tmp_user_json" > "$tmp_extras"
-  fi
 
   # === Pretty blocks ===
   tmp_managed_arr="$(mktemp)"; jq '.' "$tmp_managed" > "$tmp_managed_arr"
