@@ -838,8 +838,11 @@ merge_codestrap_keybindings(){
   tmp_preserve_pairs="$(mktemp)"   # "<id>\t<prop>"
   : >"$tmp_id_by_index"; : >"$tmp_preserve_pairs"
 
+  tmp_preserve_vals="$(mktemp)"    # "<id>\t<prop>\t<raw_json_value>"
+  : >"$tmp_preserve_vals"
+
   if [ -f "$KEYB_PATH" ]; then
-    _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OUT1="$tmp_id_by_index" -v OUT2="$tmp_preserve_pairs" '
+    _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OUT1="$tmp_id_by_index" -v OUT2="$tmp_preserve_pairs" -v OUT3="$tmp_preserve_vals" '
       BEGIN{
         arr=0; obj=0; idx=-1; cur=-1;
         have_id=0; id_for_cur="";
@@ -862,14 +865,27 @@ merge_codestrap_keybindings(){
         # ---- capture //preserve on property lines (needs id already seen in this object) ----
         if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
           if (have_id) {
+            # property name
             prop=line
-            # Trim leading spaces, then ensure it starts with "name":
             sub(/^[ \t]*/, "", prop)
             if (prop ~ /^\"[^\"]+\"[ \t]*:/) {
               sub(/^\"/, "", prop)
               sub(/\".*/, "", prop)
               if (prop != "") {
                 print id_for_cur "\t" prop >> OUT2
+
+                # raw value (JSON token) after the colon, before trailing comma/comment
+                val=line
+                # strip leading space, then strip leading "prop": part
+                sub(/^[ \t]*/, "", val)
+                sub(/^\"[^"]+\"[ \t]*:[ \t]*/, "", val)
+                # drop trailing comment
+                sub(/[ \t]*\/\/.*$/, "", val)
+                # trim spaces
+                sub(/[ \t]*$/, "", val)
+                # drop trailing comma if any
+                sub(/,[ \t]*$/, "", val)
+                print id_for_cur "\t" prop "\t" val >> OUT3
               }
             }
           }
@@ -1042,26 +1058,91 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # --- Re-append //preserve to preserved props; keep comma BEFORE the comment
+  # --- Apply preserved values and (re)add //preserve; keep comma BEFORE the comment
   managed_with_preserve="$(mktemp)"
-  awk -v MAP="$tmp_preserve_pairs" '
+  awk -v PAIRS="$tmp_preserve_pairs" -v VALS="$tmp_preserve_vals" '
     BEGIN {
-      while ((getline m < MAP) > 0) { p = index(m, "\t"); if (p>0) { id=substr(m,1,p-1); pr=substr(m,p+1); keep[id "\t" pr]=1 } }
-      close(MAP); curr_id=""
+      # load (id,prop) set
+      while ((getline m < PAIRS) > 0) {
+        p = index(m, "\t"); if (p>0) {
+          id = substr(m,1,p-1); pr = substr(m,p+1)
+          keep[id "\t" pr] = 1
+        }
+      }
+      close(PAIRS)
+      # load (id,prop)->value map (raw JSON token)
+      while ((getline v < VALS) > 0) {
+        # format: id \t prop \t value
+        # find first tab
+        p1 = index(v, "\t"); if (p1==0) continue
+        id = substr(v,1,p1-1)
+        rest = substr(v,p1+1)
+        p2 = index(rest, "\t"); if (p2==0) continue
+        pr = substr(rest,1,p2-1)
+        val = substr(rest,p2+1)
+        vals[id "\t" pr] = val
+      }
+      close(VALS)
+      curr_id=""
     }
     {
       line=$0
+      # update current id when we see the id comment inside object
       if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
-        curr_id=line; sub(/^.*id#/, "", curr_id); sub(/[^0-9a-fA-F].*$/, "", curr_id)
+        curr_id=line
+        sub(/^.*id#/, "", curr_id)
+        sub(/[^0-9a-fA-F].*$/, "", curr_id)
+        print line
+        next
       }
+
+      # If inside an object with a current id, look for top-level property lines
       if (curr_id != "" && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
-        prop=line; sub(/^[[:space:]]*"/, "", prop); sub(/".*$/, "", prop)
-        key=curr_id "\t" prop
+        # Extract property name
+        prop=line
+        sub(/^[[:space:]]*"/, "", prop)
+        sub(/".*$/, "", prop)
+        key = curr_id "\t" prop
+
         if (keep[key]) {
-          if (line ~ /,[[:space:]]*$/) { sub(/,[[:space:]]*$/, "", line); sub(/[[:space:]]*$/, "", line); line = line ", //preserve" }
-          else { sub(/[[:space:]]*$/, "", line); line = line " //preserve" }
+          # Build prefix: up to and including the colon
+          # prop_re is: ^(\s*"prop"\s*:\s*)
+          prop_esc = prop
+          gsub(/[][(){}.^$*+?|\\]/, "\\\\&", prop_esc)   # escape for regex
+          pat = "^([[:space:]]*\"" prop_esc "\"[[:space:]]*:[[:space:]]*)"
+          prefix = line
+          if (match(prefix, pat)) {
+            prefix = substr(prefix, RSTART, RLENGTH)
+          } else {
+            # fallback: leave line as-is
+            print line
+            next
+          }
+
+          # Was there a trailing comma?
+          has_comma = (line ~ /,[[:space:]]*$/)
+
+          # Use recorded raw JSON value if we have one; else keep existing token
+          val = vals[key]
+          if (val == "") {
+            # try to salvage existing token (strip prefix and trailing comma/comment)
+            val = line
+            sub(pat, "", val)
+            sub(/[ \t]*\/\/.*$/, "", val)
+            sub(/[ \t]*$/, "", val)
+            sub(/,[ \t]*$/, "", val)
+            if (val == "") { val = "null" }
+          }
+
+          # Rebuild the line: prefix + val + optional comma + " //preserve"
+          newline = prefix val
+          if (has_comma) newline = newline ","
+          newline = newline " //preserve"
+          print newline
+          next
         }
       }
+
       print line
     }
   ' "$managed_annotated" > "$managed_with_preserve"
