@@ -643,7 +643,7 @@ merge_codestrap_settings(){
 
   # 2) Compute which repo keys actually came **from repo** (not preserved)
   tmp_repo_merged_keys="$(mktemp)"
-  jq -n \
+  jq -rn \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
     --slurpfile P "$tmp_preserve" '
@@ -655,10 +655,12 @@ merge_codestrap_settings(){
       | (arr($P[0])) as $PRES
       | ($RO | keys) as $RK
 
-      # Only those repo keys we actually took from repo (i.e., NOT preserved)
+      # Only those repo keys we actually took from repo (i.e., NOT preserved).
+      # Output each key as a raw line (no quotes) so awk can match it.
       | [ $RK[]
           | select( ( (($PRES | index(.)) and ($UO | has(.))) ) | not )
         ]
+      | .[]
     ' > "$tmp_repo_merged_keys"
 
   # 3) Pretty print merged
