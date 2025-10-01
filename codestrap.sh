@@ -923,10 +923,14 @@ merge_codestrap_keybindings(){
       def arr(x): if (x|type)=="array" then x else [] end;
       def obj(x): if (x|type)=="object" then x else {} end;
 
-      # Safe key extractor: returns string or null (never errors)
+      # SUPER defensive key extractor:
       def kstr($x):
-        if ($x|type)=="object"
-        then (( $x|.key? ) // null) | (if .==null then null else tostring end)
+        if ($x|type) == "object" then
+          ( try ($x|keys) catch [] ) as $ks
+          | if ($ks|type)=="array" and ($ks|index("key") != null)
+            then ($x|.["key"] | tostring)
+            else null
+            end
         else null end;
 
       (arr($U[0])) as $Uraw
@@ -935,36 +939,31 @@ merge_codestrap_keybindings(){
       | (obj($UM[0])) as $U_by_id
       | (obj($IDX[0])) as $IDX2ID
 
-      # Repo IDs set
       | ($R | map(.["__tmp_id"]) | unique) as $RIDSET
 
-      # Repo-first managed, honoring per-prop preserves from matching user-by-id
       | ($R
           | map(
               . as $repo
               | ($repo.__tmp_id // null) as $id
-              | if ($id != null and ($U_by_id[$id]? != null))
+              | if ($id != null and (($U_by_id|keys)|index($id) != null))
                 then
                   $U_by_id[$id] as $u
                   | ($PRES[$id] // []) as $keep
-                  | reduce $keep[] as $k ($repo; if ($u[$k]? != null) then .[$k] = $u[$k] else . end)
+                  | reduce $keep[] as $k ($repo; if ((($u|keys)|index($k) != null)) then .[$k] = $u[$k] else . end)
                 else
                   .
                 end
             )
         ) as $managed
 
-      # Managed keys (strings) to avoid dup keys in extras
       | ($managed | map(kstr(.)) | map(select(. != null)) | unique) as $MKEYS
 
-      # Indices in user file that carry an id present in repo → skip from extras
       | ($IDX2ID
           | to_entries
           | map( . as $e | select( ($RIDSET | index($e.value)) != null ) | ($e.key|tonumber) )
           | unique
         ) as $SKIP_IDX
 
-      # Extras: user objects that are NOT at skipped indices AND whose key is not already in managed keys
       | ($Uraw
           | to_entries
           | map( select( ($SKIP_IDX | index(.key)) == null ) | .value )
@@ -975,8 +974,8 @@ merge_codestrap_keybindings(){
       | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
     ' > "$tmp_both"
 
-  mlen="$(jq -r '.mlen' "$tmp_both")"
-  elen="$(jq -r '.elen' "$tmp_both")"
+  mlen="$(jq -r '.mlen // 0' "$tmp_both")"
+  elen="$(jq -r '.elen // 0' "$tmp_both")"
 
   # Pretty-print arrays and strip outer brackets
   tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
@@ -1023,7 +1022,6 @@ merge_codestrap_keybindings(){
             if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) continue
             out[++outn]=l
           }
-          # remove any trailing comma from the property before the closing brace
           closing_idx=outn
           while (closing_idx>1 && out[closing_idx] ~ /^[[:space:]]*$/) closing_idx--
           if (out[closing_idx] ~ /^[[:space:]]*}[[:space:]]*,?[[:space:]]*$/) {
@@ -1074,7 +1072,7 @@ merge_codestrap_keybindings(){
 
   # If both segments exist, add comma to last managed line (before //preserve if present)
   managed_final="$managed_with_preserve"
-  if [ "${mlen:-0}" -gt 0 ] && [ "${elen:-0}" -gt 0 ]; then
+  if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
     managed_final2="$(mktemp)"
     awk '
       { if ($0 ~ /[^[:space:]]/) last=NR; lines[NR]=$0 }
@@ -1115,6 +1113,7 @@ merge_codestrap_keybindings(){
 
   log "merged keybindings.json → $KEYB_PATH"
 }
+
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
