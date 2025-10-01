@@ -233,22 +233,40 @@ ensure_preserve_store(){
     chown "${PUID}:${PGID}" "$PRESERVE_MAIN" 2>/dev/null || true
   fi
 
-  # If a regular file exists in the user dir, migrate/merge it
+  # If a regular file exists in the user dir, migrate/merge it into main then remove it
   if [ -e "$PRESERVE_LINK" ] && [ ! -L "$PRESERVE_LINK" ]; then
-    ensure_dir "$(dirname "$PRESERVE_MAIN")"
     [ -e "$PRESERVE_MAIN" ] || printf '%s\n' '{}' >"$PRESERVE_MAIN"
     merge_preserve_files_union "$PRESERVE_LINK" "$PRESERVE_MAIN"
     rm -f "$PRESERVE_LINK" 2>/dev/null || true
   fi
 
-  # Create/refresh symlink; if symlink creation fails (FS limitation), fall back to copy
-  if ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null; then
+  # Create/refresh link from user dir → main
+  if [ -L "$PRESERVE_LINK" ]; then
+    # Already a symlink: if it points to the right place, keep; else replace.
+    tgt="$(readlink "$PRESERVE_LINK" || true)"
+    case "$tgt" in
+      /*) abs="$tgt" ;;
+      *)  abs="$(cd "$(dirname "$PRESERVE_LINK")" 2>/dev/null && printf "%s/%s" "$(pwd)" "$tgt")" ;;
+    esac
+    if [ "$abs" != "$PRESERVE_MAIN" ]; then
+      rm -f "$PRESERVE_LINK" 2>/dev/null || true
+      ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null || true
+    fi
+  elif [ -e "$PRESERVE_LINK" ]; then
+    # A non-symlink file existed; we've migrated it above. Do nothing further.
     :
   else
-    cp -f "$PRESERVE_MAIN" "$PRESERVE_LINK"
+    # Link path does not exist — try symlink first; if that fails (FS limitation), copy.
+    if ! ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null; then
+      # Avoid copying a file onto itself
+      if [ ! "$PRESERVE_MAIN" -ef "$PRESERVE_LINK" ]; then
+        cp -f "$PRESERVE_MAIN" "$PRESERVE_LINK"
+      fi
+    fi
   fi
 
-  chown -h "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || true
+  # Chown link itself (if supported) or the file it points to
+  chown -h "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || chown "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || true
 }
 
 # ===== root guard =====
