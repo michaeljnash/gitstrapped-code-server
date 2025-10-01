@@ -572,8 +572,27 @@ merge_codestrap_settings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # --- collect inline-preserve keys from existing user file (same-line //preserve) ---
+  tmp_preserve_keys="$(mktemp)"
+  : >"$tmp_preserve_keys"
+  if [ -f "$SETTINGS_PATH" ]; then
+    # Strip a possible top-of-file error banner first, then scan for //preserve
+    _banner_strip_first_if_error <"$SETTINGS_PATH" | awk '
+      # capture: "someKey":  ... //preserve
+      /\/\/[[:space:]]*preserve[[:space:]]*$/ {
+        line=$0
+        # cut off at //preserve so trailing stuff doesn’t confuse the match
+        sub(/\/\/[[:space:]]*preserve[[:space:]]*$/,"",line)
+        # extract "key":  prefix
+        if (match(line,/^[[:space:]]*"([^"]+)"[[:space:]]*:/,m)) {
+          print m[1]
+        }
+      }
+    ' | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserve_keys"
+  fi
+
+  # ---- Load USER (allow comments only) ----
   tmp_user_json="$(mktemp)"
-  # ---- USER (allow comments) ----
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -583,6 +602,7 @@ merge_codestrap_settings(){
         rm -f "$tmp_user_json" 2>/dev/null || true
         put_error_banner_this "$SETTINGS_PATH" "user settings.json is malformed; skipped merge to avoid data loss."
         abort_or_continue "[Bootstrap config]" "user settings.json is malformed; skipped merge to avoid data loss."
+        rm -f "$tmp_preserve_keys" 2>/dev/null || true
         return 0
       fi
     fi
@@ -590,7 +610,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # ---- REPO (allow comments) ----
+  # ---- Load REPO (allow comments only) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -600,6 +620,7 @@ merge_codestrap_settings(){
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
       put_error_banner_repo "$SETTINGS_PATH" "repo settings JSON invalid → $REPO_SETTINGS_SRC; skipped merge." "repo settings.json" "$REPO_SETTINGS_SRC"
       abort_or_continue "[Bootstrap config]" "repo settings JSON invalid → $REPO_SETTINGS_SRC; skipped merge."
+      rm -f "$tmp_preserve_keys" 2>/dev/null || true
       return 0
     fi
   fi
@@ -611,15 +632,17 @@ merge_codestrap_settings(){
   else
     OLD_KEYS_JSON='[]'
   fi
-  PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
 
-  # ----- merge honoring external preserve -----
+  # ----- merge honoring inline //preserve -----
+  # Build a JSON array of preserve keys from the temp file
+  PRES_KEYS_JSON="$(awk 'BEGIN{printf("["); first=1} {gsub(/"/,"\\\""); if(!first) printf(","); printf("\"%s\"",$0); first=0} END{printf("]")}' "$tmp_preserve_keys")"
+
   tmp_merged="$(mktemp)"
   jq \
     --argjson repo "$(cat "$tmp_repo_json")" \
     --argjson rskeys "$RS_KEYS_JSON" \
     --argjson oldkeys "$OLD_KEYS_JSON" \
-    --argjson pres "$PRESERVE_SETTINGS_JSON" '
+    --argjson pres "$PRES_KEYS_JSON" '
       def arr(v): if (v|type)=="array" then v else [] end;
       def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
       def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
@@ -629,7 +652,11 @@ merge_codestrap_settings(){
       | (delKeys($tmp_user; $rskeys)) as $user_without_repo
       | reduce $rskeys[] as $k (
           $user_without_repo;
-          .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
+          .[$k] =
+            ( if ($pres | index($k)) and ($user | has($k))
+              then $user[$k]                 # preserved → keep the user value
+              else $repo[$k]                 # otherwise repo wins
+              end )
         )
     ' "$tmp_user_json" > "$tmp_merged"
 
@@ -661,13 +688,35 @@ merge_codestrap_settings(){
   managed_body="$(mktemp)"; jq '.' "$tmp_managed_obj" | sed '1d;$d' > "$managed_body"
   extras_body="$(mktemp)";  jq '.' "$tmp_extras_obj"  | sed '1d;$d' > "$extras_body"
 
-  # if both sections non-empty, append a comma to the last non-blank line of managed block
   have_managed=0; [ -s "$managed_body" ] && have_managed=1
   have_extras=0;  [ -s "$extras_body" ]  && have_extras=1
 
-  managed_final="$managed_body"
+  # ----- re-insert //preserve on the same line as preserved keys (managed section) -----
+  # Build an awk map of preserved keys; whenever we see   "key":   at top level, append //preserve
+  managed_with_preserve="$(mktemp)"
+  awk -v KFILE="$tmp_preserve_keys" '
+    BEGIN{
+      while( (getline k < KFILE) > 0 ){ pres[k]=1 }
+      close(KFILE)
+    }
+    {
+      line=$0
+      # Detect a top-level setting line:   "key": <value>[,]
+      if (match(line,/^[[:space:]]*"([^"]+)"[[:space:]]*:/,m)) {
+        key=m[1]
+        if (key in pres) {
+          sub(/[[:space:]]*$/,"",line)
+          line=line " //preserve"
+        }
+      }
+      print line
+    }
+  ' "$managed_body" > "$managed_with_preserve"
+
+  managed_final="$managed_with_preserve"
   if [ $have_managed -eq 1 ] && [ $have_extras -eq 1 ]; then
-    managed_final="$(mktemp)"
+    # add a trailing comma to last non-blank line of managed block
+    managed_final2="$(mktemp)"
     awk '
       { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
       END {
@@ -676,10 +725,11 @@ merge_codestrap_settings(){
           else          { print lines[i] }
         }
       }
-    ' "$managed_body" > "$managed_final"
+    ' "$managed_with_preserve" > "$managed_final2"
+    managed_final="$managed_final2"
   fi
 
-  # ----- compose final file with section comments -----
+  # ----- compose final with bracket comments -----
   tmp_with_comments="$(mktemp)"
   {
     echo "{"
@@ -696,7 +746,8 @@ merge_codestrap_settings(){
 
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" \
         "$tmp_managed_snapshot" "$tmp_managed_obj" "$tmp_extras_obj" \
-        "$managed_body" "$extras_body" "$managed_final" "$tmp_with_comments" 2>/dev/null || true
+        "$managed_body" "$managed_with_preserve" "$managed_final" \
+        "$extras_body" "$tmp_with_comments" "$tmp_preserve_keys" 2>/dev/null || true
 
   log "merged settings.json → $SETTINGS_PATH"
 }
