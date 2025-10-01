@@ -833,7 +833,7 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # === PASS 1: scan RAW user file to capture array-index → id, and id → preserved props ===
+  # === PASS 1: scan RAW user file to capture (array) object-index → id, and id → preserved props ===
   tmp_id_by_index="$(mktemp)"      # "<idx>\t<id>"
   tmp_preserve_pairs="$(mktemp)"   # "<id>\t<prop>"
   : >"$tmp_id_by_index"; : >"$tmp_preserve_pairs"
@@ -848,10 +848,8 @@ merge_codestrap_keybindings(){
         oc = gsub(/\{/,"{",line)
         cc = gsub(/\}/,"}",line)
 
-        # entering an object at array depth 1 → increment idx
         if (bdepth==1 && oc>0 && cdepth==0) { idx=idx+1; curr_id="" }
 
-        # capture //id#HASH
         if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
           id=line
           sub(/^.*id#/, "", id)
@@ -860,7 +858,6 @@ merge_codestrap_keybindings(){
           if (idx >= 0 && id != "") { print idx "\t" id >> OUT1 }
         }
 
-        # capture //preserve on property lines
         if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
           if (line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
             prop=line
@@ -898,7 +895,7 @@ merge_codestrap_keybindings(){
     printf '{}\n' > "$tmp_user_id_map"
   fi
 
-  # Build JSON: index(string) -> id  (so we can skip matched indices from extras)
+  # Build JSON: index(string) -> id
   tmp_idx2id_json="$(mktemp)"
   if [ -s "$tmp_id_by_index" ]; then
     awk -F'\t' 'NF==2{printf("{\"i\":\"%s\",\"id\":\"%s\"}\n",$1,$2)}' "$tmp_id_by_index" \
@@ -958,7 +955,7 @@ merge_codestrap_keybindings(){
       # Indices in user file that carry an id present in repo → skip from extras
       | ($IDX2ID
           | to_entries
-          | map(select( ($RIDSET | index(.value)) != null ) | (.key|tonumber))
+          | map( . as $e | select( ($RIDSET | index($e.value)) != null ) | ($e.key|tonumber) )
           | unique
         ) as $SKIP_IDX
 
@@ -982,7 +979,7 @@ merge_codestrap_keybindings(){
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # --- Re-write each managed object: insert //id#... first, drop __tmp_id, fix any trailing comma
+  # --- Re-write each managed object: insert //id#... first, drop __tmp_id, fix trailing comma if any
   managed_annotated="$(mktemp)"
   awk '
     function get_indent(s,    t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
@@ -1038,7 +1035,7 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # Append //preserve to preserved props on matched objects; keep comma BEFORE the comment
+  # Append //preserve to preserved props
   tmp_keep_pairs="$(mktemp)"
   if [ -s "$tmp_preserve_pairs" ]; then awk 'NF==2' "$tmp_preserve_pairs" > "$tmp_keep_pairs"; else : >"$tmp_keep_pairs"; fi
 

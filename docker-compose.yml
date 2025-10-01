@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=123456789"
+      - "recreate-tag=1"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
