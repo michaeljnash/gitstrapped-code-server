@@ -922,10 +922,12 @@ merge_codestrap_keybindings(){
     --slurpfile IDX "$tmp_idx2id_json" '
       def arr(x): if (x|type)=="array" then x else [] end;
       def obj(x): if (x|type)=="object" then x else {} end;
-      # Safe key extractor: returns string or null, never errors
+
+      # Safe key extractor: returns string or null (never errors)
       def kstr($x):
-        ( $x | type ) as $t
-        | if $t == "object" and ($x | has("key")) then ($x | .key | tostring) else null end;
+        if ($x|type)=="object"
+        then (( $x|.key? ) // null) | (if .==null then null else tostring end)
+        else null end;
 
       (arr($U[0])) as $Uraw
       | (arr($R[0])) as $R
@@ -1113,7 +1115,6 @@ merge_codestrap_keybindings(){
 
   log "merged keybindings.json → $KEYB_PATH"
 }
-
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
