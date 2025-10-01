@@ -756,25 +756,20 @@ merge_codestrap_keybindings(){
     --slurpfile R "$tmp_repo_json" \
     --slurpfile P "$tmp_preserve" '
       def arr(x): if (x|type)=="array" then x else [] end;
-      def is_kb($x): ($x|type)=="object" and ($x.key? != null);
-      def kstr($x): (if ($x|type)=="object" and ($x.key? != null) then ($x.key|tostring) else null end);
+      def is_kb: (type=="object") and (.key? != null);
+      def kstr(x): (x.key|tostring);
 
-      (arr($U[0])) as $Uraw
-      | (arr($R[0])) as $Rraw
+      (arr($U[0])) as $U
+      | (arr($R[0])) as $R
       | (arr($P[0])) as $PRES
 
-      # Filter to objects-with-key
-      | ($Uraw | map(select(is_kb(.)))) as $U
-      | ($Rraw | map(select(is_kb(.)))) as $R
+      # Build maps by key for quick lookup
+      | ($U | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $u_by_key
+      | ($R | map(select(is_kb) | { (kstr(.)): . }) | add // {}) as $r_by_key
 
-      # Build maps by key for quick lookup (skip null keys defensively)
-      | ($U | map({ (kstr(.)): . }) | del(.null) | add // {}) as $u_by_key
-      | ($R | map({ (kstr(.)): . }) | del(.null) | add // {}) as $r_by_key
-
-      # Repo list first, honoring preserve (user wins if preserved+exists).
-      # When repo wins, insert a marker property we later turn into a comment.
+      # Repo list first, with choice (preserved user vs repo). When repo chosen, insert marker prop first.
       | ($R
-          | map( . as $o
+          | map(select(is_kb) as $o
                 | (kstr($o)) as $k
                 | if (($PRES | index($k)) and ($u_by_key[$k]? != null))
                   then $u_by_key[$k]
@@ -785,9 +780,9 @@ merge_codestrap_keybindings(){
       # Add user extras (keys not already present)
       | ($managed | map(kstr(.)) | map({(.):true}) | add // {}) as $seen
       | ($U
-          | map( . as $o
+          | map(select(is_kb) as $o
                 | (kstr($o)) as $k
-                | select(($seen[$k]? // false) | not)
+                | select(($seen[$k]? // false)|not)
                 | $o)
         ) as $extras
 
