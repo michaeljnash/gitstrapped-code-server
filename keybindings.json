@@ -1,6 +1,6 @@
 [   
     {
-        "key": "ctrl+8",
+        "key": "ctrl+7",
         "command": "workbench.action.files.openFile"
     }
 ]
