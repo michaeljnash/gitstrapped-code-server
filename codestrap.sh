@@ -789,7 +789,7 @@ merge_codestrap_keybindings(){
 
   # 3) Convert the marker property line into a comment INSIDE each object
   #    Line will look like:    ".__codestrapMerged": true,
-  #    We replace the *entire line* with:    //codestrap merged keybinding
+  #    We replace the *entire line* with:    //codestrap merged keybinding:
   tmp_annotated="$(mktemp)"
   awk '
     {
@@ -797,7 +797,7 @@ merge_codestrap_keybindings(){
         # portable indent capture
         match($0,/^[[:space:]]*/);
         indent=substr($0,1,RLENGTH);
-        print indent "//codestrap merged keybinding";
+        print indent "//codestrap merged keybinding:";
         next
       }
       print $0
@@ -879,7 +879,7 @@ merge_codestrap_extensions(){
   {
     echo "{"
     echo '  "recommendations": ['
-    echo '    // START codestrap extensions'
+    echo '    //codestrap merged extensions:'
 
     first=1
     # repo items first
@@ -902,7 +902,7 @@ merge_codestrap_extensions(){
       fi
     fi
 
-    echo '    // END codestrap extensions'
+    echo '    //user defined extensions:'
 
     # then user extras (own comma handling)
     first_e=1
