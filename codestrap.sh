@@ -808,126 +808,99 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # ---- Read USER raw (if any), to collect preserves and user extras (non-managed objects) ----
-  user_has_file=false
-  [ -f "$KEYB_PATH" ] && [ -s "$KEYB_PATH" ] && user_has_file=true
-
+  # ---- Read USER raw: collect preserves + keep non-managed objects as "extras" ----
   tmp_preserve_tsv="$(mktemp)"   # id \t prop \t rawJSONValue
   : >"$tmp_preserve_tsv"
   tmp_extras_raw="$(mktemp)"     # concatenated raw objects that are NOT codestrap-managed
   : >"$tmp_extras_raw"
 
-  if $user_has_file; then
-    # State machine over raw file:
-    # - Detect markers: //codestrap merged keybinding id#<hex>
-    # - Capture next top-level object; if managed → collect preserve fields; else → emit to extras
-    awk '
+  if [ -f "$KEYB_PATH" ] && [ -s "$KEYB_PATH" ]; then
+    awk -v PRE="$tmp_preserve_tsv" -v EX="$tmp_extras_raw" '
       BEGIN{
-        curr_id=""
-        in_obj=0; depth=0
-        buf=""
-        want_capture=0
-        managed_next=0
+        curr_id="";
+        managed_next=0;
+        in_obj=0; depth=0;
+        buf="";
       }
-      function flush_extra(){
-        if (buf != "" && want_capture==1 && managed_next==0){
-          print buf >> ENVIRON["tmp_extras_raw"]
-        }
-        buf=""
-        want_capture=0
-      }
-      # trim helpers
-      function rtrim(s){ sub(/[ \t\r\n]+$/, "", s); return s }
-      function ltrim(s){ sub(/^[ \t\r\n]+/, "", s); return s }
-      function trim(s){ return rtrim(ltrim(s)) }
-
       {
-        line_raw=$0
+        line=$0;
 
-        # Detect marker line
-        if (match(line_raw, /^[[:space:]]*\/\/codestrap[[:space:]]+merged[[:space:]]+keybinding[[:space:]]+id#([a-fA-F0-9]+)/, m)) {
-          curr_id=m[1]
-          managed_next=1
-          next
+        # Detect ID marker for next object
+        if (match(line, /^[[:space:]]*\/\/codestrap[[:space:]]+merged[[:space:]]+keybinding[[:space:]]+id#([0-9a-fA-F]+)/, m)) {
+          curr_id=m[1];
+          managed_next=1;
+          next;
         }
 
-        # Start of an object? We look for a top-level "{" when not already in_obj
-        if (in_obj==0 && index(line_raw, "{")>0){
-          in_obj=1
-          depth=gsub(/{/,"{",line_raw) - gsub(/}/,"}",line_raw)   # crude: count braces on the line
-          buf=line_raw "\n"
-          want_capture=1
-          next
+        # Start of object?
+        if (in_obj==0 && index(line, "{")>0){
+          in_obj=1;
+          # count braces on this line without modifying it
+          tmp=line; oc=0; cc=0;
+          while (match(tmp, /[{]/)) { oc++; tmp=substr(tmp, RSTART+1); }
+          tmp=line;
+          while (match(tmp, /[}]/)) { cc++; tmp=substr(tmp, RSTART+1); }
+          depth = oc - cc;
+          buf=line "\n";
+          next;
         }
 
         if (in_obj==1){
-          # Accumulate and track depth
-          opens=gsub(/{/,"{",line_raw)
-          closes=gsub(/}/,"}",line_raw)
-          depth += (opens - closes)
-          buf = buf line_raw "\n"
+          # accumulate buffer
+          buf = buf line "\n";
 
-          # While inside object, when //preserve appears on a property line, record prop + value
-          if (managed_next==1) {
-            # Look for //preserve at EOL (allow trailing spaces)
-            if (line_raw ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
-              # strip the comment for parsing
-              s=line_raw
-              sub(/\/\/[[:space:]]*preserve[[:space:]]*$/,"",s)
-              # capture prop and value at top level:  "prop": value
-              if (match(s, /^[[:space:]]*"([^"]+)"[[:space:]]*:[[:space:]]*(.*)$/, mm)) {
-                prop = mm[1]
-                val  = mm[2]
-                # drop trailing comma
-                sub(/,[[:space:]]*$/, "", val)
-                # trim whitespace
-                val = trim(val)
-                # write id \t prop \t rawValue
-                printf("%s\t%s\t%s\n", curr_id, prop, val) >> ENVIRON["tmp_preserve_tsv"]
+          # while managed, capture //preserve property lines
+          if (managed_next==1){
+            if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/){
+              s=line;
+              sub(/\/\/[[:space:]]*preserve[[:space:]]*$/, "", s);      # drop comment
+              if (match(s, /^[[:space:]]*"([^"]+)"[[:space:]]*:[[:space:]]*(.*)$/, mm)){
+                prop = mm[1];
+                val  = mm[2];
+                sub(/,[[:space:]]*$/, "", val);                          # drop trailing comma
+                # trim outer spaces
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", val);
+                # write preserve
+                printf("%s\t%s\t%s\n", curr_id, prop, val) >> PRE;
               }
             }
           }
 
-          # End of the object when depth==0 (balanced)
+          # Update depth for this line
+          tmp=line; oc=0; cc=0;
+          while (match(tmp, /[{]/)) { oc++; tmp=substr(tmp, RSTART+1); }
+          tmp=line;
+          while (match(tmp, /[}]/)) { cc++; tmp=substr(tmp, RSTART+1); }
+          depth += (oc - cc);
+
+          # End of object?
           if (depth<=0){
-            # If it was a managed one, just drop (we rebuild from repo)
-            # If not managed, keep in extras
-            if (managed_next==0) {
-              # extras: emit raw buffer followed by a separator line
-              print buf >> ENVIRON["tmp_extras_raw"]
-              print ""    >> ENVIRON["tmp_extras_raw"]
+            if (managed_next==0){
+              # keep as user extra
+              printf("%s\n\n", buf) >> EX;
             }
             # reset
-            in_obj=0; depth=0; buf=""; want_capture=0; managed_next=0; curr_id=""
+            in_obj=0; depth=0; buf="";
+            managed_next=0; curr_id="";
           }
-          next
         }
-
-        # Not in object → ignore any other content (comments, [] etc.)
       }
-    ' tmp_extras_raw="$tmp_extras_raw" tmp_preserve_tsv="$tmp_preserve_tsv" "$KEYB_PATH"
+    ' "$KEYB_PATH"
   fi
 
   # ---- Build managed list from REPO, inject id and apply preserved fields ----
-  managed_block="$(mktemp)"
-  : >"$managed_block"
-
-  # Export preserve TSV path for the loop
+  managed_block="$(mktemp)"; : >"$managed_block"
   PRES_TSV="$tmp_preserve_tsv"
 
-  # Iterate repo keybindings (objects)
   while IFS= read -r obj; do
     [ -n "$obj" ] || continue
-    # Canonicalize object (sorted keys, compact) for stable hash
     canon="$(printf '%s' "$obj" | jq -cS '.')"
-    id="$(printf '%s' "$canon" | sha1sum | awk "{print \$1}")"
+    id="$(printf '%s' "$canon" | sha1sum | awk '{print $1}')"
 
-    # Build a jq filter to overlay preserved fields (if any) for this id
+    # build jq overlay from preserves for this id
     filter=""
     while IFS=$'\t' read -r pid pkey pval; do
       [ "$pid" = "$id" ] || continue
-      # Compose .["key"] = (rawJSON)
-      # pval is already raw JSON text (we trust user wrote valid JSON on that line)
       if [ -z "$filter" ]; then
         filter=".\"$pkey\" = ($pval)"
       else
@@ -935,45 +908,37 @@ merge_codestrap_keybindings(){
       fi
     done <"$PRES_TSV"
 
-    if [ -n "$filter" ]; then
-      canon="$(printf '%s' "$obj" | jq -cS "$filter")"
-    fi
-
-    # Pretty-print for output (multiline, with indentation)
+    [ -n "$filter" ] && canon="$(printf '%s' "$obj" | jq -cS "$filter")"
     pretty="$(printf '%s' "$canon" | jq '.')"
 
-    # Insert the id marker BEFORE the object, and re-add //preserve on preserved lines,
-    # keeping comma BEFORE the comment.
     printf "  //codestrap merged keybinding id#%s\n" "$id" >>"$managed_block"
 
-    # For //preserve re-annotation we need the set of preserved keys for this id
-    # Build a small map in awk by grepping the TSV for this id only
+    # collect preserved keys for this id
     tmp_id_keys="$(mktemp)"; : >"$tmp_id_keys"
-    awk -v ID="$id" -F '\t' '$1==ID{print $2}' "$PRES_TSV" | awk 'NF' | awk '!seen[$0]++' >"$tmp_id_keys"
+    awk -F '\t' -v ID="$id" '$1==ID{print $2}' "$PRES_TSV" | awk 'NF' | awk '!seen[$0]++' >"$tmp_id_keys"
 
-    awk -v KFILE="$tmp_id_keys" '
+    # re-add //preserve on preserved lines (comma stays before comment)
+    awk -v KF="$tmp_id_keys" '
       BEGIN{
-        while ((getline k < KFILE) > 0) pres[k]=1
-        close(KFILE)
+        while ((getline k < KF) > 0) { pres[k]=1 }
+        close(KF)
       }
       {
-        line=$0
-        # Only annotate property lines when present in pres
-        if (match(line, /^[[:space:]]*\"([^\"]+)\"[[:space:]]*:/, m)) {
-          key=m[1]
-          if (key in pres) {
-            # keep comma BEFORE comment
-            if (line ~ /,[[:space:]]*$/) {
-              sub(/,[[:space:]]*$/, "", line)
-              sub(/[[:space:]]*$/, "", line)
-              line = line ", //preserve"
+        l=$0
+        if (match(l, /^[[:space:]]*"([^"]+)"[[:space:]]*:/, mm)) {
+          k=mm[1]
+          if (k in pres) {
+            if (l ~ /,[[:space:]]*$/) {
+              sub(/,[[:space:]]*$/, "", l)
+              sub(/[[:space:]]*$/, "", l)
+              l = l ", //preserve"
             } else {
-              sub(/[[:space:]]*$/, "", line)
-              line = line " //preserve"
+              sub(/[[:space:]]*$/, "", l)
+              l = l " //preserve"
             }
           }
         }
-        print line
+        print l
       }
     ' <<EOF >>"$managed_block"
 $pretty
@@ -982,43 +947,24 @@ EOF
     printf "\n" >>"$managed_block"
   done < <(jq -c '.[] | select(type=="object")' "$tmp_repo_json")
 
-  have_managed=0
-  [ -s "$managed_block" ] && have_managed=1
+  have_managed=0; [ -s "$managed_block" ] && have_managed=1
 
   # ---- Prepare extras block (raw objects captured earlier, not managed) ----
-  extras_block="$(mktemp)"
-  : >"$extras_block"
+  extras_block="$(mktemp)"; : >"$extras_block"
   have_extras=0
   if [ -s "$tmp_extras_raw" ]; then
-    # Normalize: objects in tmp_extras_raw are separated by blank lines (as we wrote).
-    # Re-emit them with 2-space indent and single blank line between.
     awk '
-      function indent(s,   out){ gsub(/^/,"  ",s); return s }
-      BEGIN{buf=""; have=0}
+      # re-indent two spaces, keep blank line between objects
       {
-        if ($0 == "") {
-          if (buf != "") {
-            print indent(buf)
-            print ""
-            buf=""
-            have=1
-          }
+        if ($0=="") {
+          print "";
         } else {
-          if (buf=="") buf=$0; else buf=buf "\n" $0
+          print "  " $0;
         }
       }
-      END{
-        if (buf!=""){
-          print indent(buf)
-          print ""
-          have=1
-        }
-        if (have==1) {
-          # signal via stderr (awk stdout is our content)
-          # (We can’t easily set a shell var from here; we’ll test file size later.)
-        }
-      }
-    ' "$tmp_extras_raw" > "$extras_block"
+    ' "$tmp_extras_raw" >"$extras_block"
+    # trim trailing blanks
+    awk '{ lines[NR]=$0 } END{ n=NR; while(n>0 && lines[n] ~ /^[[:space:]]*$/) n--; for(i=1;i<=n;i++) print lines[i] }' "$extras_block" > "${extras_block}.t" && mv -f "${extras_block}.t" "$extras_block"
     [ -s "$extras_block" ] && have_extras=1
   fi
 
@@ -1027,11 +973,9 @@ EOF
   {
     echo "["
     echo "  //codestrap merged keybindings:"
-
     if [ $have_managed -eq 1 ]; then
-      # Print managed, but maybe add a trailing comma on the LAST non-blank line
-      # if we also have extras.
       if [ $have_extras -eq 1 ]; then
+        # add a trailing comma to the last non-blank line of managed (and keep comma before //preserve)
         awk '
           { if ($0 ~ /[^[:space:]]/) last=NR; lines[NR]=$0 }
           END{
@@ -1039,7 +983,6 @@ EOF
               if (i==last) {
                 l=lines[i]
                 sub(/[[:space:]]*$/, "", l)
-                # If the last managed line already ends with //preserve, keep comma BEFORE comment
                 if (l ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
                   sub(/[[:space:]]*\/\/[[:space:]]*preserve[[:space:]]*$/, ", //preserve", l)
                   print l
@@ -1056,22 +999,10 @@ EOF
         cat "$managed_block"
       fi
     fi
-
     echo "  //user defined keybindings:"
-
     if [ $have_extras -eq 1 ]; then
-      # Extras go as-is (indented). Do not add trailing comma after last one.
-      awk '
-        { lines[NR]=$0 }
-        END{
-          # drop the final blank line if present
-          n=NR
-          while (n>0 && lines[n] ~ /^[[:space:]]*$/) n--
-          for(i=1;i<=n;i++) print lines[i]
-        }
-      ' "$extras_block"
+      cat "$extras_block"
     fi
-
     echo "]"
   } > "$tmp_with_comments"
 
@@ -1085,7 +1016,6 @@ EOF
 
   log "merged keybindings.json → $KEYB_PATH"
 }
-
 
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
