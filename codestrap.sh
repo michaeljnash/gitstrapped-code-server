@@ -666,13 +666,13 @@ merge_codestrap_settings(){
   } > "$tmp_with_comments"
 
   # ensure END marker exists (append before last line)
-  if ! grep -q '//user defined settings' "$tmp_with_comments"; then
+  if ! grep -q '//user defined settings:' "$tmp_with_comments"; then
     awk '
       BEGIN{n=0}
       {buf[++n]=$0}
       END{
         for(i=1;i<=n;i++){
-          if(i==n){ print "  //user defined settings" }
+          if(i==n){ print "  //user defined settings:" }
           print buf[i]
         }
       }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
