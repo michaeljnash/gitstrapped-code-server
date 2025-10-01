@@ -559,11 +559,11 @@ merge_codestrap_settings(){
     ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
   fi
 
-  # ---- Build managed + user-extras arrays we can reliably emit from ----
+  # ---- Build arrays (managed + user extras) ----
   tmp_managed_arr="$(mktemp)"
   tmp_user_extras_arr="$(mktemp)"
 
-  # Managed (repo keys, but use user value when preserved)
+  # Managed: repo keys in repo order; value from user if preserved
   jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
@@ -581,7 +581,7 @@ merge_codestrap_settings(){
         ]
     ' > "$tmp_managed_arr"
 
-  # User extras (keys present only in user, keep original order)
+  # User extras: keys only in user (preserve original order)
   jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" '
@@ -595,10 +595,10 @@ merge_codestrap_settings(){
         ]
     ' > "$tmp_user_extras_arr"
 
-  mlen="$(jq 'length' "$tmp_managed_arr")"
-  ulen="$(jq 'length' "$tmp_user_extras_arr")"
+  # Lengths (robust defaults)
+  mlen="$(jq -r 'try length catch 0' "$tmp_managed_arr")"
+  ulen="$(jq -r 'try length catch 0' "$tmp_user_extras_arr")"
 
-  # Quick sanity breadcrumb in logs (helps spot why output might be empty)
   CTX_TAG="[Bootstrap config]"; log "settings: repo-managed=$mlen user-extras=$ulen"; CTX_TAG=""
 
   # ---- Emit final with section markers + restored //preserve ----
@@ -607,53 +607,67 @@ merge_codestrap_settings(){
     echo "{"
     echo "  //codestrap merged settings:"
 
-    if [ "$mlen" -gt 0 ]; then
-      # iterate numeric indices 0..mlen-1 via jq to avoid shell seq dependency
-      while IFS= read -r idx; do
-        key=$(jq -r ".[$idx].key"   "$tmp_managed_arr")
-        val=$(jq -c ".[$idx].value" "$tmp_managed_arr")
-        pres=$(jq -r ".[$idx].preserve" "$tmp_managed_arr")
+    if [ "$mlen" -gt 0 ] 2>/dev/null; then
+      # Precompute per-line JSON for managed with whether to print a trailing comma
+      jq -r --argjson m "$mlen" --argjson u "$ulen" '
+        . as $A
+        | range(0; $m) as $i
+        | { k: $A[$i].key
+          , v: ($A[$i].value | tojson)
+          , p: ($A[$i].preserve)
+          , comma: ( ($i < ($m-1)) or ($u > 0) )
+          }
+        | @base64
+      ' "$tmp_managed_arr" \
+      | while IFS= read -r row; do
+          # decode one record
+          rec="$(printf '%s' "$row" | base64 -d)"
+          k="$(printf '%s' "$rec" | jq -r '.k')"
+          v="$(printf '%s' "$rec" | jq -r '.v')"
+          p="$(printf '%s' "$rec" | jq -r '.p')"
+          comma="$(printf '%s' "$rec" | jq -r '.comma')"
 
-        last_man=$(( mlen - 1 ))
-        need_comma=0
-        # comma after each managed item if there are user extras OR not the last managed
-        if [ "$ulen" -gt 0 ] || [ "$idx" -lt "$last_man" ]; then need_comma=1; fi
-
-        printf '  "%s": %s' "$key" "$val"
-        if [ "$need_comma" -eq 1 ]; then
-          if [ "$pres" = "true" ]; then
-            printf ",//preserve\n"
+          printf '  "%s": %s' "$k" "$v"
+          if [ "$comma" = "true" ]; then
+            if [ "$p" = "true" ]; then
+              printf ",//preserve\n"
+            else
+              printf ",\n"
+            fi
           else
-            printf ",\n"
+            if [ "$p" = "true" ]; then
+              printf "//preserve\n"
+            else
+              printf "\n"
+            fi
           fi
-        else
-          if [ "$pres" = "true" ]; then
-            printf "//preserve\n"
-          else
-            printf "\n"
-          fi
-        fi
-      done <<EOFIDX
-$(jq -r 'range(0; length)' "$tmp_managed_arr")
-EOFIDX
+        done
     fi
 
     echo "  //user defined settings:"
 
-    if [ "$ulen" -gt 0 ]; then
-      while IFS= read -r j; do
-        k=$(jq -r ".[$j].key"   "$tmp_user_extras_arr")
-        v=$(jq -c ".[$j].value" "$tmp_user_extras_arr")
-        last_usr=$(( ulen - 1 ))
-        printf '  "%s": %s' "$k" "$v"
-        if [ "$j" -lt "$last_usr" ]; then
-          printf ",\n"
-        else
-          printf "\n"
-        fi
-      done <<EOFUSR
-$(jq -r 'range(0; length)' "$tmp_user_extras_arr")
-EOFUSR
+    if [ "$ulen" -gt 0 ] 2>/dev/null; then
+      jq -r --argjson u "$ulen" '
+        . as $E
+        | range(0; $u) as $i
+        | { k: $E[$i].key
+          , v: ($E[$i].value | tojson)
+          , comma: ( $i < ($u-1) )
+          }
+        | @base64
+      ' "$tmp_user_extras_arr" \
+      | while IFS= read -r row; do
+          rec="$(printf '%s' "$row" | base64 -d)"
+          k="$(printf '%s' "$rec" | jq -r '.k')"
+          v="$(printf '%s' "$rec" | jq -r '.v')"
+          comma="$(printf '%s' "$rec" | jq -r '.comma')"
+          printf '  "%s": %s' "$k" "$v"
+          if [ "$comma" = "true" ]; then
+            printf ",\n"
+          else
+            printf "\n"
+          fi
+        done
     fi
 
     echo "}"
