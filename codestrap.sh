@@ -794,6 +794,28 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # ---- Load USER ----
+  tmp_user_json="$(mktemp)"
+  if [ -f "$KEYB_PATH" ]; then
+    if [ ! -s "$KEYB_PATH" ]; then
+      printf '[]\n' > "$tmp_user_json"
+    else
+      if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
+        cp "$KEYB_PATH" "$tmp_user_json"
+      else
+        strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
+        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+          rm -f "$tmp_user_json" 2>/dev/null || true
+          put_error_banner_this "$KEYB_PATH" "user keybindings.json is malformed; skipped merge to avoid data loss."
+          abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipped merge to avoid data loss."
+          return 0
+        fi
+      fi
+    fi
+  else
+    printf '[]\n' > "$tmp_user_json"
+  fi
+
   # ---- Load REPO ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
@@ -801,222 +823,133 @@ merge_codestrap_keybindings(){
   else
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
       put_error_banner_repo "$KEYB_PATH" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge." "repo keybindings.json" "$REPO_KEYB_SRC"
       abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge."
-      rm -f "$tmp_repo_json" 2>/dev/null || true
       return 0
     fi
   fi
 
-  # ---- Read USER raw: collect preserves + keep non-managed objects as "extras" ----
-  tmp_preserve_tsv="$(mktemp)"   # id \t prop \t rawJSONValue
-  : >"$tmp_preserve_tsv"
-  tmp_extras_raw="$(mktemp)"     # concatenated raw objects that are NOT codestrap-managed
-  : >"$tmp_extras_raw"
+  # external preserve list → temp file
+  tmp_preserve="$(mktemp)"
+  printf '%s\n' "$(read_preserve_array_json keybindings)" > "$tmp_preserve"
 
-  if [ -f "$KEYB_PATH" ] && [ -s "$KEYB_PATH" ]; then
-    awk -v PRE="$tmp_preserve_tsv" -v EX="$tmp_extras_raw" '
-      BEGIN{
-        curr_id="";
-        managed_next=0;
-        in_obj=0; depth=0;
-        buf="";
+  # Build managed (repo-first, honoring preserve) and extras (user-only) separately
+  tmp_both="$(mktemp)"
+  jq -n \
+    --slurpfile U "$tmp_user_json" \
+    --slurpfile R "$tmp_repo_json" \
+    --slurpfile P "$tmp_preserve" '
+      def arr(x): if (x|type)=="array" then x else [] end;
+      def is_kb($x): ($x|type)=="object" and ($x.key? != null);
+      def kstr($x): (if ($x|type)=="object" and ($x.key? != null) then ($x.key|tostring) else null end);
+
+      (arr($U[0])) as $Uraw
+      | (arr($R[0])) as $Rraw
+      | (arr($P[0])) as $PRES
+
+      # Filter to objects-with-key
+      | ($Uraw | map(select(is_kb(.)))) as $U
+      | ($Rraw | map(select(is_kb(.)))) as $R
+
+      # Build maps by key (object → then drop any "null" key)
+      | ($U | map({ (kstr(.)): . }) | add // {} | del(.null)) as $u_by_key
+
+      # Repo list first, honoring preserve; when repo wins, mark it
+      | ($R
+          | map( . as $o
+                | (kstr($o)) as $k
+                | if (($PRES | index($k)) and ($u_by_key[$k]? != null))
+                  then $u_by_key[$k]
+                  else ( { "__codestrapMerged": true } + $o )
+                  end)
+        ) as $managed
+
+      # Add user extras (keys not already in managed)
+      | ($managed
+          | map(kstr(.))
+          | map(select(. != null))
+          | map({(.):true}) | add // {}
+        ) as $seen
+      | ($U
+          | map( . as $o
+                | (kstr($o)) as $k
+                | select(($k != null) and (($seen[$k]? // false) | not))
+                | $o)
+        ) as $extras
+
+      | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
+    ' > "$tmp_both"
+
+  mlen="$(jq -r '.mlen' "$tmp_both")"
+  elen="$(jq -r '.elen' "$tmp_both")"
+
+  # Pretty-print arrays (each to its own file), then strip outer [ ]
+  tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
+  tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
+
+  managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
+  extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
+
+  # Convert the marker property line into a comment INSIDE each managed object
+  managed_annotated="$(mktemp)"
+  awk '
+    {
+      if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
+        match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH);
+        print indent "//codestrap merged keybinding:";
+        next
       }
-      {
-        line=$0;
+      print $0
+    }
+  ' "$managed_body" > "$managed_annotated"
 
-        # Detect ID marker for next object
-        if (match(line, /^[[:space:]]*\/\/codestrap[[:space:]]+merged[[:space:]]+keybinding[[:space:]]+id#([0-9a-fA-F]+)/, m)) {
-          curr_id=m[1];
-          managed_next=1;
-          next;
-        }
-
-        # Start of object?
-        if (in_obj==0 && index(line, "{")>0){
-          in_obj=1;
-          # count braces on this line without modifying it
-          tmp=line; oc=0; cc=0;
-          while (match(tmp, /[{]/)) { oc++; tmp=substr(tmp, RSTART+1); }
-          tmp=line;
-          while (match(tmp, /[}]/)) { cc++; tmp=substr(tmp, RSTART+1); }
-          depth = oc - cc;
-          buf=line "\n";
-          next;
-        }
-
-        if (in_obj==1){
-          # accumulate buffer
-          buf = buf line "\n";
-
-          # while managed, capture //preserve property lines
-          if (managed_next==1){
-            if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/){
-              s=line;
-              sub(/\/\/[[:space:]]*preserve[[:space:]]*$/, "", s);      # drop comment
-              if (match(s, /^[[:space:]]*"([^"]+)"[[:space:]]*:[[:space:]]*(.*)$/, mm)){
-                prop = mm[1];
-                val  = mm[2];
-                sub(/,[[:space:]]*$/, "", val);                          # drop trailing comma
-                # trim outer spaces
-                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", val);
-                # write preserve
-                printf("%s\t%s\t%s\n", curr_id, prop, val) >> PRE;
-              }
-            }
-          }
-
-          # Update depth for this line
-          tmp=line; oc=0; cc=0;
-          while (match(tmp, /[{]/)) { oc++; tmp=substr(tmp, RSTART+1); }
-          tmp=line;
-          while (match(tmp, /[}]/)) { cc++; tmp=substr(tmp, RSTART+1); }
-          depth += (oc - cc);
-
-          # End of object?
-          if (depth<=0){
-            if (managed_next==0){
-              # keep as user extra
-              printf("%s\n\n", buf) >> EX;
-            }
-            # reset
-            in_obj=0; depth=0; buf="";
-            managed_next=0; curr_id="";
-          }
-        }
-      }
-    ' "$KEYB_PATH"
-  fi
-
-  # ---- Build managed list from REPO, inject id and apply preserved fields ----
-  managed_block="$(mktemp)"; : >"$managed_block"
-  PRES_TSV="$tmp_preserve_tsv"
-
-  while IFS= read -r obj; do
-    [ -n "$obj" ] || continue
-    canon="$(printf '%s' "$obj" | jq -cS '.')"
-    id="$(printf '%s' "$canon" | sha1sum | awk '{print $1}')"
-
-    # build jq overlay from preserves for this id
-    filter=""
-    while IFS=$'\t' read -r pid pkey pval; do
-      [ "$pid" = "$id" ] || continue
-      if [ -z "$filter" ]; then
-        filter=".\"$pkey\" = ($pval)"
-      else
-        filter="$filter | .\"$pkey\" = ($pval)"
-      fi
-    done <"$PRES_TSV"
-
-    [ -n "$filter" ] && canon="$(printf '%s' "$obj" | jq -cS "$filter")"
-    pretty="$(printf '%s' "$canon" | jq '.')"
-
-    printf "  //codestrap merged keybinding id#%s\n" "$id" >>"$managed_block"
-
-    # collect preserved keys for this id
-    tmp_id_keys="$(mktemp)"; : >"$tmp_id_keys"
-    awk -F '\t' -v ID="$id" '$1==ID{print $2}' "$PRES_TSV" | awk 'NF' | awk '!seen[$0]++' >"$tmp_id_keys"
-
-    # re-add //preserve on preserved lines (comma stays before comment)
-    awk -v KF="$tmp_id_keys" '
-      BEGIN{
-        while ((getline k < KF) > 0) { pres[k]=1 }
-        close(KF)
-      }
-      {
-        l=$0
-        if (match(l, /^[[:space:]]*"([^"]+)"[[:space:]]*:/, mm)) {
-          k=mm[1]
-          if (k in pres) {
-            if (l ~ /,[[:space:]]*$/) {
-              sub(/,[[:space:]]*$/, "", l)
-              sub(/[[:space:]]*$/, "", l)
-              l = l ", //preserve"
-            } else {
-              sub(/[[:space:]]*$/, "", l)
-              l = l " //preserve"
-            }
-          }
-        }
-        print l
-      }
-    ' <<EOF >>"$managed_block"
-$pretty
-EOF
-    rm -f "$tmp_id_keys" 2>/dev/null || true
-    printf "\n" >>"$managed_block"
-  done < <(jq -c '.[] | select(type=="object")' "$tmp_repo_json")
-
-  have_managed=0; [ -s "$managed_block" ] && have_managed=1
-
-  # ---- Prepare extras block (raw objects captured earlier, not managed) ----
-  extras_block="$(mktemp)"; : >"$extras_block"
-  have_extras=0
-  if [ -s "$tmp_extras_raw" ]; then
+  # If both segments exist, append a comma to the last non-blank line of the managed block
+  managed_final="$managed_annotated"
+  if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
+    managed_final="$(mktemp)"
     awk '
-      # re-indent two spaces, keep blank line between objects
-      {
-        if ($0=="") {
-          print "";
-        } else {
-          print "  " $0;
+      { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
+      END {
+        for(i=1;i<=NR;i++){
+          if (i==last) {
+            sub(/[[:space:]]*$/,"",lines[i]);
+            print lines[i] ","
+          } else {
+            print lines[i]
+          }
         }
       }
-    ' "$tmp_extras_raw" >"$extras_block"
-    # trim trailing blanks
-    awk '{ lines[NR]=$0 } END{ n=NR; while(n>0 && lines[n] ~ /^[[:space:]]*$/) n--; for(i=1;i<=n;i++) print lines[i] }' "$extras_block" > "${extras_block}.t" && mv -f "${extras_block}.t" "$extras_block"
-    [ -s "$extras_block" ] && have_extras=1
+    ' "$managed_annotated" > "$managed_final"
   fi
 
-  # ---- Stitch final array with section comments and correct commas ----
+  # Compose final array with section comments; keep commas in-line
   tmp_with_comments="$(mktemp)"
   {
     echo "["
     echo "  //codestrap merged keybindings:"
-    if [ $have_managed -eq 1 ]; then
-      if [ $have_extras -eq 1 ]; then
-        # add a trailing comma to the last non-blank line of managed (and keep comma before //preserve)
-        awk '
-          { if ($0 ~ /[^[:space:]]/) last=NR; lines[NR]=$0 }
-          END{
-            for(i=1;i<=NR;i++){
-              if (i==last) {
-                l=lines[i]
-                sub(/[[:space:]]*$/, "", l)
-                if (l ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
-                  sub(/[[:space:]]*\/\/[[:space:]]*preserve[[:space:]]*$/, ", //preserve", l)
-                  print l
-                } else {
-                  print l ","
-                }
-              } else {
-                print lines[i]
-              }
-            }
-          }
-        ' "$managed_block"
-      else
-        cat "$managed_block"
-      fi
+    if [ -s "$managed_final" ]; then
+      sed 's/^/  /' "$managed_final"
     fi
     echo "  //user defined keybindings:"
-    if [ $have_extras -eq 1 ]; then
-      cat "$extras_block"
+    if [ -s "$extras_body" ]; then
+      sed 's/^/  /' "$extras_body"
     fi
     echo "]"
   } > "$tmp_with_comments"
 
-  # ---- Write result ----
+  # Write result
   write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
 
-  rm -f "$tmp_repo_json" "$tmp_preserve_tsv" "$tmp_extras_raw" \
-        "$managed_block" "$extras_block" "$tmp_with_comments" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" \
+        "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr" \
+        "$managed_body" "$extras_body" "$managed_annotated" \
+        "$managed_final" "$tmp_with_comments" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
 }
-
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
@@ -1624,7 +1557,7 @@ cli_entry(){
     fi
 
     # Show banner BEFORE first hub question
-    bootstrap_banner
+    bootstrap_banner()
 
     # 1) GitHub?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
