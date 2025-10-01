@@ -734,8 +734,8 @@ merge_codestrap_keybindings(){
   tmp_preserve="$(mktemp)"
   printf '%s\n' "$(read_preserve_array_json keybindings)" > "$tmp_preserve"
 
-  # 1) Build merged array with marker on repo-sourced objects
-  tmp_merged="$(mktemp)"
+  # Build managed (repo-first, honoring preserve) and extras (user-only) separately
+  tmp_both="$(mktemp)"
   jq -n \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
@@ -752,9 +752,8 @@ merge_codestrap_keybindings(){
       | ($Uraw | map(select(is_kb(.)))) as $U
       | ($Rraw | map(select(is_kb(.)))) as $R
 
-      # Build maps by key (make object first, then drop the "null" key if any)
+      # Build maps by key (object → then drop any "null" key)
       | ($U | map({ (kstr(.)): . }) | add // {} | del(.null)) as $u_by_key
-      | ($R | map({ (kstr(.)): . }) | add // {} | del(.null)) as $r_by_key
 
       # Repo list first, honoring preserve; when repo wins, mark it
       | ($R
@@ -766,13 +765,12 @@ merge_codestrap_keybindings(){
                   end)
         ) as $managed
 
-      # Add user extras (skip null keys)
+      # Add user extras (keys not already in managed)
       | ($managed
           | map(kstr(.))
           | map(select(. != null))
           | map({(.):true}) | add // {}
         ) as $seen
-
       | ($U
           | map( . as $o
                 | (kstr($o)) as $k
@@ -780,35 +778,65 @@ merge_codestrap_keybindings(){
                 | $o)
         ) as $extras
 
-      | ($managed + $extras)
-    ' > "$tmp_merged"
+      | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
+    ' > "$tmp_both"
 
-  # 2) Pretty print
-  tmp_pretty="$(mktemp)"
-  jq '.' "$tmp_merged" > "$tmp_pretty"
+  mlen="$(jq -r '.mlen' "$tmp_both")"
+  elen="$(jq -r '.elen' "$tmp_both")"
 
-  # 3) Convert the marker property line into a comment INSIDE each object
-  #    Line will look like:    ".__codestrapMerged": true,
-  #    We replace the *entire line* with:    //codestrap merged keybinding:
-  tmp_annotated="$(mktemp)"
+  # Pretty-print arrays (one file each), then strip surrounding [ ] so we can bracket with comments
+  tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
+  tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
+
+  # Strip the first and last lines (the [ and ])
+  managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
+  extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
+
+  # Convert the marker property line into a comment INSIDE each managed object
+  #   ".__codestrapMerged": true,  →  //codestrap merged keybinding:
+  managed_annotated="$(mktemp)"
   awk '
     {
       if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
-        # portable indent capture
-        match($0,/^[[:space:]]*/);
-        indent=substr($0,1,RLENGTH);
+        match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH);
         print indent "//codestrap merged keybinding:";
         next
       }
       print $0
     }
-  ' "$tmp_pretty" > "$tmp_annotated"
+  ' "$managed_body" > "$managed_annotated"
 
-  write_inplace "$tmp_annotated" "$KEYB_PATH"
+  # Compose final array with section comments + correct commas between segments
+  tmp_with_comments="$(mktemp)"
+  {
+    echo "["
+    echo "  //codestrap merged keybindings:"
+    # emit managed segment (if any)
+    if [ -s "$managed_annotated" ]; then
+      # indent the managed block by two spaces to sit nicely under the array
+      sed 's/^/  /' "$managed_annotated"
+    fi
+    # comma between segments iff both non-empty
+    if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
+      echo "  ,"
+    fi
+    echo "  //user defined keybindings:"
+    if [ -s "$extras_body" ]; then
+      sed 's/^/  /' "$extras_body"
+    fi
+    echo "]"
+  } > "$tmp_with_comments"
+
+  # Write result
+  write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" "$tmp_merged" "$tmp_pretty" "$tmp_annotated" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" \
+        "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr" \
+        "$managed_body" "$extras_body" "$managed_annotated" \
+        "$tmp_with_comments" 2>/dev/null || true
+
   log "merged keybindings.json → $KEYB_PATH"
 }
 
