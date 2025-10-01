@@ -719,8 +719,15 @@ merge_codestrap_settings(){
           if (q2 > 1) {
             key = substr(rest, 1, q2 - 1)
             if (key in pres) {
-              sub(/[[:space:]]*$/, "", line)
-              line = line " //preserve"
+              # If there is a trailing comma, keep it BEFORE the comment
+              if (line ~ /,[[:space:]]*$/) {
+                sub(/,[[:space:]]*$/, "", line)
+                sub(/[[:space:]]*$/, "", line)
+                line = line ", //preserve"
+              } else {
+                sub(/[[:space:]]*$/, "", line)
+                line = line " //preserve"
+              }
             }
           }
         }
