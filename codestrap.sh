@@ -1173,9 +1173,9 @@ merge_codestrap_keybindings(){
   tmp_with_comments="$(mktemp)"
   {
     echo "["
-    echo "  //codestrap merged keybindings:"
+    echo "    //codestrap merged keybindings:"
     if [ -s "$managed_final" ]; then sed 's/^/  /' "$managed_final"; fi
-    echo "  //user defined keybindings:"
+    echo "    //user defined keybindings:"
     if [ -s "$extras_body" ]; then sed 's/^/  /' "$extras_body"; fi
     echo "]"
   } > "$tmp_with_comments"
