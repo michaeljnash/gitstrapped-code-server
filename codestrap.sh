@@ -512,7 +512,7 @@ merge_codestrap_settings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER (object; allow //... and /* ... */) ----
+  # ---- Load USER (allow // and /* */) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
@@ -530,7 +530,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # ---- Load REPO (object; allow //... and /* ... */) ----
+  # ---- Load REPO (allow // and /* */) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -544,7 +544,7 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # ---- Detect //preserve marks from the raw user file (top-level keys only) ----
+  # ---- Detect //preserve on top-level keys from the RAW user file ----
   tmp_preserved_keys="$(mktemp)"; : >"$tmp_preserved_keys"
   if [ -f "$SETTINGS_PATH" ]; then
     awk '
@@ -559,7 +559,7 @@ merge_codestrap_settings(){
     ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
   fi
 
-  # ---- Merge (repo-first unless preserved; keep user extras). Guard against arrays. ----
+  # ---- Merge safely (optional indexing everywhere) ----
   tmp_merged="$(mktemp)"
   jq -n \
     --slurpfile U "$tmp_user_json" \
@@ -569,24 +569,29 @@ merge_codestrap_settings(){
 
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
-      | ($RO | keys) as $RK
+      | ($RO | (if (type=="object") then keys else [] end)) as $RK
       | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
 
-      # repo-managed first (but preserve per-line if marked)
+      # repo-managed first unless preserved
       | (reduce $RK[] as $k (
           {};
-          . + { ($k): ( if ( ($PRES | index($k)) and ($UO | has($k)) )
+          . + { ($k): ( if ( ($PRES | index($k)) and ($UO[$k]? != null) )
                         then $UO[$k]
-                        else $RO[$k]
+                        else $RO[$k]?
                       end ) }
         )) as $MANAGED
 
       # user extras (keys not present in repo)
-      | ($UO | to_entries | map(select( ($RK | index(.key)) | not )) | from_entries) as $UREST
+      | ($UO
+          | to_entries
+          | map(select( ($RK | index(.key)) | not ))
+          | from_entries
+        ) as $UREST
+
       | ($MANAGED + $UREST)
   ' > "$tmp_merged"
 
-  # ---- Pretty + bracket comments ----
+  # ---- Pretty + bracket comments (no trailing comma games) ----
   tmp_pretty="$(mktemp)"; jq '.' "$tmp_merged" > "$tmp_pretty"
 
   tmp_with_comments="$(mktemp)"
