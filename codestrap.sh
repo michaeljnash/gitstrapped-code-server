@@ -805,7 +805,9 @@ merge_codestrap_keybindings(){
     --slurpfile UMAN "$tmp_um_objs" \
     --slurpfile PRES "$tmp_um_pres" \
     --slurpfile EX "$tmp_extras_arr" '
-      def arr(x): if (x|type)=="array" then x else [] end;
+      def arr(x): if (x|type)=="array"  then x else [] end;
+      def obj(x): if (x|type)=="object" then x else {} end;
+
       (arr($R[0]))       as $R
       | (arr($UMAN[0]))  as $UM
       | (arr($PRES[0]))  as $P
@@ -816,14 +818,19 @@ merge_codestrap_keybindings(){
 
       # Build managed array positionally
       | [ range(0; $RL) as $i
-          | ( $R[$i] ) as $r
-          | ( if $i < $UL then $UM[$i] else {} end ) as $u
+          | ( obj($R[$i]) ) as $r
+          | ( if $i < $UL then obj($UM[$i]) else {} end ) as $u
           | ( if $i < ($P|length) then $P[$i] else [] end ) as $keep
 
           # merge fields: preserve $u[$k] iff $k in $keep; else use $r[$k]
           | ( ($r|keys) as $rk
               | reduce $rk[] as $k ( {};
-                  . + { ($k): ( if ($keep | index($k)) and ($u[$k] != null) then $u[$k] else $r[$k] end ) }
+                  . + { ($k): (
+                        if ($keep | index($k)) and ($u[$k]? != null)
+                        then $u[$k]?
+                        else $r[$k]?
+                        end
+                      ) }
                 )
             )
         ] as $managed
