@@ -1,3 +1,4 @@
 {
-    "someSettingKey": "someSettingVal"
+    "someSettingKey": "someSettingVal",
+    "workbench.colorTheme": "Default Dark+"
 }
