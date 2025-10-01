@@ -833,7 +833,7 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # === PASS 1: scan RAW user file to capture {index→id} and {id→preserved-props} from comments ===
+  # === PASS 1: scan RAW user file → {index→id} and {id→preserved-props} (from comments) ===
   tmp_id_by_index="$(mktemp)"      # "<idx>\t<id>"
   tmp_preserve_pairs="$(mktemp)"   # "<id>\t<prop>"
   : >"$tmp_id_by_index"; : >"$tmp_preserve_pairs"
@@ -848,10 +848,8 @@ merge_codestrap_keybindings(){
         oc = gsub(/\{/,"{",line)
         cc = gsub(/\}/,"}",line)
 
-        # entering an object at array depth 1
         if (bdepth==1 && oc>0 && cdepth==0) { idx=idx+1; curr_id="" }
 
-        # id comment inside current object
         if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
           id=line
           sub(/^.*id#/, "", id)
@@ -860,7 +858,6 @@ merge_codestrap_keybindings(){
           if (idx >= 0 && id != "") { print idx "\t" id >> OUT1 }
         }
 
-        # per-prop //preserve inside current object
         if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
           if (line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
             prop=line
@@ -885,18 +882,25 @@ merge_codestrap_keybindings(){
     printf '{}\n' > "$tmp_preserve_json"
   fi
 
-  # JSON: id -> user object (by array index from tmp_user_json)
-  tmp_user_id_map="$(mktemp)"; printf '{}\n' > "$tmp_user_id_map"
-  tmp_idx_skip_set="$(mktemp)"; printf '{}\n' > "$tmp_idx_skip_set"   # indices to skip in extras (matched ids)
+  # JSON: id -> index   (so we can always fetch user object by index)
+  tmp_idx_by_id="$(mktemp)"; printf '{}\n' > "$tmp_idx_by_id"
+  if [ -s "$tmp_id_by_index" ]; then
+    while IFS=$'\t' read -r idx id; do
+      [ -n "$idx" ] && [ -n "$id" ] || continue
+      jq --arg id "$id" --arg i "$idx" '. + {($id): ($i|tonumber)}' "$tmp_idx_by_id" > "$tmp_idx_by_id.tmp" \
+        && mv -f "$tmp_idx_by_id.tmp" "$tmp_idx_by_id"
+    done < "$tmp_id_by_index"
+  fi
 
+  # JSON: id -> user object (look up by recorded index)
+  tmp_user_id_map="$(mktemp)"; printf '{}\n' > "$tmp_user_id_map"
   if [ -s "$tmp_id_by_index" ]; then
     while IFS=$'\t' read -r idx id; do
       [ -n "$idx" ] && [ -n "$id" ] || continue
       uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_json" 2>/dev/null || printf 'null')"
-      # keep only if it is an object
       if printf '%s' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1; then
-        jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$tmp_user_id_map" > "$tmp_user_id_map.tmp" && mv -f "$tmp_user_id_map.tmp" "$tmp_user_id_map"
-        jq --argjson i "$idx" '. + {($i|tostring): true}' "$tmp_idx_skip_set" > "$tmp_idx_skip_set.tmp" && mv -f "$tmp_idx_skip_set.tmp" "$tmp_idx_skip_set"
+        jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$tmp_user_id_map" > "$tmp_user_id_map.tmp" \
+          && mv -f "$tmp_user_id_map.tmp" "$tmp_user_id_map"
       fi
     done < "$tmp_id_by_index"
   fi
@@ -909,50 +913,75 @@ merge_codestrap_keybindings(){
     printf '%s\n' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }'
   done | jq -s '.' > "$tmp_repo_with_ids"
 
-  # Merge: for each repo obj, if id present in user, copy preserved props from that user obj
+  # Merge:
+  # - If user has an object for this id, start from REPO object and copy preserved props from the USER object.
+  # - Otherwise keep REPO object.
   tmp_managed="$(mktemp)"
   jq -n \
-    --slurpfile R "$tmp_repo_with_ids" \
+    --slurpfile R    "$tmp_repo_with_ids" \
     --slurpfile KEEP "$tmp_preserve_json" \
-    --slurpfile UMAP "$tmp_user_id_map" '
+    --slurpfile UMAP "$tmp_user_id_map" \
+    --slurpfile IDX  "$tmp_idx_by_id" \
+    --slurpfile UARR "$tmp_user_json" '
       def arr(x): if (x|type)=="array" then x else [] end;
       def obj(x): if (x|type)=="object" then x else {} end;
 
       (arr($R[0])) as $R
       | (obj($KEEP[0])) as $K
-      | (obj($UMAP[0])) as $U
+      | (obj($UMAP[0])) as $U   # id -> user object (may be empty for some ids)
+      | (obj($IDX[0]))  as $I   # id -> index (number)
+      | (arr($UARR[0])) as $UA  # full user array
 
       | [ $R[] |
           . as $repo
           | ($repo.__tmp_id // null) as $id
-          | if ($id!=null and ($U|has($id))) then
-              ($U[$id]) as $u
+          | if ($id != null) then
+              # prefer prebuilt user object; fallback to index-lookup if somehow missing
+              ( if ($U|has($id)) then $U[$id]
+                elif ($I|has($id)) then ($UA[ ($I[$id]) ] // null)
+                else null end ) as $u
               | ($K[$id] // []) as $pres
-              | reduce $pres[] as $p ($repo;
-                  if ($u|has($p)) then .[$p] = $u[$p] else . end)
+              | if ($u != null and ($pres|length) > 0)
+                then reduce $pres[] as $p ($repo; if ($u|has($p)) then .[$p] = $u[$p] else . end)
+                else $repo
+                end
             else
               $repo
             end
         ]
     ' > "$tmp_managed"
 
-  # Build set of repo ids and repo object hashes to filter extras
-  tmp_repo_ids="$(mktemp)"; jq -r '.[].__tmp_id | select(.)' "$tmp_managed" | awk 'NF' | sort -u > "$tmp_repo_ids"
-  tmp_repo_hashes="$(mktemp)"; jq -c '.[] | del(.__tmp_id)' "$tmp_managed" | while IFS= read -r o; do printf '%s\n' "$o" | kb_hash; done | sort -u > "$tmp_repo_hashes"
+  # Build sets to filter extras:
+  #   - ids present in user (from scan) → exclude those indices entirely
+  #   - plus, any user entry identical to a managed entry (by hash) → exclude
+  tmp_seen_idx="$(mktemp)"; printf '%s\n' '[' > "$tmp_seen_idx"
+  if [ -s "$tmp_id_by_index" ]; then
+    first=1
+    while IFS=$'\t' read -r idx _id; do
+      [ -n "$idx" ] || continue
+      if [ $first -eq 0 ]; then printf ', ' >> "$tmp_seen_idx"; fi
+      printf '%s' "$idx" >> "$tmp_seen_idx"
+      first=0
+    done < "$tmp_id_by_index"
+  fi
+  printf '%s\n' ']' >> "$tmp_seen_idx"
 
-  # Build extras: user entries that are not matched by id and not duplicate by hash
+  tmp_managed_hashes="$(mktemp)"
+  jq -c '.[] | del(.__tmp_id)' "$tmp_managed" | while IFS= read -r o; do printf '%s\n' "$o" | kb_hash; done | sort -u > "$tmp_managed_hashes"
+
+  # Build extras: user entries that are not at managed-id indices and not duplicate by hash
   tmp_extras="$(mktemp)"
-  # 1) candidate extras = all user entries not skipped by index
   jq -c '.' "$tmp_user_json" \
-  | jq -c 'to_entries | map(select(.value|type=="object") | .) | .[]' \
+  | jq -c 'to_entries | map(select(.value|type=="object")) | .[]' \
   | while IFS= read -r entry; do
       idx="$(printf '%s' "$entry" | jq -r '.key')"
       val="$(printf '%s' "$entry" | jq -c '.value')"
-      if jq -e --arg i "$idx" 'has($i)' "$tmp_idx_skip_set" >/dev/null 2>&1; then
+      # skip any index that belongs to a known id
+      if jq -e --argjson idx "$idx" --argjson arr "$(cat "$tmp_seen_idx")" '$arr|index($idx) != null' >/dev/null 2>&1; then
         continue
       fi
       h="$(printf '%s' "$val" | kb_hash)"
-      if grep -qx "$h" "$tmp_repo_hashes" 2>/dev/null; then
+      if grep -qx "$h" "$tmp_managed_hashes" 2>/dev/null; then
         continue
       fi
       printf '%s\n' "$val"
@@ -1101,15 +1130,13 @@ merge_codestrap_keybindings(){
   clear_error_banner "$KEYB_PATH"
 
   rm -f "$tmp_user_json" "$tmp_repo_json" \
-        "$tmp_id_by_index" "$tmp_preserve_pairs" "$tmp_preserve_json" "$tmp_user_id_map" "$tmp_idx_skip_set" \
-        "$tmp_repo_with_ids" "$tmp_managed" "$tmp_repo_ids" "$tmp_repo_hashes" \
+        "$tmp_id_by_index" "$tmp_preserve_pairs" "$tmp_preserve_json" "$tmp_idx_by_id" "$tmp_user_id_map" \
+        "$tmp_repo_with_ids" "$tmp_managed" "$tmp_managed_hashes" "$tmp_seen_idx" \
         "$tmp_managed_arr" "$tmp_extras_arr" "$managed_body" "$extras_body" \
         "$managed_annotated" "$managed_with_preserve" "$managed_final" "$tmp_with_comments" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
 }
-
-
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
