@@ -559,11 +559,11 @@ merge_codestrap_settings(){
     ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
   fi
 
-  # ---- Build arrays we can reliably emit from ----
+  # ---- Build managed + user-extras arrays we can reliably emit from ----
   tmp_managed_arr="$(mktemp)"
   tmp_user_extras_arr="$(mktemp)"
 
-  # managed array: keep REPO order; for each key decide value + preserve flag
+  # Managed (repo keys, but use user value when preserved)
   jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
@@ -581,7 +581,7 @@ merge_codestrap_settings(){
         ]
     ' > "$tmp_managed_arr"
 
-  # user extras array: keep USER order but only keys not in repo
+  # User extras (keys present only in user, keep original order)
   jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" '
@@ -598,24 +598,26 @@ merge_codestrap_settings(){
   mlen="$(jq 'length' "$tmp_managed_arr")"
   ulen="$(jq 'length' "$tmp_user_extras_arr")"
 
-  # ---- Emit final file with markers and restored //preserve ----
+  # Quick sanity breadcrumb in logs (helps spot why output might be empty)
+  CTX_TAG="[Bootstrap config]"; log "settings: repo-managed=$mlen user-extras=$ulen"; CTX_TAG=""
+
+  # ---- Emit final with section markers + restored //preserve ----
   tmp_out="$(mktemp)"
   {
     echo "{"
     echo "  //codestrap merged settings:"
 
     if [ "$mlen" -gt 0 ]; then
-      for i in $(jq -r 'to_entries|map(.key)|.[]' "$tmp_managed_arr"); do
-        key=$(jq -r ".[$i].key" "$tmp_managed_arr")
-        val=$(jq -c ".[$i].value" "$tmp_managed_arr")
-        pres=$(jq -r ".[$i].preserve" "$tmp_managed_arr")
+      # iterate numeric indices 0..mlen-1 via jq to avoid shell seq dependency
+      while IFS= read -r idx; do
+        key=$(jq -r ".[$idx].key"   "$tmp_managed_arr")
+        val=$(jq -c ".[$idx].value" "$tmp_managed_arr")
+        pres=$(jq -r ".[$idx].preserve" "$tmp_managed_arr")
 
-        # Comma after managed entries if either:
-        #  - there are user extras (so a comma needed between sections), or
-        #  - this is not the last managed entry.
-        need_comma=0
         last_man=$(( mlen - 1 ))
-        if [ "$ulen" -gt 0 ] || [ "$i" -lt "$last_man" ]; then need_comma=1; fi
+        need_comma=0
+        # comma after each managed item if there are user extras OR not the last managed
+        if [ "$ulen" -gt 0 ] || [ "$idx" -lt "$last_man" ]; then need_comma=1; fi
 
         printf '  "%s": %s' "$key" "$val"
         if [ "$need_comma" -eq 1 ]; then
@@ -631,14 +633,16 @@ merge_codestrap_settings(){
             printf "\n"
           fi
         fi
-      done
+      done <<EOFIDX
+$(jq -r 'range(0; length)' "$tmp_managed_arr")
+EOFIDX
     fi
 
     echo "  //user defined settings:"
 
     if [ "$ulen" -gt 0 ]; then
-      for j in $(jq -r 'to_entries|map(.key)|.[]' "$tmp_user_extras_arr"); do
-        k=$(jq -r ".[$j].key" "$tmp_user_extras_arr")
+      while IFS= read -r j; do
+        k=$(jq -r ".[$j].key"   "$tmp_user_extras_arr")
         v=$(jq -c ".[$j].value" "$tmp_user_extras_arr")
         last_usr=$(( ulen - 1 ))
         printf '  "%s": %s' "$k" "$v"
@@ -647,7 +651,9 @@ merge_codestrap_settings(){
         else
           printf "\n"
         fi
-      done
+      done <<EOFUSR
+$(jq -r 'range(0; length)' "$tmp_user_extras_arr")
+EOFUSR
     fi
 
     echo "}"
