@@ -815,7 +815,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' >"$tmp_user_json"
   fi
 
-  # ---- Load REPO (comments allowed) ----
+  # ---- Load REPO (allow comments only) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -891,26 +891,22 @@ merge_codestrap_keybindings(){
     [ -n "$robj" ] || continue
     rid="$(printf '%s' "$robj" | kb_hash)"
 
-    # start with repo object, attach temp id
+    # Start with repo object, attach temp id
     cur="$(printf '%s' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }')"
 
-    # get user object for this id (if present)
-    uobj="$(jq -c --arg id "$rid" -f /dev/stdin "$tmp_user_id_map" <<'JQ' 2>/dev/null || true
-      .[$id] // empty
-JQ
-)"
-    # get list of preserved props for this id
-    if jq -e . >/dev/null 2>&1 <<<'[]'; then :; fi
-    if props="$(jq -r --arg id "$rid" '.[$id] // [] | .[]' "$tmp_preserve_json" 2>/dev/null)"; then
-      if [ -n "$uobj" ]; then
-        # overlay preserved props from user object onto repo object
+    # If user has an object with this id, overlay preserved props
+    uobj="$(jq -c --arg id "$rid" '.[$id] // empty' "$tmp_user_id_map" 2>/dev/null)"
+    if [ -n "$uobj" ]; then
+      # Ensure we only overlay from an object
+      if printf '%s' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1; then
         while IFS= read -r prop; do
           [ -n "$prop" ] || continue
+          # Grab the user value for this prop (if present)
           val="$(printf '%s' "$uobj" | jq -c --arg p "$prop" '.[$p] // empty' 2>/dev/null || true)"
           [ -n "$val" ] || continue
           cur="$(printf '%s' "$cur" | jq --arg p "$prop" --argjson v "$val" '.[$p] = $v')"
         done <<EOF
-$props
+$(jq -r --arg id "$rid" '.[$id] // [] | .[]' "$tmp_preserve_json" 2>/dev/null)
 EOF
       fi
     fi
@@ -920,18 +916,21 @@ EOF
 $(jq -c '.[] | select(type=="object")' "$tmp_repo_json")
 EOF
 
-  # === Build EXTRAS: user entries with NO id comment (i.e., indices not recorded)
-  tmp_seen_idxs="$(mktemp)"; printf '[' >"$tmp_seen_idxs"
-  if [ -s "$tmp_id_by_index" ]; then
+  # === Build EXTRAS: user entries with NO id comment (indices not in id map)
+  tmp_seen_idxs="$(mktemp)"
+  {
+    printf '['
     first=1
-    while IFS=$'\t' read -r idx _rest; do
-      [ -n "$idx" ] || continue
-      if [ $first -eq 0 ]; then printf ',' >>"$tmp_seen_idxs"; fi
-      printf '%s' "$idx" >>"$tmp_seen_idxs"
-      first=0
-    done < "$tmp_id_by_index"
-  fi
-  printf ']\n' >>"$tmp_seen_idxs"
+    if [ -s "$tmp_id_by_index" ]; then
+      while IFS=$'\t' read -r idx _rest; do
+        [ -n "$idx" ] || continue
+        if [ $first -eq 0 ]; then printf ','; fi
+        printf '%s' "$idx"
+        first=0
+      done < "$tmp_id_by_index"
+    fi
+    printf ']'
+  } >"$tmp_seen_idxs"
 
   tmp_extras="$(mktemp)"
   jq -n --slurpfile U "$tmp_user_json" --slurpfile S "$tmp_seen_idxs" '
@@ -962,7 +961,7 @@ EOF
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # Insert //id#... comment at the top of each managed object and re-apply //preserve flags
+  # Insert //id#... at the top of each managed object and drop __tmp_id (fix trailing commas)
   managed_annotated="$(mktemp)"
   awk '
     function indent(s,t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
@@ -1003,7 +1002,7 @@ EOF
     }
     {
       l=$0
-      if (l ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) { cur=l; sub(/^.*id#/,"",cur); sub(/[^0-9a-fA-F].*$/,"",cur) }
+      if (l ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) { cur=l; sub(/^.*id#/,"",cur); sub(/[^0-9a-fA-F].*$/, "", cur) }
       if (cur!="" && l ~ /^[[:space:]]*"[^"]+"\s*:/) {
         prop=l; sub(/^[[:space:]]*"/,"",prop); sub(/".*$/,"",prop)
         if (keep[cur "\t" prop]) {
@@ -1058,6 +1057,7 @@ EOF
 
   log "merged keybindings.json → $KEYB_PATH"
 }
+
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
