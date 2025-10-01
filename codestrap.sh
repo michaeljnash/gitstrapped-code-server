@@ -1193,6 +1193,369 @@ merge_codestrap_keybindings(){
   log "merged keybindings.json → $KEYB_PATH"
 }
 
+# ===== tasks.json merge (tasks[] + inputs[]; ids via //id#; inline //preserve) =====
+merge_codestrap_tasks(){
+  REPO_TASKS_SRC="${REPO_TASKS_SRC:-$HOME/codestrap/tasks.json}"
+  [ -f "$REPO_TASKS_SRC" ] || { log "no repo tasks.json; skipping tasks merge"; return 0; }
+  command -v jq >/dev/null 2>&1 || { warn "jq not available; skipping tasks merge"; return 0; }
+
+  ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
+
+  kb_hash(){ jq -cS . | tr -d '\n\t ' | sha1sum | awk '{print substr($1,1,8)}'; }  # same hash logic
+
+  # ---- Load USER (allow comments only) ----
+  tmp_user_json="$(mktemp)"
+  if [ -f "$TASKS_PATH" ]; then
+    if [ ! -s "$TASKS_PATH" ]; then
+      printf '{ "version":"2.0.0","tasks":[],"inputs":[] }\n' > "$tmp_user_json"
+    else
+      if jq -e . "$TASKS_PATH" >/dev/null 2>&1; then
+        cp "$TASKS_PATH" "$tmp_user_json"
+      else
+        strip_jsonc_to_json "$TASKS_PATH" >"$tmp_user_json" || true
+        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
+          rm -f "$tmp_user_json" 2>/dev/null || true
+          put_error_banner_this "$TASKS_PATH" "user tasks.json is malformed; skipped merge to avoid data loss."
+          abort_or_continue "[Bootstrap config]" "user tasks.json is malformed; skipped merge to avoid data loss."
+          return 0
+        fi
+      fi
+    fi
+  else
+    printf '{ "version":"2.0.0","tasks":[],"inputs":[] }\n' > "$tmp_user_json"
+  fi
+
+  # ---- Load REPO (allow comments only) ----
+  tmp_repo_json="$(mktemp)"
+  if jq -e . "$REPO_TASKS_SRC" >/dev/null 2>&1; then
+    cp "$REPO_TASKS_SRC" "$tmp_repo_json"
+  else
+    strip_jsonc_to_json "$REPO_TASKS_SRC" >"$tmp_repo_json" || true
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
+      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+      put_error_banner_repo "$TASKS_PATH" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge." "repo tasks.json" "$REPO_TASKS_SRC"
+      abort_or_continue "[Bootstrap config]" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge."
+      return 0
+    fi
+  fi
+
+  # ===== helper: merge one array (name: tasks|inputs) =====
+  merge_one_array(){ # usage: merge_one_array tasks <out_managed_body> <out_extras_body>
+    _ARR="$1"; out_managed="$2"; out_extras="$3"
+
+    # Extract arrays (JSON) for repo and user
+    tmp_user_arr="$(mktemp)"; jq -c --arg a "$_ARR" '.[$a] // []' "$tmp_user_json" >"$tmp_user_arr"
+    tmp_repo_arr="$(mktemp)"; jq -c --arg a "$_ARR" '.[$a] // []' "$tmp_repo_json" >"$tmp_repo_arr"
+
+    # ---- PASS 1 (RAW user file): capture index→id and (id,prop,rawval) for this array only ----
+    id_by_index="$(mktemp)"; : >"$id_by_index"        # "<idx>\t<id>"
+    preserve_pairs="$(mktemp)"; : >"$preserve_pairs"  # "<id>\t<prop>"
+    preserve_vals="$(mktemp)"; : >"$preserve_vals"    # "<id>\t<prop>\t<raw_json_token>"
+
+    if [ -f "$TASKS_PATH" ]; then
+      _banner_strip_first_if_error <"$TASKS_PATH" | awk -v TARGET="\"$_ARR\"" -v OUT1="$id_by_index" -v OUT2="$preserve_pairs" -v OUT3="$preserve_vals" '
+        BEGIN{
+          arr=0; obj=0; idx=-1; cur=-1;
+          which="";
+          have_id=0; id_for_cur="";
+          seeking_arr=0; arr_depth=0;
+        }
+        {
+          line=$0
+
+          # enter/leave the target array by spotting: "tasks": [   OR   "inputs": [
+          if (line ~ "^[[:space:]]*" TARGET "[[:space:]]*:[[:space:]]*\\[") {
+            which="yes"; seeking_arr=1;
+          }
+          # track bracket depth for array/object precisely
+          n=split(line, c, "")
+          for (i=1;i<=n;i++){
+            ch=c[i]
+            if (which=="yes"){
+              if (ch=="["){ arr_depth++; if (seeking_arr && arr_depth==1){ idx=-1; cur=-1; } }
+              else if (ch=="]"){ arr_depth--; if (arr_depth==0){ which=""; have_id=0; id_for_cur=""; } }
+              else if (ch=="{"){
+                if (arr_depth==1 && obj==0){ idx++; cur=idx; have_id=0; id_for_cur="" }
+                obj++
+              } else if (ch=="}"){
+                obj--; if (obj==0){ cur=-1; have_id=0; id_for_cur="" }
+              }
+            }
+          }
+
+          # Only act while inside the named array
+          if (which=="yes"){
+            # id comment
+            if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/){
+              id=line; sub(/^.*id#/,"",id); sub(/[^0-9a-fA-F].*$/,"",id)
+              if (cur>=0 && id!=""){ print cur "\t" id >> OUT1; id_for_cur=id; have_id=1 }
+            }
+            # preserve
+            if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && have_id){
+              prop=line
+              sub(/^[ \t]*/, "", prop)
+              if (prop ~ /^\"[^\"]+\"[ \t]*:/){
+                sub(/^\"/, "", prop); sub(/\".*/, "", prop)
+                if (prop!=""){
+                  print id_for_cur "\t" prop >> OUT2
+                  # raw JSON token after colon (strip comment/comma)
+                  val=line
+                  sub(/^[ \t]*/, "", val)
+                  sub(/^\"[^"]+\"[ \t]*:[ \t]*/, "", val)
+                  sub(/[ \t]*\/\/.*$/, "", val)
+                  sub(/[ \t]*$/, "", val)
+                  sub(/,[ \t]*$/, "", val)
+                  print id_for_cur "\t" prop "\t" val >> OUT3
+                }
+              }
+            }
+          }
+        }
+      '
+    fi
+
+    # Build JSON maps
+    preserve_json="$(mktemp)"
+    if [ -s "$preserve_pairs" ]; then
+      awk -F'\t' 'NF==2{printf("{\"id\":\"%s\",\"prop\":\"%s\"}\n",$1,$2)}' "$preserve_pairs" \
+        | jq -s 'reduce .[] as $e ({}; .[$e.id] = ((.[$e.id] // []) + [$e.prop]))' > "$preserve_json"
+    else
+      printf '{}\n' > "$preserve_json"
+    fi
+
+    user_id_map="$(mktemp)"; printf '{}\n' > "$user_id_map"
+    if [ -s "$id_by_index" ]; then
+      while IFS=$'\t' read -r i id; do
+        [ -n "$i" ] && [ -n "$id" ] || continue
+        uobj="$(jq -c --argjson idx "$i" '.[ $idx ]' "$tmp_user_arr" 2>/dev/null || printf '{}')"
+        jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$user_id_map" > "$user_id_map.tmp" && mv -f "$user_id_map.tmp" "$user_id_map"
+      done < "$id_by_index"
+    fi
+
+    # repo with temp ids
+    repo_with_ids="$(mktemp)"
+    jq -c '.[]' "$tmp_repo_arr" | while IFS= read -r robj; do
+      [ -n "$robj" ] || continue
+      rid="$(printf '%s' "$robj" | kb_hash)"
+      printf '%s\n' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }'
+    done | jq -s '.' > "$repo_with_ids"
+
+    # merge managed (by id), copy preserved props from user object
+    merged_tmp="$(mktemp)"
+    jq -n \
+      --slurpfile U "$tmp_user_arr" \
+      --slurpfile R "$repo_with_ids" \
+      --slurpfile P "$preserve_json" \
+      --slurpfile UM "$user_id_map" '
+        def arr(x): if (x|type)=="array" then x else [] end;
+        def obj(x): if (x|type)=="object" then x else {} end;
+        (arr($U[0])) as $Uraw
+        | (arr($R[0])) as $R
+        | (obj($P[0])) as $PRES
+        | (obj($UM[0])) as $U_by_id
+        | ($R
+            | map(
+                . as $repo
+                | ($repo.__tmp_id // null) as $id
+                | if ($id != null and ($U_by_id[$id]? != null))
+                  then
+                    $U_by_id[$id] as $u
+                    | ($PRES[$id] // []) as $keep
+                    | reduce $keep[] as $k ($repo; if ($u[$k]? != null) then .[$k] = $u[$k] else . end)
+                  else
+                    .
+                  end
+              )
+          ) as $managed
+        # extras = user entries without id (by index)
+        | ($Uraw | to_entries | map(.key|tostring)) as $idxs
+        | ($idxs
+            | map( select( ($U_by_id[.])? == null ) )    # indexes (as strings) that had no id
+          ) as $noid_idx
+        | [ $Uraw as $U | $noid_idx[] | ($U[tonumber(.)]) ]
+        | { managed: $managed, extras: (map(select(type=="object"))) }
+      ' > "$merged_tmp"
+
+    # pretty-print sections
+    managed_arr="$(mktemp)"; jq '.managed' "$merged_tmp" > "$managed_arr"
+    extras_arr="$(mktemp)";  jq '.extras'  "$merged_tmp" > "$extras_arr"
+    managed_body="$(mktemp)"; sed '1d;$d' "$managed_arr" > "$managed_body"
+    extras_body="$(mktemp)";  sed '1d;$d' "$extras_arr" > "$extras_body"
+
+    # insert //id#..., drop __tmp_id, fix trailing commas
+    managed_annotated="$(mktemp)"
+    awk '
+      function get_indent(s,    t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
+      BEGIN { indepth=0; inobj=0 }
+      {
+        line=$0
+        tmp=line
+        ob = gsub(/\{/,"{",tmp)
+        cb = gsub(/\}/,"}",tmp)
+
+        if (!inobj) {
+          if (ob>0 && indepth==0) { inobj=1; objdepth=ob-cb; n=0; oid=""; obj_indent=get_indent(line); buf[++n]=line }
+          else { print line }
+        } else {
+          buf[++n]=line
+          objdepth += ob
+          objdepth -= cb
+
+          if (line ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]+"/) {
+            oid=line; sub(/^.*"__tmp_id"[[:space:]]*:[[:space:]]*"/,"",oid); sub(/".*$/,"",oid)
+          }
+
+          if (objdepth<=0) {
+            outn=0; out[++outn]=buf[1]
+            if (oid != "") out[++outn]=obj_indent "  //id#" oid
+            for(i=2;i<=n;i++){
+              l=buf[i]
+              if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) continue
+              out[++outn]=l
+            }
+            closing_idx=outn
+            while (closing_idx>1 && out[closing_idx] ~ /^[[:space:]]*$/) closing_idx--
+            if (out[closing_idx] ~ /^[[:space:]]*}[[:space:]]*,?[[:space:]]*$/) {
+              prev=closing_idx-1
+              while (prev>1 && out[prev] ~ /^[[:space:]]*$/) prev--
+              if (prev>1) { sub(/,[[:space:]]*$/,"",out[prev]) }
+            }
+            for(i=1;i<=outn;i++) print out[i]
+            inobj=0
+          }
+        }
+
+        indepth += ob
+        indepth -= cb
+      }
+    ' "$managed_body" > "$managed_annotated"
+
+    # apply preserved values + ensure //preserve on those lines
+    managed_with_preserve="$(mktemp)"
+    awk -v PAIRS="$preserve_pairs" -v VALS="$preserve_vals" '
+      BEGIN {
+        while ((getline m < PAIRS) > 0) { p=index(m,"\t"); if(p){ id=substr(m,1,p-1); pr=substr(m,p+1); keep[id "\t" pr]=1 } }
+        close(PAIRS)
+        while ((getline v < VALS) > 0) {
+          p1=index(v,"\t"); if(!p1) continue
+          id=substr(v,1,p1-1); rest=substr(v,p1+1)
+          p2=index(rest,"\t"); if(!p2) continue
+          pr=substr(rest,1,p2-1); val=substr(rest,p2+1)
+          vals[id "\t" pr]=val
+        }
+        close(VALS)
+        curr_id=""
+      }
+      {
+        line=$0
+        if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
+          curr_id=line; sub(/^.*id#/,"",curr_id); sub(/[^0-9a-fA-F].*$/,"",curr_id)
+          print line; next
+        }
+        if (curr_id != "" && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
+          prop=line; sub(/^[[:space:]]*"/,"",prop); sub(/".*$/,"",prop)
+          key=curr_id "\t" prop
+          if (keep[key]) {
+            prop_esc=prop; gsub(/[][(){}.^$*+?|\\]/,"\\\\&",prop_esc)
+            pat="^([[:space:]]*\"" prop_esc "\"[[:space:]]*:[[:space:]]*)"
+            prefix=line
+            if (match(prefix, pat)) { prefix=substr(prefix,RSTART,RLENGTH) } else { print line; next }
+            has_comma=(line ~ /,[[:space:]]*$/)
+            val=vals[key]
+            if (val==""){
+              val=line
+              sub(pat,"",val)
+              sub(/[ \t]*\/\/.*$/,"",val)
+              sub(/[ \t]*$/,"",val)
+              sub(/,[ \t]*$/,"",val)
+              if (val=="") val="null"
+            }
+            newline=prefix val
+            if (has_comma) newline=newline ","
+            newline=newline " //preserve"
+            print newline; next
+          }
+        }
+        print line
+      }
+    ' "$managed_annotated" > "$managed_with_preserve"
+
+    # prepare managed/extras bodies (with proper trailing comma if extras exist)
+    mlen="$(jq -r '. | length' "$managed_arr" 2>/dev/null || echo 0)"
+    elen="$(jq -r '. | length' "$extras_arr"  2>/dev/null || echo 0)"
+
+    managed_final="$managed_with_preserve"
+    if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
+      managed_final2="$(mktemp)"
+      awk '
+        { if ($0 ~ /[^[:space:]]/) last=NR; lines[NR]=$0 }
+        END {
+          for(i=1;i<=NR;i++){
+            if (i==last) {
+              l=lines[i]; sub(/[[:space:]]*$/, "", l)
+              if (l ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) { sub(/[[:space:]]*\/\/[[:space:]]*preserve[[:space:]]*$/, ", //preserve", l); print l }
+              else { print l "," }
+            } else { print lines[i] }
+          }
+        }
+      ' "$managed_with_preserve" > "$managed_final2"
+      managed_final="$managed_final2"
+    fi
+
+    # write out bodies for caller
+    cp "$managed_final" "$out_managed"
+    cp "$extras_body"   "$out_extras"
+
+    # cleanup local temps
+    rm -f "$tmp_user_arr" "$tmp_repo_arr" "$id_by_index" "$preserve_pairs" "$preserve_vals" \
+          "$preserve_json" "$user_id_map" "$repo_with_ids" "$merged_tmp" \
+          "$managed_arr" "$extras_arr" "$managed_body" "$extras_body" \
+          "$managed_annotated" "$managed_with_preserve" "$managed_final" 2>/dev/null || true
+  }
+
+  # ---- run merge for both arrays ----
+  tasks_managed="$(mktemp)"; tasks_extras="$(mktemp)"
+  inputs_managed="$(mktemp)"; inputs_extras="$(mktemp)"
+  : >"$tasks_managed"; : >"$tasks_extras"; : >"$inputs_managed"; : >"$inputs_extras"
+
+  merge_one_array "tasks"  "$tasks_managed"  "$tasks_extras"
+  merge_one_array "inputs" "$inputs_managed" "$inputs_extras"
+
+  # pick version: prefer user version, else repo, else 2.0.0
+  ver="$(jq -r '.version // empty' "$tmp_user_json")"
+  [ -n "$ver" ] || ver="$(jq -r '.version // empty' "$tmp_repo_json")"
+  [ -n "$ver" ] || ver="2.0.0"
+
+  # ---- compose final file with section comments; no trailing commas ----
+  tmp_with_comments="$(mktemp)"
+  {
+    echo "{"
+    printf '  "version": "%s",\n' "$ver"
+
+    echo '  "tasks": ['
+    echo '    //codestrap merged tasks:'
+    if [ -s "$tasks_managed" ]; then sed 's/^/    /' "$tasks_managed"; fi
+    echo '    //user defined tasks:'
+    if [ -s "$tasks_extras" ];  then sed 's/^/    /' "$tasks_extras";  fi
+    echo '  ],'
+
+    echo '  "inputs": ['
+    echo '    //codestrap merged inputs:'
+    if [ -s "$inputs_managed" ]; then sed 's/^/    /' "$inputs_managed"; fi
+    echo '    //user defined inputs:'
+    if [ -s "$inputs_extras" ];  then sed 's/^/    /' "$inputs_extras";  fi
+    echo '  ]'
+    echo "}"
+  } > "$tmp_with_comments"
+
+  write_inplace "$tmp_with_comments" "$TASKS_PATH"
+  chown "${PUID}:${PGID}" "$TASKS_PATH" 2>/dev/null || true
+  clear_error_banner "$TASKS_PATH"
+
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tasks_managed" "$tasks_extras" "$inputs_managed" "$inputs_extras" "$tmp_with_comments" 2>/dev/null || true
+
+  log "merged tasks.json → $TASKS_PATH"
+}
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
@@ -1652,19 +2015,25 @@ config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
   ensure_preserve_store
-  if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge codestrap settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
     log "skipped settings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge codestrap keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_keybindings
   else
     log "skipped keybindings merge"
   fi
 
-  if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+  if [ "$(prompt_yn "merge codestrap tasks.json to user tasks.json? (Y/n)" "y")" = "true" ]; then
+    merge_codestrap_tasks
+  else
+    log "skipped tasks merge"
+  fi
+
+  if [ "$(prompt_yn "merge codestrap extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_extensions
   else
     log "skipped extensions merge"
@@ -1993,6 +2362,7 @@ case "${1:-init}" in
     safe_run "[Preserve store]"          ensure_preserve_store
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
+    safe_run "[Bootstrap config]"        merge_codestrap_tasks
     safe_run "[Bootstrap config]"        merge_codestrap_extensions
     safe_run "[Bootstrap GitHub]"        autorun_env_if_present
     safe_run "[Extensions env]"          autorun_install_extensions
