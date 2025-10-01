@@ -934,30 +934,33 @@ merge_codestrap_keybindings(){
         )
   ' > "$tmp_managed"
 
-  # === Determine user extras (those without an id comment) ===
-  # Build a set of seen indices (from idx→id) and select the rest as extras.
+  # === Determine user extras (those WITHOUT an id comment) ===
+  # Build a JSON object map of seen indices: {"0":true,"4":true,...}
   tmp_seen_idx="$(mktemp)"
   jq -r '.[].i' "$tmp_idx_arr" 2>/dev/null | awk 'NF' > "$tmp_seen_idx"
-  tmp_extras="$(mktemp)"
+
+  tmp_seen_map="$(mktemp)"
   if [ -s "$tmp_seen_idx" ]; then
-    # emit user array with indices; drop those present in seen
-    jq -n --slurpfile U "$tmp_user_json" '
-      ($U[0] // []) as $Uraw
-      | [ range(0; ($Uraw|length)) as $i | {i:$i, v:$Uraw[$i]} ]
-    ' | jq -rc '.[]' | awk -v S="$tmp_seen_idx" '
-      BEGIN{ while((getline s<S)>0) seen[s]=1; close(S) }
-      {
-        # each line is a compact JSON object { "i":N, "v": <obj or ...> }
-        print $0
-      }
-    ' | jq -s '
-      [ .[]
-        | select( ( .i | tostring ) as $k
-                  | ( $ENV.seen[$k] // "0") == "0"
-                )
-        | .v
-        | select(type=="object")
-      ]' --argfile seen <(awk '{printf "{\"%s\":\"1\"}\n",$0}' "$tmp_seen_idx" | jq -s 'add') > "$tmp_extras"
+    awk 'NF{print $0}' "$tmp_seen_idx" \
+      | jq -s 'map(tonumber) | map(tostring) | reduce .[] as $k ({}; .[$k] = true)' \
+      > "$tmp_seen_map"
+  else
+    printf '{}\n' > "$tmp_seen_map"
+  fi
+
+  tmp_extras="$(mktemp)"
+  jq -n \
+    --slurpfile U "$tmp_user_json" \
+    --slurpfile S "$tmp_seen_map" '
+      def arr(x): if (x|type)=="array" then x else [] end;
+      (arr($U[0])) as $Uraw
+      | ($S[0] // {}) as $seen
+      | [ range(0; ($Uraw|length)) as $i
+          | select( ($seen[$i|tostring] // false) | not )
+          | $Uraw[$i]
+        ]
+      | map(select(type=="object"))
+    ' > "$tmp_extras"
   else
     # no ids → all user entries are extras
     jq '[ .[] | select(type=="object") ]' "$tmp_user_json" > "$tmp_extras"
