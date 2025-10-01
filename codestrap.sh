@@ -622,21 +622,19 @@ merge_codestrap_settings(){
 
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
-      | (arr($P[0])) as $PRES    # keys to preserve from user (array of strings)
+      | (arr($P[0])) as $PRES
       | ($RO | keys) as $RK
 
       # Repo keys first, respecting preserve (use user value if preserved+exists)
-      | reduce $RK[] as $k (
+      | (reduce $RK[] as $k (
           {};
-          . + {
-            ($k):
-              if ((($PRES | index($k)) != null) and ($UO | has($k))) then
-                $UO[$k]
-              else
-                $RO[$k]
-              end
-          }
-        ) as $MANAGED
+          . + { ($k): (
+                if ( ($PRES | index($k)) and ($UO | has($k)) )
+                then $UO[$k]
+                else $RO[$k]
+                end
+              ) }
+        )) as $MANAGED
 
       # Then user keys not defined by repo
       | ($UO | to_entries | map(select( ($RK | index(.key)) | not ))) as $UREST
@@ -657,9 +655,9 @@ merge_codestrap_settings(){
       | (arr($P[0])) as $PRES
       | ($RO | keys) as $RK
 
-      # Pick only those repo keys we actually took from repo (i.e., NOT preserved)
+      # Only those repo keys we actually took from repo (i.e., NOT preserved)
       | [ $RK[]
-          | select( ( ((($PRES | index(.)) != null) and ($UO | has(.))) | not ) )
+          | select( ( (($PRES | index(.)) and ($UO | has(.))) ) | not )
         ]
     ' > "$tmp_repo_merged_keys"
 
