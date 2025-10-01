@@ -840,39 +840,53 @@ merge_codestrap_keybindings(){
 
   if [ -f "$KEYB_PATH" ]; then
     _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OUT1="$tmp_id_by_index" -v OUT2="$tmp_preserve_pairs" '
-      # Robust depth tracking; associate id comments to the current object index.
-      BEGIN{ arr=0; obj=0; idx=-1; cur=-1; id_for_cur=""; have_id=0 }
-      function capid(s,    t){ t=s; sub(/^.*id#/,"",t); sub(/[^0-9a-fA-F].*$/,"",t); return t }
-      function capprop(s,  m){ if (match(s,/^[[:space:]]*"([^"]+)"[[:space:]]*:/,m)) return m[1]; return "" }
-
+      BEGIN{
+        arr=0; obj=0; idx=-1; cur=-1;
+        have_id=0; id_for_cur="";
+      }
       {
         line=$0
 
-        # detect id comments anywhere inside object
+        # ---- capture //id#XXXX anywhere inside an object ----
         if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
-          id = capid(line)
-          if (cur>=0 && id!="") { print cur "\t" id >> OUT1; id_for_cur=id; have_id=1 }
-        }
-
-        # detect //preserve on property lines (needs id_for_cur set earlier in same object)
-        if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
-          if (have_id) {
-            prop = capprop(line)
-            if (prop!="") { print id_for_cur "\t" prop >> OUT2 }
+          id=line
+          sub(/^.*id#/,"",id)
+          sub(/[^0-9a-fA-F].*$/, "", id)
+          if (cur>=0 && id!="") {
+            print cur "\t" id >> OUT1
+            id_for_cur=id
+            have_id=1
           }
         }
 
-        # update depths char-by-char AFTER handling this line
-        for(i=1;i<=length(line);i++){
-          ch=substr(line,i,1)
-          if(ch=="["){ arr++ }
-          else if(ch=="]"){ arr-- }
-          else if(ch=="{"){
-            if(arr==1 && obj==0){ idx++; cur=idx; id_for_cur=""; have_id=0 }
+        # ---- capture //preserve on property lines (needs id already seen in this object) ----
+        if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
+          if (have_id) {
+            prop=line
+            # Trim leading spaces, then ensure it starts with "name":
+            sub(/^[ \t]*/, "", prop)
+            if (prop ~ /^\"[^\"]+\"[ \t]*:/) {
+              sub(/^\"/, "", prop)
+              sub(/\".*/, "", prop)
+              if (prop != "") {
+                print id_for_cur "\t" prop >> OUT2
+              }
+            }
+          }
+        }
+
+        # ---- depth tracking (character-wise) ----
+        n=split(line, chars, "")
+        for (i=1;i<=n;i++) {
+          ch=chars[i]
+          if (ch=="[") { arr++ }
+          else if (ch=="]") { arr-- }
+          else if (ch=="{") {
+            if (arr==1 && obj==0) { idx++; cur=idx; id_for_cur=""; have_id=0 }
             obj++
-          } else if(ch=="}"){
+          } else if (ch=="}") {
             obj--
-            if(obj==0){ cur=-1; id_for_cur=""; have_id=0 }
+            if (obj==0) { cur=-1; id_for_cur=""; have_id=0 }
           }
         }
       }
