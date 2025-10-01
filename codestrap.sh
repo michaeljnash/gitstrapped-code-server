@@ -1059,8 +1059,6 @@ EOF
   log "merged keybindings.json → $KEYB_PATH"
 }
 
-
-
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
   REPO_EXT_SRC="${REPO_EXT_SRC:-$HOME/codestrap/extensions.json}"
