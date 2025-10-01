@@ -1486,7 +1486,7 @@ install_cli_shim(){
     cat >/usr/local/bin/codestrap <<'EOF'
 #!/usr/bin/env sh
 set -eu
-for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
+for TARGET in /custom-cont-init.d/10-codestrap.sh; do
   if [ -e "$TARGET" ]; then
     if [ -x "$TARGET" ]; then
       exec "$TARGET" cli "$@"
@@ -1507,7 +1507,7 @@ EOF
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
 #!/usr/bin/env sh
 set -eu
-for TARGET in /custom-cont-init.d/10-codestrap.sh /custom-cont-init.d/10-gitstrap.sh; do
+for TARGET in /custom-cont-init.d/10-codestrap.sh; do
   if [ -e "$TARGET" ]; then
     if [ -x "$TARGET" ]; then
       exec "$TARGET" cli "$@"
