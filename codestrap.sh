@@ -736,16 +736,27 @@ merge_codestrap_settings(){
     }
   ' "$managed_body" > "$managed_with_preserve"
 
+  # add a trailing comma between sections (but keep it BEFORE //preserve if present)
   managed_final="$managed_with_preserve"
   if [ $have_managed -eq 1 ] && [ $have_extras -eq 1 ]; then
-    # add a trailing comma to last non-blank line of managed block
     managed_final2="$(mktemp)"
     awk '
       { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
       END {
-        for(i=1;i<=NR;i++){
-          if (i==last) { sub(/[[:space:]]*$/,"",lines[i]); print lines[i] "," }
-          else          { print lines[i] }
+        for (i=1; i<=NR; i++) {
+          if (i==last) {
+            l = lines[i]
+            sub(/[[:space:]]*$/, "", l)
+            if (l ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
+              # move the comma BEFORE the comment
+              sub(/[[:space:]]*\/\/[[:space:]]*preserve[[:space:]]*$/, ", //preserve", l)
+              print l
+            } else {
+              print l ","
+            }
+          } else {
+            print lines[i]
+          }
         }
       }
     ' "$managed_with_preserve" > "$managed_final2"
