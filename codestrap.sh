@@ -833,40 +833,45 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # === PASS 1: scan RAW user file to capture object index → id and preserved props ===
+  # === PASS 1: scan RAW user file to capture (array) object-index → id, and id → preserved props ===
   tmp_id_by_index="$(mktemp)"      # "<idx>\t<id>"
   tmp_preserve_pairs="$(mktemp)"   # "<id>\t<prop>"
   : >"$tmp_id_by_index"; : >"$tmp_preserve_pairs"
 
   if [ -f "$KEYB_PATH" ]; then
+    # BusyBox/mawk-portable awk (no 3rd arg to match, no gawk-isms)
     _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OUT1="$tmp_id_by_index" -v OUT2="$tmp_preserve_pairs" '
-      BEGIN{ bdepth=0; cdepth=0; idx=-1; curr_id=""; }
+      BEGIN{ bdepth=0; cdepth=0; idx=-1; curr_id="" }
       {
         line=$0
 
-        # track bracket/brace depths
-        ob=gsub(/\[/,"[",line); cb=gsub(/\]/,"]",line);
-        oc=gsub(/\{/,"{",line); cc=gsub(/\}/,"}",line);
+        # Count bracket/brace transitions (gsub returns number of substitutions)
+        ob = gsub(/\[/,"[",line)
+        cb = gsub(/\]/,"]",line)
+        oc = gsub(/\{/,"{",line)
+        cc = gsub(/\}/,"}",line)
 
-        # starting a top-level object? (array depth 1, before incrementing cdepth)
-        if (bdepth==1 && oc>0 && cdepth==0) {
-          idx=idx+1
-          curr_id=""
-        }
+        # starting a top-level object? (array depth 1, about to enter object at cdepth==0)
+        if (bdepth==1 && oc>0 && cdepth==0) { idx=idx+1; curr_id="" }
 
-        # detect id comment (inside current object)
-        if (match(line, /\/\/[[:space:]]*id#([0-9a-fA-F]+)/, m)) {
-          curr_id = m[1]
-          if (idx >= 0) {
-            print idx "\t" curr_id >> OUT1
+        # detect id comment: //id#<hex>
+        if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
+          id=line
+          sub(/^.*id#/, "", id)
+          sub(/[^0-9a-fA-F].*$/, "", id)
+          curr_id=id
+          if (idx >= 0 && id != "") {
+            print idx "\t" id >> OUT1
           }
         }
 
-        # detect //preserve at end of a property line, remember prop name under current id
+        # detect //preserve at end of a property line, record prop name for current id
         if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
-          if (match(line, /^[[:space:]]*"([^"]+)"[[:space:]]*:/, k)) {
-            prop = substr(line, RSTART+1, RLENGTH-2)
-            if (curr_id != "" && idx >= 0) {
+          if (line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
+            prop=line
+            sub(/^[[:space:]]*"/, "", prop)
+            sub(/".*$/, "", prop)
+            if (curr_id != "") {
               print curr_id "\t" prop >> OUT2
             }
           }
@@ -891,7 +896,6 @@ merge_codestrap_keybindings(){
   # Build JSON: id -> full user object (found by array index)
   tmp_user_id_map="$(mktemp)"
   if [ -s "$tmp_id_by_index" ]; then
-    # start as empty object
     printf '{}\n' > "$tmp_user_id_map"
     while IFS=$'\t' read -r idx id; do
       [ -n "$idx" ] && [ -n "$id" ] || continue
@@ -940,11 +944,9 @@ merge_codestrap_keybindings(){
             )
         ) as $managed
 
-      # User extras: take user raw items that are NOT objects we manage by id comment.
-      # (We drop any previously managed objects; they will be reconstructed as $managed.)
+      # User extras: keep original user objects; any previously merged ones will be re-emitted in $managed.
       | $Uraw as $Ufull
-      | ($Ufull | map(select((.|type)=="object"))) as $Uobjs
-      | $Uobjs as $extras
+      | ($Ufull | map(select((.|type)=="object"))) as $extras
 
       | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
     ' > "$tmp_both"
@@ -958,31 +960,31 @@ merge_codestrap_keybindings(){
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # --- Pass A: turn temp markers into comments
+  # --- Pass A: turn temp markers into comments (portable awk)
   managed_annotated="$(mktemp)"
   awk '
     {
       l=$0
       # "__codestrapMerged": true  → comment line
       if (l ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
-        match(l,/^[[:space:]]*/); indent=substr(l,1,RLENGTH);
-        print indent "//codestrap merged keybinding:";
+        lead=l; sub(/^([[:space:]]*).*/, "\\1", lead)
+        print lead "//codestrap merged keybinding:";
         next
       }
-      # "__tmp_id": "abcd1234" → //id#abcd1234   (and drop the property line)
+      # "__tmp_id": "abcd1234" → //id#abcd1234
       if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]+"[[:space:]]*,?[[:space:]]*$/) {
         id = l
-        sub(/.*"__tmp_id"[[:space:]]*:[[:space:]]*"/,"",id)
-        sub(/".*/,"",id)
-        match(l,/^[[:space:]]*/); indent=substr(l,1,RLENGTH);
-        print indent "//id#" id
+        sub(/^.*"__tmp_id"[[:space:]]*:[[:space:]]*"/,"",id)
+        sub(/".*$/,"",id)
+        lead=l; sub(/^([[:space:]]*).*/, "\\1", lead)
+        print lead "//id#" id
         next
       }
       print l
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # Build a fast lookup "<id>\t<prop>"
+  # Build quick lookup "<id>\t<prop>"
   tmp_keep_pairs="$(mktemp)"
   if [ -s "$tmp_preserve_pairs" ]; then
     awk 'NF==2' "$tmp_preserve_pairs" > "$tmp_keep_pairs"
@@ -990,22 +992,26 @@ merge_codestrap_keybindings(){
     : >"$tmp_keep_pairs"
   fi
 
-  # --- Pass B: append //preserve to preserved props; keep comma BEFORE the comment
+  # --- Pass B: append //preserve to preserved props; keep comma BEFORE the comment (portable awk)
   managed_with_preserve="$(mktemp)"
   awk -v MAP="$tmp_keep_pairs" '
     BEGIN {
-      while ((getline m < MAP) > 0) {
-        split(m, a, "\t"); keep[a[1] "\t" a[2]] = 1
-      }
+      while ((getline m < MAP) > 0) { n = index(m, "\t"); if (n>0) { id=substr(m,1,n-1); p=substr(m,n+1); keep[id "\t" p]=1 } }
       close(MAP)
       curr_id=""
     }
     {
       line=$0
-      if (match(line, /\/\/[[:space:]]*id#([0-9a-fA-F]+)/, m)) { curr_id=m[1] }
-      if (curr_id != "" && match(line, /^[[:space:]]*"([^"]+)"[[:space:]]*:/, k)) {
-        prop = substr(line, RSTART+1, RLENGTH-2)
-        key = curr_id "\t" prop
+      if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
+        curr_id=line
+        sub(/^.*id#/, "", curr_id)
+        sub(/[^0-9a-fA-F].*$/, "", curr_id)
+      }
+      if (curr_id != "" && line ~ /^[[:space:]]*"[^"]+"[[:space:]]*:/) {
+        prop=line
+        sub(/^[[:space:]]*"/, "", prop)
+        sub(/".*$/, "", prop)
+        key=curr_id "\t" prop
         if (keep[key]) {
           if (line ~ /,[[:space:]]*$/) {
             sub(/,[[:space:]]*$/, "", line)
