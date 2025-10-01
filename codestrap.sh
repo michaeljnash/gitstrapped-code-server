@@ -794,43 +794,44 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # --- canonical short id (8 chars) for a keybinding object ---
   kb_hash(){ jq -cS . | tr -d '\n\t ' | sha1sum | awk '{print substr($1,1,8)}'; }
 
-  # ---- Load USER (parsed JSON for data), but also keep raw file for scanning comments ----
+  # ---- Load USER (parsed JSON for data), but keep raw file for scanning comments ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
       cp "$KEYB_PATH" "$tmp_user_json"
     else
       strip_jsonc_to_json "$KEYB_PATH" >"$tmp_user_json" || true
-      jq -e . "$tmp_user_json" >/dev/null 2>&1 || {
+      if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
         rm -f "$tmp_user_json" 2>/dev/null || true
         put_error_banner_this "$KEYB_PATH" "user keybindings.json is malformed; skipped merge to avoid data loss."
         abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipped merge to avoid data loss."
         return 0
-      }
+      fi
     fi
   else
     printf '[]\n' >"$tmp_user_json"
   fi
 
-  # ---- Load REPO ----
+  # ---- Load REPO (comments allowed) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
   else
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
-    jq -e . "$tmp_repo_json" >/dev/null 2>&1 || {
+    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
       put_error_banner_repo "$KEYB_PATH" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge." "repo keybindings.json" "$REPO_KEYB_SRC"
       abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge."
       return 0
-    }
+    fi
   fi
 
-  # === PASS 1: RAW user scan (keep comments) → (idx → id) and (id → preserved props)
-  tmp_id_by_index="$(mktemp)";     : >"$tmp_id_by_index"     # "<idx>\t<id>"
-  tmp_preserve_pairs="$(mktemp)";  : >"$tmp_preserve_pairs"  # "<id>\t<prop>"
+  # === PASS 1: RAW user scan (comments) → (idx → id) and (id → preserved props array)
+  tmp_id_by_index="$(mktemp)";    : >"$tmp_id_by_index"      # "<idx>\t<id>"
+  tmp_preserve_pairs="$(mktemp)"; : >"$tmp_preserve_pairs"   # "<id>\t<prop>"
 
   if [ -f "$KEYB_PATH" ]; then
     _banner_strip_first_if_error <"$KEYB_PATH" | awk -v O1="$tmp_id_by_index" -v O2="$tmp_preserve_pairs" '
@@ -838,22 +839,33 @@ merge_codestrap_keybindings(){
       BEGIN{ arr=0; inObj=0; obj=0; idx=-1; cur="" }
       {
         s=$0
+        # maintain array depth (top-level is the big [ ... ])
         arr += cnt(/\[/,s); arr -= cnt(/\]/,s)
+
+        # detect start of an object when inside the array
         if (!inObj && arr==1 && cnt(/\{/,s)>0){ inObj=1; obj = cnt(/\{/,s)-cnt(/\}/,s); idx++; cur="" }
         else if (inObj){ obj += cnt(/\{/,s); obj -= cnt(/\}/,s) }
 
+        # id comment
         if (inObj && s ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/){
           t=s; sub(/^.*id#/,"",t); sub(/[^0-9a-fA-F].*$/,"",t); cur=t
         }
+
+        # preserve comment on a property line
         if (inObj && cur!="" && s ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && s ~ /^[[:space:]]*"[^"]+"\s*:/){
           p=s; sub(/^[[:space:]]*"/,"",p); sub(/".*$/,"",p); print cur "\t" p >> O2
         }
-        if (inObj && obj<=0){ if(cur!="") print idx "\t" cur >> O1; inObj=0 }
+
+        # close object
+        if (inObj && obj<=0){
+          if(cur!="") print idx "\t" cur >> O1
+          inObj=0
+        }
       }
     '
   fi
 
-  # id → [props...]
+  # Build id → [props...]
   tmp_preserve_json="$(mktemp)"
   if [ -s "$tmp_preserve_pairs" ]; then
     awk -F'\t' 'NF==2{printf("{\"id\":\"%s\",\"prop\":\"%s\"}\n",$1,$2)}' "$tmp_preserve_pairs" \
@@ -862,7 +874,7 @@ merge_codestrap_keybindings(){
     printf '{}\n' > "$tmp_preserve_json"
   fi
 
-  # id → index   and   id → user object
+  # Build id → user object (using the array index captured from the raw scan)
   tmp_user_id_map="$(mktemp)"; printf '{}\n' > "$tmp_user_id_map"
   if [ -s "$tmp_id_by_index" ]; then
     while IFS=$'\t' read -r idx id; do
@@ -873,45 +885,50 @@ merge_codestrap_keybindings(){
     done < "$tmp_id_by_index"
   fi
 
-  # managed = repo (with temp ids) overlaid with preserved user props (by id)
-  tmp_repo_with_ids="$(mktemp)"
-  jq -c '.[] | select(type=="object")' "$tmp_repo_json" | while IFS= read -r robj; do
+  # === Build MANAGED array: repo objects hashed → overlay preserved props from matching user object (by id)
+  tmp_managed_items="$(mktemp)"; : >"$tmp_managed_items"
+  while IFS= read -r robj; do
+    [ -n "$robj" ] || continue
     rid="$(printf '%s' "$robj" | kb_hash)"
-    printf '%s\n' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }'
-  done | jq -s '.' > "$tmp_repo_with_ids"
 
-  tmp_managed="$(mktemp)"
-  jq -n \
-    --slurpfile R "$tmp_repo_with_ids" \
-    --slurpfile P "$tmp_preserve_json" \
-    --slurpfile U "$tmp_user_id_map" '
-      def arr(x): if (x|type)=="array" then x else [] end;
-      def obj(x): if (x|type)=="object" then x else {} end;
-      (arr($R[0])) as $R
-      | (obj($P[0])) as $K
-      | (obj($U[0])) as $UMAP
-      | [ $R[] | . as $r
-          | ($r.__tmp_id // null) as $id
-          | if ($id!=null) then
-              ($UMAP[$id] // {}) as $u
-              | ($K[$id] // [])   as $keep
-              | reduce $keep[] as $p ($r; if ($u|has($p)) then .[$p] = $u[$p] else . end)
-            else
-              $r
-            end
-        ]
-    ' > "$tmp_managed"
+    # start with repo object, attach temp id
+    cur="$(printf '%s' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }')"
 
-  # ----- EXTRAS: any user entry whose index was NOT associated with an //id#... -----
-  # Build a JSON array of seen indices (those that had id comments)
+    # get user object for this id (if present)
+    uobj="$(jq -c --arg id "$rid" -f /dev/stdin "$tmp_user_id_map" <<'JQ' 2>/dev/null || true
+      .[$id] // empty
+JQ
+)"
+    # get list of preserved props for this id
+    if jq -e . >/dev/null 2>&1 <<<'[]'; then :; fi
+    if props="$(jq -r --arg id "$rid" '.[$id] // [] | .[]' "$tmp_preserve_json" 2>/dev/null)"; then
+      if [ -n "$uobj" ]; then
+        # overlay preserved props from user object onto repo object
+        while IFS= read -r prop; do
+          [ -n "$prop" ] || continue
+          val="$(printf '%s' "$uobj" | jq -c --arg p "$prop" '.[$p] // empty' 2>/dev/null || true)"
+          [ -n "$val" ] || continue
+          cur="$(printf '%s' "$cur" | jq --arg p "$prop" --argjson v "$val" '.[$p] = $v')"
+        done <<EOF
+$props
+EOF
+      fi
+    fi
+
+    printf '%s\n' "$cur" >> "$tmp_managed_items"
+  done <<EOF
+$(jq -c '.[] | select(type=="object")' "$tmp_repo_json")
+EOF
+
+  # === Build EXTRAS: user entries with NO id comment (i.e., indices not recorded)
   tmp_seen_idxs="$(mktemp)"; printf '[' >"$tmp_seen_idxs"
   if [ -s "$tmp_id_by_index" ]; then
-    f=1
-    while IFS=$'\t' read -r idx _; do
+    first=1
+    while IFS=$'\t' read -r idx _rest; do
       [ -n "$idx" ] || continue
-      [ $f -eq 0 ] && printf ',' >>"$tmp_seen_idxs"
+      if [ $first -eq 0 ]; then printf ',' >>"$tmp_seen_idxs"; fi
       printf '%s' "$idx" >>"$tmp_seen_idxs"
-      f=0
+      first=0
     done < "$tmp_id_by_index"
   fi
   printf ']\n' >>"$tmp_seen_idxs"
@@ -923,25 +940,37 @@ merge_codestrap_keybindings(){
     | ($S[0])     as $SEEN
     | [ $UARR | to_entries[]
         | select(.value|type=="object")
-        | select( ($SEEN | index(.key)) == null )   # keep entries *not* in seen indices
+        | select( ($SEEN | index(.key)) == null )
         | .value
       ]
   ' > "$tmp_extras"
 
-  # ---- pretty-print, annotate ids, keep //preserve, avoid trailing commas ----
-  tmp_managed_arr="$(mktemp)"; jq '.' "$tmp_managed" > "$tmp_managed_arr"
-  tmp_extras_arr="$(mktemp)";  jq '.' "$tmp_extras"  > "$tmp_extras_arr"
+  # === Pretty print arrays ===
+  tmp_managed_arr="$(mktemp)"; printf '[\n' >"$tmp_managed_arr"
+  mcount=0
+  while IFS= read -r itm; do
+    [ -n "$itm" ] || continue
+    if [ $mcount -gt 0 ]; then printf ',\n' >>"$tmp_managed_arr"; fi
+    printf '  %s' "$(printf '%s' "$itm" | jq '.')" >>"$tmp_managed_arr"
+    mcount=$((mcount+1))
+  done < "$tmp_managed_items"
+  printf '\n]\n' >>"$tmp_managed_arr"
+
+  tmp_extras_arr="$(mktemp)"; jq '.' "$tmp_extras" > "$tmp_extras_arr"
+
+  # Strip outer [ ] to splice with comments
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
+  # Insert //id#... comment at the top of each managed object and re-apply //preserve flags
   managed_annotated="$(mktemp)"
   awk '
-    function ind(s, t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
-    BEGIN{ inObj=0 }
+    function indent(s,t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
+    BEGIN{ inObj=0; id="" }
     {
       l=$0
       if (!inObj) {
-        if (l ~ /^[[:space:]]*{[[:space:]]*$/) { inObj=1; n=0; id=""; i=ind(l); buf[++n]=l }
+        if (l ~ /^[[:space:]]*{[[:space:]]*$/) { inObj=1; n=0; id=""; i=indent(l); buf[++n]=l }
         else print l
       } else {
         buf[++n]=l
@@ -952,6 +981,7 @@ merge_codestrap_keybindings(){
           outn=0; out[++outn]=buf[1]
           if (id!="") out[++outn]=i "  //id#" id
           for(k=2;k<=n;k++){ t=buf[k]; if (t ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) continue; out[++outn]=t }
+          # remove trailing comma before closing brace
           closei=outn; while(closei>1 && out[closei] ~ /^[[:space:]]*$/) closei--
           if (out[closei] ~ /^[[:space:]]*}[[:space:]]*,?[[:space:]]*$/) {
             prev=closei-1; while(prev>1 && out[prev] ~ /^[[:space:]]*$/) prev--
@@ -964,10 +994,13 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # Re-apply //preserve onto preserved props (comma stays before comment)
+  # Add back //preserve to preserved props (comma stays before the comment)
   managed_with_preserve="$(mktemp)"
   awk -v MAP="$tmp_preserve_pairs" '
-    BEGIN{ while((getline m<MAP)>0){ p=index(m,"\t"); if(p>0){ keep[substr(m,1,p-1) "\t" substr(m,p+1)]=1 } } close(MAP); cur="" }
+    BEGIN{
+      while((getline m<MAP)>0){ p=index(m,"\t"); if(p>0){ keep[substr(m,1,p-1) "\t" substr(m,p+1)]=1 } }
+      close(MAP); cur=""
+    }
     {
       l=$0
       if (l ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) { cur=l; sub(/^.*id#/,"",cur); sub(/[^0-9a-fA-F].*$/,"",cur) }
@@ -982,7 +1015,7 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_annotated" > "$managed_with_preserve"
 
-  # If both segments exist, add a comma to the last managed line (before //preserve if present)
+  # If both segments exist, add a comma to the LAST managed line (before //preserve if present)
   managed_final="$managed_with_preserve"
   if [ -s "$extras_body" ] && [ -s "$managed_with_preserve" ]; then
     managed_final2="$(mktemp)"
@@ -1001,7 +1034,7 @@ merge_codestrap_keybindings(){
     managed_final="$managed_final2"
   fi
 
-  # ---- assemble final file ----
+  # ---- assemble final ----
   tmp_with_comments="$(mktemp)"
   {
     echo "["
@@ -1018,8 +1051,7 @@ merge_codestrap_keybindings(){
 
   rm -f "$tmp_user_json" "$tmp_repo_json" \
         "$tmp_id_by_index" "$tmp_preserve_pairs" "$tmp_preserve_json" \
-        "$tmp_user_id_map" "$tmp_repo_with_ids" "$tmp_managed" \
-        "$tmp_seen_idxs" "$tmp_extras" \
+        "$tmp_user_id_map" "$tmp_managed_items" "$tmp_seen_idxs" "$tmp_extras" \
         "$tmp_managed_arr" "$tmp_extras_arr" \
         "$managed_body" "$extras_body" "$managed_annotated" \
         "$managed_with_preserve" "$managed_final" "$tmp_with_comments" 2>/dev/null || true
