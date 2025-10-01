@@ -574,6 +574,9 @@ merge_codestrap_settings(){
       | (keys_of($RO)) as $RK
       | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
 
+      # Build a repo-key set for O(1) lookups
+      | (reduce $RK[] as $k ({}; . + { ($k): true })) as $RKEYS
+
       # repo-managed first unless preserved
       | (reduce $RK[] as $k (
           {};
@@ -585,15 +588,13 @@ merge_codestrap_settings(){
               ) }
         )) as $MANAGED
 
-      # user extras (keys not present in repo)
+      # user extras (keys not in repo)
       | ($UO
-          | to_entries
-          | map(select( ($RK | index(.key)) | not ))
-          | from_entries
+          | with_entries( select( ($RKEYS[.key] // null) == null ) )
         ) as $UREST
 
       | ($MANAGED + $UREST)
-    ' > "$tmp_merged"
+  ' > "$tmp_merged"
 
   # ---- Pretty + bracket comments (no trailing comma games) ----
   tmp_pretty="$(mktemp)"; jq '.' "$tmp_merged" > "$tmp_pretty"
