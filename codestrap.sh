@@ -576,16 +576,24 @@ merge_codestrap_settings(){
   tmp_preserve_keys="$(mktemp)"
   : >"$tmp_preserve_keys"
   if [ -f "$SETTINGS_PATH" ]; then
-    # Strip a possible top-of-file error banner first, then scan for //preserve
     _banner_strip_first_if_error <"$SETTINGS_PATH" | awk '
-      # capture: "someKey":  ... //preserve
+      # Lines whose last token is //preserve (allow spaces before it)
       /\/\/[[:space:]]*preserve[[:space:]]*$/ {
-        line=$0
-        # cut off at //preserve so trailing stuff doesn’t confuse the match
-        sub(/\/\/[[:space:]]*preserve[[:space:]]*$/,"",line)
-        # extract "key":  prefix
-        if (match(line,/^[[:space:]]*"([^"]+)"[[:space:]]*:/,m)) {
-          print m[1]
+        line = $0
+        # drop the trailing //preserve so it doesn’t interfere with matching
+        sub(/\/\/[[:space:]]*preserve[[:space:]]*$/, "", line)
+        # Find top-level   "key"  :
+        if (match(line, /^[[:space:]]*\"[^\"]+\"[[:space:]]*:/)) {
+          ms = substr(line, RSTART, RLENGTH)
+          q1 = index(ms, "\"")
+          if (q1 > 0) {
+            rest = substr(ms, q1 + 1)
+            q2 = index(rest, "\"")
+            if (q2 > 1) {
+              key = substr(rest, 1, q2 - 1)
+              print key
+            }
+          }
         }
       }
     ' | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserve_keys"
@@ -695,18 +703,26 @@ merge_codestrap_settings(){
   # Build an awk map of preserved keys; whenever we see   "key":   at top level, append //preserve
   managed_with_preserve="$(mktemp)"
   awk -v KFILE="$tmp_preserve_keys" '
-    BEGIN{
-      while( (getline k < KFILE) > 0 ){ pres[k]=1 }
+    BEGIN {
+      while ((getline k < KFILE) > 0) pres[k] = 1
       close(KFILE)
     }
     {
-      line=$0
-      # Detect a top-level setting line:   "key": <value>[,]
-      if (match(line,/^[[:space:]]*"([^"]+)"[[:space:]]*:/,m)) {
-        key=m[1]
-        if (key in pres) {
-          sub(/[[:space:]]*$/,"",line)
-          line=line " //preserve"
+      line = $0
+      # Detect a top-level setting line:   "key": <value>
+      if (match(line, /^[[:space:]]*\"[^\"]+\"[[:space:]]*:/)) {
+        ms = substr(line, RSTART, RLENGTH)
+        q1 = index(ms, "\"")
+        if (q1 > 0) {
+          rest = substr(ms, q1 + 1)
+          q2 = index(rest, "\"")
+          if (q2 > 1) {
+            key = substr(rest, 1, q2 - 1)
+            if (key in pres) {
+              sub(/[[:space:]]*$/, "", line)
+              line = line " //preserve"
+            }
+          }
         }
       }
       print line
