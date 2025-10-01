@@ -573,6 +573,8 @@ merge_codestrap_settings(){
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
   tmp_user_json="$(mktemp)"
+
+  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -586,9 +588,10 @@ merge_codestrap_settings(){
       fi
     fi
   else
-    printf '{}\n' > "$tmp_user_json"
+    printf '{}\n' >"$tmp_user_json"
   fi
 
+  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -602,102 +605,84 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # managed keys bookkeeping (ordered by repo file)
+  # managed keys bookkeeping from repo
   RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
-  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE" 2>/dev/null || true
-  chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
+  if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
+    OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
+  else
+    OLD_KEYS_JSON='[]'
+  fi
 
-  # external preserve list → temp file so we can --slurpfile it
-  tmp_preserve="$(mktemp)"
-  printf '%s\n' "$(read_preserve_array_json settings)" > "$tmp_preserve"
+  # get external preserve array (keys to preserve from user file)
+  PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
 
-  # 1) Build merged object (repo keys first; respect preserve)
+  # ----- merge honoring external preserve -----
   tmp_merged="$(mktemp)"
-  jq -n \
-    --slurpfile U "$tmp_user_json" \
-    --slurpfile R "$tmp_repo_json" \
-    --slurpfile P "$tmp_preserve" '
-      def obj(x): if (x|type)=="object" then x else {} end;
-      def arr(x): if (x|type)=="array" then x else [] end;
+  jq \
+    --argjson repo "$(cat "$tmp_repo_json")" \
+    --argjson rskeys "$RS_KEYS_JSON" \
+    --argjson oldkeys "$OLD_KEYS_JSON" \
+    --argjson pres "$PRESERVE_SETTINGS_JSON" '
+      def arr(v): if (v|type)=="array" then v else [] end;
+      def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
+      def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
-      (obj($U[0])) as $UO
-      | (obj($R[0])) as $RO
-      | (arr($P[0])) as $PRES
-      | ($RO | keys) as $RK
+      (. // {}) as $user
+      | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
+      | (delKeys($tmp_user; $rskeys)) as $user_without_repo
+      | reduce $rskeys[] as $k (
+          $user_without_repo;
+          .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
+        )
+    ' "$tmp_user_json" > "$tmp_merged"
 
-      # Repo keys first, respecting preserve (use user value if preserved+exists)
-      | (reduce $RK[] as $k (
-          {};
-          . + { ($k): (
-                if ( ($PRES | index($k)) and ($UO | has($k)) )
-                then $UO[$k]
-                else $RO[$k]
-                end
-              ) }
-        )) as $MANAGED
+  # managed snapshot (for future cleanups)
+  tmp_managed="$(mktemp)"
+  jq \
+    --argjson ks "$RS_KEYS_JSON" '
+      . as $src
+      | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
+    ' "$tmp_merged" > "$tmp_managed"
 
-      # Then user keys not defined by repo
-      | ($UO | to_entries | map(select( ($RK | index(.key)) | not ))) as $UREST
-      | ($MANAGED + ( $UREST | from_entries ))
-    ' > "$tmp_merged"
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  # 2) Compute which repo keys actually came **from repo** (not preserved)
-  tmp_repo_merged_keys="$(mktemp)"
-  jq -rn \
-    --slurpfile U "$tmp_user_json" \
-    --slurpfile R "$tmp_repo_json" \
-    --slurpfile P "$tmp_preserve" '
-      def obj(x): if (x|type)=="object" then x else {} end;
-      def arr(x): if (x|type)=="array" then x else [] end;
+  # final (no in-file codestrap_preserve)
+  tmp_final="$(mktemp)"
+  jq '.' "$tmp_merged" > "$tmp_final"
 
-      (obj($U[0])) as $UO
-      | (obj($R[0])) as $RO
-      | (arr($P[0])) as $PRES
-      | ($RO | keys) as $RK
+  # inject START/END comments only
+  tmp_with_comments="$(mktemp)"
+  {
+    first_brace_done=0
+    while IFS= read -r line; do
+      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
+        echo "$line"
+        echo "  //codestrap merged settings:"
+        first_brace_done=1
+        continue
+      fi
+      echo "$line"
+    done < "$tmp_final"
+  } > "$tmp_with_comments"
 
-      # Only those repo keys we actually took from repo (NOT preserved).
-      # Emit each key as a raw line for awk.
-      | [ $RK[]
-          | select( ( (($PRES | index(.)) and ($UO | has(.))) ) | not )
-        ]
-      | .[]
-    ' > "$tmp_repo_merged_keys"
-
-  # 3) Pretty print merged
-  tmp_pretty="$(mktemp)"
-  jq '.' "$tmp_merged" > "$tmp_pretty"
-
-  # 4) Append inline comment to lines with those repo-merged keys (top-level only)
-  tmp_annotated="$(mktemp)"
-  awk -v KSFILE="$tmp_repo_merged_keys" '
-    BEGIN{
-      while((getline k < KSFILE)>0){
-        gsub(/\r/,"",k);
-        if(k!=""){ seen[k]=1 }
-      }
-      close(KSFILE)
-    }
-    {
-      line=$0
-      # jq pretty-print uses 2-space indent for top-level keys
-      if (match(line,/^[[:space:]]{2}"/)) {
-        key=line
-        sub(/^[[:space:]]*"/,"",key)
-        sub(/".*/,"",key)
-        if (key in seen) {
-          print line " //codestrap merged setting"
-          next
+  # ensure END marker exists (append before last line)
+  if ! grep -q '//user defined settings' "$tmp_with_comments"; then
+    awk '
+      BEGIN{n=0}
+      {buf[++n]=$0}
+      END{
+        for(i=1;i<=n;i++){
+          if(i==n){ print "  //user defined settings" }
+          print buf[i]
         }
-      }
-      print line
-    }
-  ' "$tmp_pretty" > "$tmp_annotated"
+      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
+  fi
 
-  write_inplace "$tmp_annotated" "$SETTINGS_PATH"
+  write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" "$tmp_merged" "$tmp_repo_merged_keys" "$tmp_pretty" "$tmp_annotated" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
