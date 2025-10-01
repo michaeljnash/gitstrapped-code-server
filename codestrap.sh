@@ -559,68 +559,63 @@ merge_codestrap_settings(){
     ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
   fi
 
-  # ---- Build emission data (repo-managed triplets + user-extras entries) ----
-  # Triplet rows (JSON per line): ["key", <json_value>, true|false_preserved]
-  tmp_managed_triplets="$(mktemp)"
-  jq -r \
+  # ---- Build arrays we can reliably emit from ----
+  tmp_managed_arr="$(mktemp)"
+  tmp_user_extras_arr="$(mktemp)"
+
+  # managed array: keep REPO order; for each key decide value + preserve flag
+  jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
     --rawfile PK "$tmp_preserved_keys" '
       def obj(x): if (x|type)=="object" then x else {} end;
-
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
       | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
-      # Use to_entries to preserve repo declaration order
-      | ($RO | to_entries) as $RE
-      | $RE[]
-      | .key as $k
-      | [ $k
-        , ( if ($PRES | index($k)) and ($UO[$k] != null) then $UO[$k] else .value end )
-        , ( ($PRES | index($k)) and ($UO[$k] != null) )
+      | [ ($RO|to_entries)[] as $e
+          | { key: $e.key
+            , value: ( if ($PRES|index($e.key)) and ($UO[$e.key] != null)
+                       then $UO[$e.key] else $e.value end )
+            , preserve: ( ($PRES|index($e.key)) and ($UO[$e.key] != null) )
+            }
         ]
-      | @json
-    ' > "$tmp_managed_triplets"
+    ' > "$tmp_managed_arr"
 
-  # User extras rows (JSON per line): {"key": "...", "value": <json>}
-  tmp_user_extras_entries="$(mktemp)"
-  jq -r \
+  # user extras array: keep USER order but only keys not in repo
+  jq -c \
     --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" '
       def obj(x): if (x|type)=="object" then x else {} end;
       (obj($U[0])) as $UO
       | (obj($R[0])) as $RO
-      | ($RO | to_entries | map(.key)) as $RKS
-      | ($UO | to_entries | map(select( ($RKS | index(.key)) | not )) | .[])
-      | @json
-    ' > "$tmp_user_extras_entries"
+      | ($RO|keys) as $RK
+      | [ ($UO|to_entries)[]
+          | select( ($RK|index(.key)) | not )
+          | { key: .key, value: .value }
+        ]
+    ' > "$tmp_user_extras_arr"
 
-  mcount="$(wc -l < "$tmp_managed_triplets" | tr -d ' ')"; [ -n "$mcount" ] || mcount=0
-  ucount="$(wc -l < "$tmp_user_extras_entries" | tr -d ' ')"; [ -n "$ucount" ] || ucount=0
+  mlen="$(jq 'length' "$tmp_managed_arr")"
+  ulen="$(jq 'length' "$tmp_user_extras_arr")"
 
-  # ---- Emit with comments; managed first, then user extras; restore //preserve inline ----
-  tmp_with_comments="$(mktemp)"
+  # ---- Emit final file with markers and restored //preserve ----
+  tmp_out="$(mktemp)"
   {
     echo "{"
     echo "  //codestrap merged settings:"
 
-    mi=0
-    if [ "$mcount" -gt 0 ]; then
-      while IFS= read -r row; do
-        [ -n "$row" ] || continue
-        mi=$((mi+1))
-        key="$(printf '%s' "$row" | jq -r '.[0]')"
-        val="$(printf '%s' "$row" | jq -c '.[1]')"   # compact JSON value
-        pres="$(printf '%s' "$row" | jq -r '.[2]')"  # true/false
+    if [ "$mlen" -gt 0 ]; then
+      for i in $(jq -r 'to_entries|map(.key)|.[]' "$tmp_managed_arr"); do
+        key=$(jq -r ".[$i].key" "$tmp_managed_arr")
+        val=$(jq -c ".[$i].value" "$tmp_managed_arr")
+        pres=$(jq -r ".[$i].preserve" "$tmp_managed_arr")
 
+        # Comma after managed entries if either:
+        #  - there are user extras (so a comma needed between sections), or
+        #  - this is not the last managed entry.
         need_comma=0
-        if [ "$ucount" -gt 0 ]; then
-          # extras follow → comma after every managed entry
-          need_comma=1
-        else
-          # no extras → comma after all but the last managed entry
-          [ "$mi" -lt "$mcount" ] && need_comma=1 || need_comma=0
-        fi
+        last_man=$(( mlen - 1 ))
+        if [ "$ulen" -gt 0 ] || [ "$i" -lt "$last_man" ]; then need_comma=1; fi
 
         printf '  "%s": %s' "$key" "$val"
         if [ "$need_comma" -eq 1 ]; then
@@ -636,36 +631,34 @@ merge_codestrap_settings(){
             printf "\n"
           fi
         fi
-      done < "$tmp_managed_triplets"
+      done
     fi
 
     echo "  //user defined settings:"
 
-    ui=0
-    if [ "$ucount" -gt 0 ]; then
-      while IFS= read -r row; do
-        [ -n "$row" ] || continue
-        ui=$((ui+1))
-        k="$(printf '%s' "$row" | jq -r '.key')"
-        v="$(printf '%s' "$row" | jq -c '.value')"
+    if [ "$ulen" -gt 0 ]; then
+      for j in $(jq -r 'to_entries|map(.key)|.[]' "$tmp_user_extras_arr"); do
+        k=$(jq -r ".[$j].key" "$tmp_user_extras_arr")
+        v=$(jq -c ".[$j].value" "$tmp_user_extras_arr")
+        last_usr=$(( ulen - 1 ))
         printf '  "%s": %s' "$k" "$v"
-        if [ "$ui" -lt "$ucount" ]; then
+        if [ "$j" -lt "$last_usr" ]; then
           printf ",\n"
         else
           printf "\n"
         fi
-      done < "$tmp_user_extras_entries"
+      done
     fi
 
     echo "}"
-  } > "$tmp_with_comments"
+  } > "$tmp_out"
 
-  write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
+  write_inplace "$tmp_out" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_with_comments" \
-        "$tmp_preserved_keys" "$tmp_managed_triplets" "$tmp_user_extras_entries" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserved_keys" \
+        "$tmp_managed_arr" "$tmp_user_extras_arr" "$tmp_out" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
