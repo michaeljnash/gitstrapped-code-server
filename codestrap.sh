@@ -794,10 +794,10 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # --- canonical short id (8 chars) for a keybinding object ---
+  # ---- short deterministic id for a kb object (8 hex) ----
   kb_hash(){ jq -cS . | tr -d '\n\t ' | sha1sum | awk '{print substr($1,1,8)}'; }
 
-  # ---- Load USER (parsed JSON for data), keep raw file for comment scan ----
+  # ---- Load USER (json array, comments stripped if needed) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if jq -e . "$KEYB_PATH" >/dev/null 2>&1; then
@@ -815,7 +815,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' >"$tmp_user_json"
   fi
 
-  # ---- Load REPO (allow comments only) ----
+  # ---- Load REPO (json array) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -829,45 +829,52 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # === PASS 1: RAW user scan (comments) → (idx → id) and (id → preserved props)
-  tmp_id_by_index_txt="$(mktemp)"; : >"$tmp_id_by_index_txt"   # "<idx>\t<id>"
-  tmp_preserve_pairs="$(mktemp)";   : >"$tmp_preserve_pairs"   # "<id>\t<prop>"
+  # === PASS 1 on RAW USER FILE ===
+  # Extract:  (1) array-index → id (from //id#HASH inside each object)
+  #           (2) id → [props] for props with //preserve on same line
+  tmp_idx_id="$(mktemp)"          # lines: "<idx>\t<id>"
+  tmp_preserve_pairs="$(mktemp)"  # lines: "<id>\t<prop>"
+  : >"$tmp_idx_id"; : >"$tmp_preserve_pairs"
 
   if [ -f "$KEYB_PATH" ]; then
-    _banner_strip_first_if_error <"$KEYB_PATH" | awk -v O1="$tmp_id_by_index_txt" -v O2="$tmp_preserve_pairs" '
-      function cnt(re,s, t){ t=s; return gsub(re,"&",t) }
-      BEGIN{ arr=0; inObj=0; obj=0; idx=-1; cur="" }
+    _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OI="$tmp_idx_id" -v OP="$tmp_preserve_pairs" '
+      function count(re,s, t){ t=s; return gsub(re,"&",t) }
+      BEGIN{ adepth=0; odepth=0; inArr=0; inObj=0; idx=-1; curId="" }
       {
-        s=$0
-        arr += cnt(/\[/,s); arr -= cnt(/\]/,s)
-        if (!inObj && arr==1 && cnt(/\{/,s)>0){ inObj=1; obj = cnt(/\{/,s)-cnt(/\}/,s); idx++; cur="" }
-        else if (inObj){ obj += cnt(/\{/,s); obj -= cnt(/\}/,s) }
+        ln=$0
+        # array depth
+        adepth += count(/\[/,ln); adepth -= count(/\]/,ln)
+        if (!inArr && adepth==1) inArr=1
+        # object enter
+        if (inArr && !inObj && count(/\{/,ln)>0) { inObj=1; odepth = count(/\{/,ln)-count(/\}/,ln); idx++; curId="" }
+        else if (inObj) { odepth += count(/\{/,ln); odepth -= count(/\}/,ln) }
 
-        if (inObj && s ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/){
-          t=s; sub(/^.*id#/,"",t); sub(/[^0-9a-fA-F].*$/,"",t); cur=t
+        if (inObj && ln ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/) {
+          t=ln; sub(/^.*id#/,"",t); sub(/[^0-9a-fA-F].*$/,"",t); curId=t
         }
 
-        if (inObj && cur!="" && s ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && s ~ /^[[:space:]]*"[^"]+"\s*:/){
-          p=s; sub(/^[[:space:]]*"/,"",p); sub(/".*$/,"",p); print cur "\t" p >> O2
+        if (inObj && curId!="" && ln ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && ln ~ /^[[:space:]]*"[^"]+"\s*:/) {
+          p=ln; sub(/^[[:space:]]*"/,"",p); sub(/".*$/,"",p)
+          print curId "\t" p >> OP
         }
 
-        if (inObj && obj<=0){
-          if(cur!="") print idx "\t" cur >> O1
+        if (inObj && odepth<=0) {
+          if (curId!="") print idx "\t" curId >> OI
           inObj=0
         }
       }
     '
   fi
 
-  # Convert idx→id TSV to JSON array [{i:<num>, id:"..."}]
+  # idx→id as array of {"i":<num>,"id":"..."}
   tmp_idx_arr="$(mktemp)"
-  if [ -s "$tmp_id_by_index_txt" ]; then
-    awk -F'\t' 'NF==2{printf("{\"i\":%d,\"id\":\"%s\"}\n",$1,$2)}' "$tmp_id_by_index_txt" | jq -s '.' > "$tmp_idx_arr"
+  if [ -s "$tmp_idx_id" ]; then
+    awk -F'\t' 'NF==2{printf("{\"i\":%d,\"id\":\"%s\"}\n",$1,$2)}' "$tmp_idx_id" | jq -s '.' > "$tmp_idx_arr"
   else
     printf '[]\n' > "$tmp_idx_arr"
   fi
 
-  # Build id → [props...]
+  # id → [props...]
   tmp_preserve_json="$(mktemp)"
   if [ -s "$tmp_preserve_pairs" ]; then
     awk -F'\t' 'NF==2{printf("{\"id\":\"%s\",\"prop\":\"%s\"}\n",$1,$2)}' "$tmp_preserve_pairs" \
@@ -876,7 +883,22 @@ merge_codestrap_keybindings(){
     printf '{}\n' > "$tmp_preserve_json"
   fi
 
-  # === Build repo array with __tmp_id (hash) — no argjson involved
+  # === Build user map id → object (using indices captured from raw file) ===
+  tmp_user_by_id_list="$(mktemp)"   # [{"id":"..","obj":{...}}, ...]
+  if [ -s "$tmp_idx_arr" ]; then
+    jq -r '.[] | [.i,.id] | @tsv' "$tmp_idx_arr" | while IFS=$'\t' read -r i id; do
+      uobj="$(jq -c --argjson i "$i" '.[ $i ] // {}' "$tmp_user_json" 2>/dev/null || printf '{}')"
+      printf '{"id":%s,"obj":%s}\n' "$(printf '%s' "$id" | jq -Rs '.')" "$uobj"
+    done | jq -s '.' > "$tmp_user_by_id_list"
+  else
+    printf '[]\n' > "$tmp_user_by_id_list"
+  fi
+
+  # reduce that list to an object id → obj
+  tmp_user_by_id="$(mktemp)"
+  jq 'reduce .[] as $e ({}; .[$e.id] = $e.obj)' "$tmp_user_by_id_list" > "$tmp_user_by_id"
+
+  # === repo with __tmp_id (hash from repo object) ===
   tmp_repo_with_ids="$(mktemp)"
   jq -c '.[] | select(type=="object")' "$tmp_repo_json" | while IFS= read -r robj; do
     [ -n "$robj" ] || continue
@@ -884,66 +906,70 @@ merge_codestrap_keybindings(){
     printf '%s\n' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }'
   done | jq -s '.' > "$tmp_repo_with_ids"
 
-  # === Merge (all via slurpfiles) ===
-  tmp_both="$(mktemp)"
+  # === Merge (repo-first; overlay preserved props from user obj with same id) ===
+  tmp_managed="$(mktemp)"
   jq -n \
-    --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_with_ids" \
-    --slurpfile P "$tmp_preserve_json" \
-    --slurpfile IDX "$tmp_idx_arr" '
+    --slurpfile UM "$tmp_user_by_id" \
+    --slurpfile P "$tmp_preserve_json" '
       def arr(x): if (x|type)=="array" then x else [] end;
       def obj(x): if (x|type)=="object" then x else {} end;
 
-      (arr($U[0]))  as $Uraw
-      | (arr($R[0])) as $R
-      | (obj($P[0])) as $PRES
-      | (arr($IDX[0])) as $IDX
-
-      # id -> full user object (from captured indices)
-      | ( reduce $IDX[] as $e ({};
-            .[$e.id] = ( ($Uraw[$e.i] // {}) | select(type=="object") )
-        )
-        ) as $U_by_id
-
-      # repo-first, overlay preserved props from matching user object by id
+      (arr($R[0])) as $R
+      | (obj($UM[0])) as $U_by_id
+      | (obj($P[0]))  as $PRES
       | ( $R
           | map(
               . as $repo
               | ($repo.__tmp_id // null) as $id
-              | if $id != null and ($U_by_id[$id]? != null) then
+              | if $id != null and ($U_by_id[$id]? != null)
+                then
                   ($U_by_id[$id]) as $u
                   | ($PRES[$id] // []) as $keep
-                  | reduce $keep[] as $k (
-                      $repo;
-                      if ($u[$k]? != null) then .[$k] = $u[$k] else . end
-                    )
+                  | reduce $keep[] as $k ($repo; if ($u[$k]? != null) then .[$k] = $u[$k] else . end)
                 else
                   .
                 end
             )
-        ) as $managed
+        )
+  ' > "$tmp_managed"
 
-      # user extras = entries that had no id comment (indices not in IDX)
-      | ( $IDX | map(.i) ) as $seen
-      | ( [ $Uraw | to_entries[]
-            | select(.value|type=="object")
-            | select( ($seen | index(.key)) == null )
-            | .value
-          ] ) as $extras
+  # === Determine user extras (those without an id comment) ===
+  # Build a set of seen indices (from idx→id) and select the rest as extras.
+  tmp_seen_idx="$(mktemp)"
+  jq -r '.[].i' "$tmp_idx_arr" 2>/dev/null | awk 'NF' > "$tmp_seen_idx"
+  tmp_extras="$(mktemp)"
+  if [ -s "$tmp_seen_idx" ]; then
+    # emit user array with indices; drop those present in seen
+    jq -n --slurpfile U "$tmp_user_json" '
+      ($U[0] // []) as $Uraw
+      | [ range(0; ($Uraw|length)) as $i | {i:$i, v:$Uraw[$i]} ]
+    ' | jq -rc '.[]' | awk -v S="$tmp_seen_idx" '
+      BEGIN{ while((getline s<S)>0) seen[s]=1; close(S) }
+      {
+        # each line is a compact JSON object { "i":N, "v": <obj or ...> }
+        print $0
+      }
+    ' | jq -s '
+      [ .[]
+        | select( ( .i | tostring ) as $k
+                  | ( $ENV.seen[$k] // "0") == "0"
+                )
+        | .v
+        | select(type=="object")
+      ]' --argfile seen <(awk '{printf "{\"%s\":\"1\"}\n",$0}' "$tmp_seen_idx" | jq -s 'add') > "$tmp_extras"
+  else
+    # no ids → all user entries are extras
+    jq '[ .[] | select(type=="object") ]' "$tmp_user_json" > "$tmp_extras"
+  fi
 
-      | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
-  ' > "$tmp_both"
-
-  mlen="$(jq -r '.mlen' "$tmp_both")"
-  elen="$(jq -r '.elen' "$tmp_both")"
-
-  # Pretty-print arrays and strip outer brackets
-  tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
-  tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
+  # === Pretty blocks ===
+  tmp_managed_arr="$(mktemp)"; jq '.' "$tmp_managed" > "$tmp_managed_arr"
+  tmp_extras_arr="$(mktemp)";  jq '.' "$tmp_extras"  > "$tmp_extras_arr"
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
-  extras_body="$(mktemp)";   sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
+  extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # Insert //id#... at top of each managed object; drop __tmp_id; clean trailing commas
+  # Insert //id#... into each managed object; drop __tmp_id; ensure no trailing comma before }
   managed_annotated="$(mktemp)"
   awk '
     function indent(s,t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
@@ -974,7 +1000,7 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # Re-add //preserve to preserved props; comma stays before the comment
+  # Add back //preserve to preserved props (keep comma before the comment)
   managed_with_preserve="$(mktemp)"
   awk -v MAP="$tmp_preserve_pairs" '
     BEGIN{
@@ -995,7 +1021,7 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_annotated" > "$managed_with_preserve"
 
-  # If both segments exist, add a comma to the last managed line (before //preserve if present)
+  # If both blocks exist, add a comma to the last managed line (before //preserve if present)
   managed_final="$managed_with_preserve"
   if [ -s "$extras_body" ] && [ -s "$managed_with_preserve" ]; then
     managed_final2="$(mktemp)"
@@ -1014,7 +1040,7 @@ merge_codestrap_keybindings(){
     managed_final="$managed_final2"
   fi
 
-  # ---- assemble final ----
+  # ---- Compose final file ----
   tmp_with_comments="$(mktemp)"
   {
     echo "["
@@ -1030,8 +1056,9 @@ merge_codestrap_keybindings(){
   clear_error_banner "$KEYB_PATH"
 
   rm -f "$tmp_user_json" "$tmp_repo_json" \
-        "$tmp_id_by_index_txt" "$tmp_preserve_pairs" "$tmp_idx_arr" "$tmp_preserve_json" \
-        "$tmp_repo_with_ids" "$tmp_both" \
+        "$tmp_idx_id" "$tmp_preserve_pairs" "$tmp_idx_arr" "$tmp_preserve_json" \
+        "$tmp_user_by_id_list" "$tmp_user_by_id" \
+        "$tmp_repo_with_ids" "$tmp_managed" "$tmp_extras" "$tmp_seen_idx" \
         "$tmp_managed_arr" "$tmp_extras_arr" "$managed_body" "$extras_body" \
         "$managed_annotated" "$managed_with_preserve" "$managed_final" "$tmp_with_comments" 2>/dev/null || true
 
