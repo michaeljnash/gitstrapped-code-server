@@ -923,14 +923,10 @@ merge_codestrap_keybindings(){
       def arr(x): if (x|type)=="array" then x else [] end;
       def obj(x): if (x|type)=="object" then x else {} end;
 
-      # SUPER defensive key extractor:
+      # Extract "key" only from objects that actually have it
       def kstr($x):
-        if ($x|type) == "object" then
-          ( try ($x|keys) catch [] ) as $ks
-          | if ($ks|type)=="array" and ($ks|index("key") != null)
-            then ($x|.["key"] | tostring)
-            else null
-            end
+        if ($x|type) == "object" and ((try ($x|keys) catch []) | index("key")) != null
+        then ($x["key"] | tostring)
         else null end;
 
       (arr($U[0])) as $Uraw
@@ -939,35 +935,48 @@ merge_codestrap_keybindings(){
       | (obj($UM[0])) as $U_by_id
       | (obj($IDX[0])) as $IDX2ID
 
+      # Repo ids present
       | ($R | map(.["__tmp_id"]) | unique) as $RIDSET
 
+      # Build managed list, copying preserved props from user *only if user value is an object*
       | ($R
           | map(
               . as $repo
               | ($repo.__tmp_id // null) as $id
-              | if ($id != null and (($U_by_id|keys)|index($id) != null))
-                then
-                  $U_by_id[$id] as $u
-                  | ($PRES[$id] // []) as $keep
-                  | reduce $keep[] as $k ($repo; if ((($u|keys)|index($k) != null)) then .[$k] = $u[$k] else . end)
+              | if $id != null and (($U_by_id|keys)|index($id) != null) then
+                  ($U_by_id[$id]) as $u
+                  | if ($u|type) == "object" then
+                      ($PRES[$id] // []) as $keep
+                      | reduce $keep[] as $k (
+                          $repo;
+                          # Assign only if user has that property and it is not null
+                          if (($u[$k]? // null) != null) then .[$k] = $u[$k] else . end
+                        )
+                    else
+                      # user element wasn’t an object; just keep repo
+                      $repo
+                    end
                 else
-                  .
+                  $repo
                 end
             )
         ) as $managed
 
+      # Managed keys (strings) to help dedupe extras by key
       | ($managed | map(kstr(.)) | map(select(. != null)) | unique) as $MKEYS
 
+      # Indices in the original user array that were matched by id (so we can skip them in extras)
       | ($IDX2ID
           | to_entries
           | map( . as $e | select( ($RIDSET | index($e.value)) != null ) | ($e.key|tonumber) )
           | unique
         ) as $SKIP_IDX
 
+      # Extras: user entries not matched by id and not colliding (by key) with managed
       | ($Uraw
           | to_entries
           | map( select( ($SKIP_IDX | index(.key)) == null ) | .value )
-          | map( select( (.|type)=="object" ) )
+          | map( select((.|type)=="object") )
           | map( . as $o | (kstr($o)) as $k | select( $k == null or ($MKEYS | index($k)) == null ) )
         ) as $extras
 
@@ -976,6 +985,7 @@ merge_codestrap_keybindings(){
 
   mlen="$(jq -r '.mlen // 0' "$tmp_both")"
   elen="$(jq -r '.elen // 0' "$tmp_both")"
+
 
   # Pretty-print arrays and strip outer brackets
   tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
