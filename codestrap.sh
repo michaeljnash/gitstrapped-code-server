@@ -784,16 +784,14 @@ merge_codestrap_keybindings(){
   mlen="$(jq -r '.mlen' "$tmp_both")"
   elen="$(jq -r '.elen' "$tmp_both")"
 
-  # Pretty-print arrays (one file each), then strip surrounding [ ] so we can bracket with comments
+  # Pretty-print arrays (each to its own file), then strip outer [ ]
   tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
   tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
 
-  # Strip the first and last lines (the [ and ])
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
   # Convert the marker property line into a comment INSIDE each managed object
-  #   ".__codestrapMerged": true,  →  //codestrap merged keybinding:
   managed_annotated="$(mktemp)"
   awk '
     {
@@ -806,19 +804,32 @@ merge_codestrap_keybindings(){
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # Compose final array with section comments + correct commas between segments
+  # If both segments exist, append a comma to the last non-blank line of the managed block
+  managed_final="$managed_annotated"
+  if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
+    managed_final="$(mktemp)"
+    awk '
+      { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
+      END {
+        for(i=1;i<=NR;i++){
+          if (i==last) {
+            sub(/[[:space:]]*$/,"",lines[i]);
+            print lines[i] ","
+          } else {
+            print lines[i]
+          }
+        }
+      }
+    ' "$managed_annotated" > "$managed_final"
+  fi
+
+  # Compose final array with section comments; keep commas in-line
   tmp_with_comments="$(mktemp)"
   {
     echo "["
     echo "  //codestrap merged keybindings:"
-    # emit managed segment (if any)
-    if [ -s "$managed_annotated" ]; then
-      # indent the managed block by two spaces to sit nicely under the array
-      sed 's/^/  /' "$managed_annotated"
-    fi
-    # comma between segments iff both non-empty
-    if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
-      echo "  ,"
+    if [ -s "$managed_final" ]; then
+      sed 's/^/  /' "$managed_final"
     fi
     echo "  //user defined keybindings:"
     if [ -s "$extras_body" ]; then
@@ -835,7 +846,7 @@ merge_codestrap_keybindings(){
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" \
         "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr" \
         "$managed_body" "$extras_body" "$managed_annotated" \
-        "$tmp_with_comments" 2>/dev/null || true
+        "$managed_final" "$tmp_with_comments" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
 }
