@@ -573,8 +573,7 @@ merge_codestrap_settings(){
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
   tmp_user_json="$(mktemp)"
-
-  # User settings (allow comments only; no other repairs)
+  # ---- USER (allow comments) ----
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -591,7 +590,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Repo settings (allow comments only)
+  # ---- REPO (allow comments) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -605,15 +604,13 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # managed keys bookkeeping from repo
+  # keys managed by repo (in order) + previously managed snapshot
   RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
   else
     OLD_KEYS_JSON='[]'
   fi
-
-  # get external preserve array (keys to preserve from user file)
   PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
 
   # ----- merge honoring external preserve -----
@@ -636,53 +633,71 @@ merge_codestrap_settings(){
         )
     ' "$tmp_user_json" > "$tmp_merged"
 
-  # managed snapshot (for future cleanups)
-  tmp_managed="$(mktemp)"
+  # snapshot of currently managed keys (for future cleanups)
+  tmp_managed_snapshot="$(mktemp)"
   jq \
     --argjson ks "$RS_KEYS_JSON" '
       . as $src
       | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
-    ' "$tmp_merged" > "$tmp_managed"
+    ' "$tmp_merged" > "$tmp_managed_snapshot"
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE" || true
+  chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
+  # ----- split merged → managed-only + extras (user-defined) -----
+  tmp_managed_obj="$(mktemp)"
+  jq --argjson ks "$RS_KEYS_JSON" '
+    . as $src
+    | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
+  ' "$tmp_merged" > "$tmp_managed_obj"
 
-  # final (no in-file codestrap_preserve)
-  tmp_final="$(mktemp)"
-  jq '.' "$tmp_merged" > "$tmp_final"
+  tmp_extras_obj="$(mktemp)"
+  jq --argjson ks "$RS_KEYS_JSON" '
+    . as $src
+    | reduce ($src|keys[]) as $k ({};
+        if ($ks | index($k)) then . else .[$k] = $src[$k] end)
+  ' "$tmp_merged" > "$tmp_extras_obj"
 
-  # inject START/END comments only
+  # pretty-print, then strip outer braces to insert section comments
+  managed_body="$(mktemp)"; jq '.' "$tmp_managed_obj" | sed '1d;$d' > "$managed_body"
+  extras_body="$(mktemp)";  jq '.' "$tmp_extras_obj"  | sed '1d;$d' > "$extras_body"
+
+  # if both sections non-empty, append a comma to the last non-blank line of managed block
+  have_managed=0; [ -s "$managed_body" ] && have_managed=1
+  have_extras=0;  [ -s "$extras_body" ]  && have_extras=1
+
+  managed_final="$managed_body"
+  if [ $have_managed -eq 1 ] && [ $have_extras -eq 1 ]; then
+    managed_final="$(mktemp)"
+    awk '
+      { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
+      END {
+        for(i=1;i<=NR;i++){
+          if (i==last) { sub(/[[:space:]]*$/,"",lines[i]); print lines[i] "," }
+          else          { print lines[i] }
+        }
+      }
+    ' "$managed_body" > "$managed_final"
+  fi
+
+  # ----- compose final file with section comments -----
   tmp_with_comments="$(mktemp)"
   {
-    first_brace_done=0
-    while IFS= read -r line; do
-      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
-        echo "$line"
-        echo "  //codestrap merged settings:"
-        first_brace_done=1
-        continue
-      fi
-      echo "$line"
-    done < "$tmp_final"
+    echo "{"
+    echo "  //codestrap merged settings:"
+    if [ $have_managed -eq 1 ]; then sed 's/^/  /' "$managed_final"; fi
+    echo "  //user defined settings:"
+    if [ $have_extras -eq 1 ];  then sed 's/^/  /' "$extras_body";  fi
+    echo "}"
   } > "$tmp_with_comments"
-
-  # ensure END marker exists (append before last line)
-  if ! grep -q '//user defined settings:' "$tmp_with_comments"; then
-    awk '
-      BEGIN{n=0}
-      {buf[++n]=$0}
-      END{
-        for(i=1;i<=n;i++){
-          if(i==n){ print "  //user defined settings:" }
-          print buf[i]
-        }
-      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
-  fi
 
   write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" \
+        "$tmp_managed_snapshot" "$tmp_managed_obj" "$tmp_extras_obj" \
+        "$managed_body" "$extras_body" "$managed_final" "$tmp_with_comments" 2>/dev/null || true
+
   log "merged settings.json → $SETTINGS_PATH"
 }
 
