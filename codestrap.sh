@@ -952,27 +952,23 @@ merge_codestrap_keybindings(){
   #     and drop the __tmp_id property itself. (Portable awk; buffer per object.)
   managed_annotated="$(mktemp)"
   awk '
-    function ltrim(s){ sub(/^[[:space:]]+/, "", s); return s }
-    function rtrim(s){ sub(/[[:space:]]+$/, "", s); return s }
+    function get_indent(s,    t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
     BEGIN { indepth=0; inobj=0; n=0 }
     {
       line=$0
-      # Count braces on a copy
       tmp=line
       ob = gsub(/\{/,"{",tmp)
       cb = gsub(/\}/,"}",tmp)
 
       if (!inobj) {
-        # Looking for start of an object
         if (ob>0 && indepth==0) {
           inobj=1; objdepth=ob-cb; n=0; oid=""
-          obj_indent=line; sub(/^([[:space:]]*).*/,"\\1",obj_indent)
+          obj_indent=get_indent(line)
           buf[++n]=line
         } else {
           print line
         }
       } else {
-        # Inside object: accumulate
         buf[++n]=line
         objdepth += ob
         objdepth -= cb
@@ -986,21 +982,13 @@ merge_codestrap_keybindings(){
 
         if (objdepth<=0) {
           # Object complete: emit with //id#... after the opening brace
-          # Determine inner indent (brace indent + two spaces)
-          inner = obj_indent "  "
-
-          # 1) print first line (opening brace)
           print buf[1]
-          # 2) id comment if captured
-          if (oid != "") { print inner "//id#" oid }
-
-          # 3) print remaining lines skipping any __tmp_id property lines
+          if (oid != "") { print obj_indent "  //id#" oid }
           for(i=2;i<=n;i++){
             l=buf[i]
             if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) { continue }
             print l
           }
-
           inobj=0
         }
       }
