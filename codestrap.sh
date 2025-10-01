@@ -839,24 +839,18 @@ merge_codestrap_keybindings(){
       BEGIN{ arr=0; inObj=0; obj=0; idx=-1; cur="" }
       {
         s=$0
-        # maintain array depth (top-level is the big [ ... ])
         arr += cnt(/\[/,s); arr -= cnt(/\]/,s)
-
-        # detect start of an object when inside the array
         if (!inObj && arr==1 && cnt(/\{/,s)>0){ inObj=1; obj = cnt(/\{/,s)-cnt(/\}/,s); idx++; cur="" }
         else if (inObj){ obj += cnt(/\{/,s); obj -= cnt(/\}/,s) }
 
-        # id comment
         if (inObj && s ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/){
           t=s; sub(/^.*id#/,"",t); sub(/[^0-9a-fA-F].*$/,"",t); cur=t
         }
 
-        # preserve comment on a property line
         if (inObj && cur!="" && s ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && s ~ /^[[:space:]]*"[^"]+"\s*:/){
           p=s; sub(/^[[:space:]]*"/,"",p); sub(/".*$/,"",p); print cur "\t" p >> O2
         }
 
-        # close object
         if (inObj && obj<=0){
           if(cur!="") print idx "\t" cur >> O1
           inObj=0
@@ -874,14 +868,15 @@ merge_codestrap_keybindings(){
     printf '{}\n' > "$tmp_preserve_json"
   fi
 
-  # Build id → user object (using the array index captured from the raw scan)
+  # Build id → user object (via index captured from raw scan); only store valid objects
   tmp_user_id_map="$(mktemp)"; printf '{}\n' > "$tmp_user_id_map"
   if [ -s "$tmp_id_by_index" ]; then
     while IFS=$'\t' read -r idx id; do
       [ -n "$idx" ] && [ -n "$id" ] || continue
-      uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_json" 2>/dev/null || printf 'null')"
-      printf '%s\n' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1 || continue
-      jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$tmp_user_id_map" > "$tmp_user_id_map.tmp" && mv -f "$tmp_user_id_map.tmp" "$tmp_user_id_map"
+      uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_json" 2>/dev/null || printf '')"
+      if [ -n "$uobj" ] && printf '%s' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1; then
+        jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$tmp_user_id_map" > "$tmp_user_id_map.tmp" && mv -f "$tmp_user_id_map.tmp" "$tmp_user_id_map"
+      fi
     done < "$tmp_id_by_index"
   fi
 
@@ -894,21 +889,21 @@ merge_codestrap_keybindings(){
     # Start with repo object, attach temp id
     cur="$(printf '%s' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }')"
 
-    # If user has an object with this id, overlay preserved props
-    uobj="$(jq -c --arg id "$rid" '.[$id] // empty' "$tmp_user_id_map" 2>/dev/null)"
-    if [ -n "$uobj" ]; then
-      # Ensure we only overlay from an object
-      if printf '%s' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1; then
-        while IFS= read -r prop; do
-          [ -n "$prop" ] || continue
-          # Grab the user value for this prop (if present)
-          val="$(printf '%s' "$uobj" | jq -c --arg p "$prop" '.[$p] // empty' 2>/dev/null || true)"
-          [ -n "$val" ] || continue
+    # Try to get matching user object (if any)
+    uobj="$(jq -c --arg id "$rid" '.[$id] // empty' "$tmp_user_id_map" 2>/dev/null || printf '')"
+    if [ -n "$uobj" ] && printf '%s' "$uobj" | jq -e 'type=="object"' >/dev/null 2>&1; then
+      # Overlay only preserved props that have a valid JSON value in the user object
+      while IFS= read -r prop; do
+        [ -n "$prop" ] || continue
+        val="$(printf '%s' "$uobj" | jq -c --arg p "$prop" '.[$p] // empty' 2>/dev/null || printf '')"
+        [ -n "$val" ] || continue
+        # ensure val parses
+        if printf '%s' "$val" | jq -e . >/dev/null 2>&1; then
           cur="$(printf '%s' "$cur" | jq --arg p "$prop" --argjson v "$val" '.[$p] = $v')"
-        done <<EOF
+        fi
+      done <<EOF
 $(jq -r --arg id "$rid" '.[$id] // [] | .[]' "$tmp_preserve_json" 2>/dev/null)
 EOF
-      fi
     fi
 
     printf '%s\n' "$cur" >> "$tmp_managed_items"
@@ -980,7 +975,6 @@ EOF
           outn=0; out[++outn]=buf[1]
           if (id!="") out[++outn]=i "  //id#" id
           for(k=2;k<=n;k++){ t=buf[k]; if (t ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) continue; out[++outn]=t }
-          # remove trailing comma before closing brace
           closei=outn; while(closei>1 && out[closei] ~ /^[[:space:]]*$/) closei--
           if (out[closei] ~ /^[[:space:]]*}[[:space:]]*,?[[:space:]]*$/) {
             prev=closei-1; while(prev>1 && out[prev] ~ /^[[:space:]]*$/) prev--
