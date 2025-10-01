@@ -512,8 +512,8 @@ merge_codestrap_settings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
+  # ---- Load USER (object; allow //... and /* ... */) ----
   tmp_user_json="$(mktemp)"
-  # Load/repair USER
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -530,23 +530,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # Detect //preserve per top-level key by scanning the *raw* user file
-  tmp_preserved_keys="$(mktemp)"; : >"$tmp_preserved_keys"
-  if [ -f "$SETTINGS_PATH" ]; then
-    awk '
-      # match top-level `"key": ...` lines and check if //preserve exists on same line
-      /^[[:space:]]*"[^"]+"\s*:/ {
-        line=$0
-        if (line ~ /\/\/[[:space:]]*preserve/) {
-          key=line
-          sub(/^[[:space:]]*"/,"",key); sub(/".*/,"",key)
-          print key
-        }
-      }
-    ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
-  fi
-
-  # Load/repair REPO
+  # ---- Load REPO (object; allow //... and /* ... */) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -560,7 +544,22 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # Build merged: repo keys first; if user has //preserve for that key, keep user value
+  # ---- Detect //preserve marks from the raw user file (top-level keys only) ----
+  tmp_preserved_keys="$(mktemp)"; : >"$tmp_preserved_keys"
+  if [ -f "$SETTINGS_PATH" ]; then
+    awk '
+      /^[[:space:]]*"[^"]+"[[:space:]]*:/ {
+        line=$0
+        if (line ~ /\/\/[[:space:]]*preserve/) {
+          key=line
+          sub(/^[[:space:]]*"/,"",key); sub(/".*/,"",key)
+          print key
+        }
+      }
+    ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
+  fi
+
+  # ---- Merge (repo-first unless preserved; keep user extras). Guard against arrays. ----
   tmp_merged="$(mktemp)"
   jq -n \
     --slurpfile U "$tmp_user_json" \
@@ -573,45 +572,46 @@ merge_codestrap_settings(){
       | ($RO | keys) as $RK
       | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
 
-      # repo managed first (preserve per-line if asked)
+      # repo-managed first (but preserve per-line if marked)
       | (reduce $RK[] as $k (
           {};
           . + { ($k): ( if ( ($PRES | index($k)) and ($UO | has($k)) )
                         then $UO[$k]
                         else $RO[$k]
-                       end ) }
+                      end ) }
         )) as $MANAGED
 
-      # add user extras (keys not defined by repo at all)
+      # user extras (keys not present in repo)
       | ($UO | to_entries | map(select( ($RK | index(.key)) | not )) | from_entries) as $UREST
       | ($MANAGED + $UREST)
   ' > "$tmp_merged"
 
-  # Pretty + bracket comments
+  # ---- Pretty + bracket comments ----
   tmp_pretty="$(mktemp)"; jq '.' "$tmp_merged" > "$tmp_pretty"
+
   tmp_with_comments="$(mktemp)"
   {
-    first_brace_done=0
+    first=1
     while IFS= read -r line; do
-      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
+      if [ $first -eq 1 ]; then
         echo "$line"
         echo "  //codestrap merged settings:"
-        first_brace_done=1
+        first=0
         continue
       fi
       echo "$line"
     done < "$tmp_pretty"
   } > "$tmp_with_comments"
+
   if ! grep -q '//user defined settings:' "$tmp_with_comments"; then
     awk '
-      BEGIN{n=0}
-      {buf[++n]=$0}
-      END{
-        for(i=1;i<=n;i++){
-          if(i==n){ print "  //user defined settings:" }
+      { buf[NR]=$0 } END {
+        for (i=1;i<=NR;i++){
+          if (i==NR) { print "  //user defined settings:" }
           print buf[i]
         }
-      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
+      }
+    ' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
   fi
 
   write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
