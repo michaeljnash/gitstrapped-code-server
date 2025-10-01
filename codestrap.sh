@@ -189,6 +189,20 @@ MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
 ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
 
+# ===== external preserve store =====
+PRESERVE_MAIN="$HOME/codestrap/codestrap_preserve.json"
+PRESERVE_LINK="$USER_DIR/codestrap_preserve.json"
+
+read_preserve_array_json(){ # usage: read_preserve_array_json settings|keybindings
+  kind="$1"
+  [ -f "$PRESERVE_MAIN" ] || { echo '[]'; return 0; }
+  if jq -e . "$PRESERVE_MAIN" >/dev/null 2>&1; then
+    jq -c --arg k "$kind" '.[$k] // []' "$PRESERVE_MAIN" 2>/dev/null || echo '[]'
+  else
+    echo '[]'
+  fi
+}
+
 merge_preserve_files_union(){
   # If both a user copy and a main copy exist (and are valid JSON), union arrays per key.
   u="$1"; m="$2"; tmp="$(mktemp)"
@@ -207,6 +221,52 @@ merge_preserve_files_union(){
     fi
   fi
   rm -f "$tmp" 2>/dev/null || true
+}
+
+ensure_preserve_store(){
+  ensure_dir "$(dirname "$PRESERVE_MAIN")"
+  ensure_dir "$USER_DIR"
+
+  # If neither exists, seed an empty object
+  if [ ! -e "$PRESERVE_MAIN" ] && [ ! -e "$PRESERVE_LINK" ]; then
+    printf '%s\n' '{ "settings": [], "keybindings": [] }' >"$PRESERVE_MAIN"
+    chown "${PUID}:${PGID}" "$PRESERVE_MAIN" 2>/dev/null || true
+  fi
+
+  # If a regular file exists in the user dir, migrate/merge it into main then remove it
+  if [ -e "$PRESERVE_LINK" ] && [ ! -L "$PRESERVE_LINK" ]; then
+    [ -e "$PRESERVE_MAIN" ] || printf '%s\n' '{}' >"$PRESERVE_MAIN"
+    merge_preserve_files_union "$PRESERVE_LINK" "$PRESERVE_MAIN"
+    rm -f "$PRESERVE_LINK" 2>/dev/null || true
+  fi
+
+  # Create/refresh link from user dir → main
+  if [ -L "$PRESERVE_LINK" ]; then
+    # Already a symlink: if it points to the right place, keep; else replace.
+    tgt="$(readlink "$PRESERVE_LINK" || true)"
+    case "$tgt" in
+      /*) abs="$tgt" ;;
+      *)  abs="$(cd "$(dirname "$PRESERVE_LINK")" 2>/dev/null && printf "%s/%s" "$(pwd)" "$tgt")" ;;
+    esac
+    if [ "$abs" != "$PRESERVE_MAIN" ]; then
+      rm -f "$PRESERVE_LINK" 2>/dev/null || true
+      ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null || true
+    fi
+  elif [ -e "$PRESERVE_LINK" ]; then
+    # A non-symlink file existed; we've migrated it above. Do nothing further.
+    :
+  else
+    # Link path does not exist — try symlink first; if that fails (FS limitation), copy.
+    if ! ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null; then
+      # Avoid copying a file onto itself
+      if [ ! "$PRESERVE_MAIN" -ef "$PRESERVE_LINK" ]; then
+        cp -f "$PRESERVE_MAIN" "$PRESERVE_LINK"
+      fi
+    fi
+  fi
+
+  # Chown link itself (if supported) or the file it points to
+  chown -h "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || chown "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || true
 }
 
 # ===== root guard =====
@@ -512,8 +572,9 @@ merge_codestrap_settings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER (allow // and /* */) ----
   tmp_user_json="$(mktemp)"
+
+  # User settings (allow comments only; no other repairs)
   if [ -f "$SETTINGS_PATH" ]; then
     if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
       cp "$SETTINGS_PATH" "$tmp_user_json"
@@ -530,7 +591,7 @@ merge_codestrap_settings(){
     printf '{}\n' >"$tmp_user_json"
   fi
 
-  # ---- Load REPO (allow // and /* */) ----
+  # Repo settings (allow comments only)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
@@ -544,141 +605,84 @@ merge_codestrap_settings(){
     fi
   fi
 
-  # ---- Detect //preserve on top-level keys from the RAW user file ----
-  tmp_preserved_keys="$(mktemp)"; : >"$tmp_preserved_keys"
-  if [ -f "$SETTINGS_PATH" ]; then
-    awk '
-      /^[[:space:]]*"[^"]+"[[:space:]]*:/ {
-        line=$0
-        if (line ~ /\/\/[[:space:]]*preserve/) {
-          key=line
-          sub(/^[[:space:]]*"/,"",key); sub(/".*/,"",key)
-          print key
-        }
-      }
-    ' "$SETTINGS_PATH" | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserved_keys"
+  # managed keys bookkeeping from repo
+  RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
+  if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
+    OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
+  else
+    OLD_KEYS_JSON='[]'
   fi
 
-  # ---- Build arrays (managed + user extras) ----
-  tmp_managed_arr="$(mktemp)"
-  tmp_user_extras_arr="$(mktemp)"
+  # get external preserve array (keys to preserve from user file)
+  PRESERVE_SETTINGS_JSON="$(read_preserve_array_json settings)"
 
-  # Managed: repo keys in repo order; value from user if preserved
-  jq -c \
-    --slurpfile U "$tmp_user_json" \
-    --slurpfile R "$tmp_repo_json" \
-    --rawfile PK "$tmp_preserved_keys" '
-      def obj(x): if (x|type)=="object" then x else {} end;
-      (obj($U[0])) as $UO
-      | (obj($R[0])) as $RO
-      | ($PK | split("\n") | map(select(length>0)) | unique) as $PRES
-      | [ ($RO|to_entries)[] as $e
-          | { key: $e.key
-            , value: ( if ($PRES|index($e.key)) and ($UO[$e.key] != null)
-                       then $UO[$e.key] else $e.value end )
-            , preserve: ( ($PRES|index($e.key)) and ($UO[$e.key] != null) )
-            }
-        ]
-    ' > "$tmp_managed_arr"
+  # ----- merge honoring external preserve -----
+  tmp_merged="$(mktemp)"
+  jq \
+    --argjson repo "$(cat "$tmp_repo_json")" \
+    --argjson rskeys "$RS_KEYS_JSON" \
+    --argjson oldkeys "$OLD_KEYS_JSON" \
+    --argjson pres "$PRESERVE_SETTINGS_JSON" '
+      def arr(v): if (v|type)=="array" then v else [] end;
+      def minus($a; $b): [ $a[] | select( ($b | index(.)) | not ) ];
+      def delKeys($obj; $ks): reduce $ks[] as $k ($obj; del(.[$k]));
 
-  # User extras: keys only in user (preserve original order)
-  jq -c \
-    --slurpfile U "$tmp_user_json" \
-    --slurpfile R "$tmp_repo_json" '
-      def obj(x): if (x|type)=="object" then x else {} end;
-      (obj($U[0])) as $UO
-      | (obj($R[0])) as $RO
-      | ($RO|keys) as $RK
-      | [ ($UO|to_entries)[]
-          | select( ($RK|index(.key)) | not )
-          | { key: .key, value: .value }
-        ]
-    ' > "$tmp_user_extras_arr"
+      (. // {}) as $user
+      | (delKeys($user; minus($oldkeys; $rskeys))) as $tmp_user
+      | (delKeys($tmp_user; $rskeys)) as $user_without_repo
+      | reduce $rskeys[] as $k (
+          $user_without_repo;
+          .[$k] = ( if ($pres | index($k)) and ($user | has($k)) then $user[$k] else $repo[$k] end )
+        )
+    ' "$tmp_user_json" > "$tmp_merged"
 
-  # Lengths (robust defaults)
-  mlen="$(jq -r 'try length catch 0' "$tmp_managed_arr")"
-  ulen="$(jq -r 'try length catch 0' "$tmp_user_extras_arr")"
+  # managed snapshot (for future cleanups)
+  tmp_managed="$(mktemp)"
+  jq \
+    --argjson ks "$RS_KEYS_JSON" '
+      . as $src
+      | reduce $ks[] as $k ({}; if $src | has($k) then .[$k] = $src[$k] else . end)
+    ' "$tmp_merged" > "$tmp_managed"
 
-  CTX_TAG="[Bootstrap config]"; log "settings: repo-managed=$mlen user-extras=$ulen"; CTX_TAG=""
+  printf "%s" "$RS_KEYS_JSON" > "$MANAGED_KEYS_FILE"; chown "${PUID}:${PGID}" "$MANAGED_KEYS_FILE" 2>/dev/null || true
 
-  # ---- Emit final with section markers + restored //preserve ----
-  tmp_out="$(mktemp)"
+  # final (no in-file codestrap_preserve)
+  tmp_final="$(mktemp)"
+  jq '.' "$tmp_merged" > "$tmp_final"
+
+  # inject START/END comments only
+  tmp_with_comments="$(mktemp)"
   {
-    echo "{"
-    echo "  //codestrap merged settings:"
+    first_brace_done=0
+    while IFS= read -r line; do
+      if [ $first_brace_done -eq 0 ] && echo "$line" | grep -q '^{\s*$'; then
+        echo "$line"
+        echo "  //codestrap merged settings:"
+        first_brace_done=1
+        continue
+      fi
+      echo "$line"
+    done < "$tmp_final"
+  } > "$tmp_with_comments"
 
-    if [ "$mlen" -gt 0 ] 2>/dev/null; then
-      # Precompute per-line JSON for managed with whether to print a trailing comma
-      jq -r --argjson m "$mlen" --argjson u "$ulen" '
-        . as $A
-        | range(0; $m) as $i
-        | { k: $A[$i].key
-          , v: ($A[$i].value | tojson)
-          , p: ($A[$i].preserve)
-          , comma: ( ($i < ($m-1)) or ($u > 0) )
-          }
-        | @base64
-      ' "$tmp_managed_arr" \
-      | while IFS= read -r row; do
-          # decode one record
-          rec="$(printf '%s' "$row" | base64 -d)"
-          k="$(printf '%s' "$rec" | jq -r '.k')"
-          v="$(printf '%s' "$rec" | jq -r '.v')"
-          p="$(printf '%s' "$rec" | jq -r '.p')"
-          comma="$(printf '%s' "$rec" | jq -r '.comma')"
+  # ensure END marker exists (append before last line)
+  if ! grep -q '//user defined settings:' "$tmp_with_comments"; then
+    awk '
+      BEGIN{n=0}
+      {buf[++n]=$0}
+      END{
+        for(i=1;i<=n;i++){
+          if(i==n){ print "  //user defined settings:" }
+          print buf[i]
+        }
+      }' "$tmp_with_comments" > "${tmp_with_comments}.new" && mv -f "${tmp_with_comments}.new" "$tmp_with_comments"
+  fi
 
-          printf '  "%s": %s' "$k" "$v"
-          if [ "$comma" = "true" ]; then
-            if [ "$p" = "true" ]; then
-              printf ",//preserve\n"
-            else
-              printf ",\n"
-            fi
-          else
-            if [ "$p" = "true" ]; then
-              printf "//preserve\n"
-            else
-              printf "\n"
-            fi
-          fi
-        done
-    fi
-
-    echo "  //user defined settings:"
-
-    if [ "$ulen" -gt 0 ] 2>/dev/null; then
-      jq -r --argjson u "$ulen" '
-        . as $E
-        | range(0; $u) as $i
-        | { k: $E[$i].key
-          , v: ($E[$i].value | tojson)
-          , comma: ( $i < ($u-1) )
-          }
-        | @base64
-      ' "$tmp_user_extras_arr" \
-      | while IFS= read -r row; do
-          rec="$(printf '%s' "$row" | base64 -d)"
-          k="$(printf '%s' "$rec" | jq -r '.k')"
-          v="$(printf '%s' "$rec" | jq -r '.v')"
-          comma="$(printf '%s' "$rec" | jq -r '.comma')"
-          printf '  "%s": %s' "$k" "$v"
-          if [ "$comma" = "true" ]; then
-            printf ",\n"
-          else
-            printf "\n"
-          fi
-        done
-    fi
-
-    echo "}"
-  } > "$tmp_out"
-
-  write_inplace "$tmp_out" "$SETTINGS_PATH"
+  write_inplace "$tmp_with_comments" "$SETTINGS_PATH"
   chown "${PUID}:${PGID}" "$SETTINGS_PATH" 2>/dev/null || true
   clear_error_banner "$SETTINGS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserved_keys" \
-        "$tmp_managed_arr" "$tmp_user_extras_arr" "$tmp_out" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_merged" "$tmp_managed" "$tmp_final" "$tmp_with_comments" 2>/dev/null || true
   log "merged settings.json → $SETTINGS_PATH"
 }
 
@@ -690,7 +694,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER (JSON) ----
+  # ---- Load USER ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -712,7 +716,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO (JSON) ----
+  # ---- Load REPO ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -726,218 +730,81 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # ---- Parse raw USER file to capture:
-  #   - managed section objects (order)
-  #   - for each managed object, which fields were //preserve
-  #   - extras section objects (order)
-  # We rely on the bracketing comments if present; otherwise we fall back to old logic.
-  tmp_raw="$(mktemp)"; cat "${KEYB_PATH:-/dev/null}" 2>/dev/null >"$tmp_raw" || : 
+  # external preserve list → temp file
+  tmp_preserve="$(mktemp)"
+  printf '%s\n' "$(read_preserve_array_json keybindings)" > "$tmp_preserve"
 
-  # Extract managed block / extras block raw
-  tmp_managed_raw="$(mktemp)"; : >"$tmp_managed_raw"
-  tmp_extras_raw="$(mktemp)";  : >"$tmp_extras_raw"
-  awk '
-    BEGIN{mode=0}
-    /\/\/codestrap[[:space:]]+merged[[:space:]]+keybindings:/ {mode=1; next}
-    /\/\/user[[:space:]]+defined[[:space:]]+keybindings:/ {mode=2; next}
-    { if(mode==1) print $0 > "'"$tmp_managed_raw"'";
-      else if(mode==2) print $0 > "'"$tmp_extras_raw"'";
-    }
-  ' "$tmp_raw" 2>/dev/null || true
-
-  # Helper to strip comment lines and trailing commas inside an object dump
-  strip_comments_trailing(){
-    sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' \
-    | sed -E ':a; s/,\s*([}\]])/\1/g; ta'
-  }
-
-  # From managed raw: split into JSON objects (brace depth), record per-field preserves
-  tmp_um_objs="$(mktemp)"; : >"$tmp_um_objs"         # JSON array of user managed objects
-  tmp_um_pres="$(mktemp)"; : >"$tmp_um_pres"         # JSON array of arrays of preserved field names
-
-  awk '
-    BEGIN{depth=0; buf=""; have=0; idx=0}
-    {
-      line=$0
-      # track preserve fields per current object
-      if (depth>0) {
-        if (line ~ /\/\/[[:space:]]*preserve/) {
-          prop=line
-          if (match(prop,/^[[:space:]]*"[^"]+"\s*:/)) {
-            prop=substr(prop,RSTART,RLENGTH)
-            gsub(/^[[:space:]]*"/,"",prop)
-            sub(/".*/,"",prop)
-            printf("PRES|%d|%s\n", idx, prop) > "'"$tmp_um_pres"'.tags"
-          }
-        }
-      }
-      # object start/end detection
-      for (i=1;i<=length(line);i++) {
-        c=substr(line,i,1)
-        if (c=="{") { if (depth==0){buf=""; have=1; idx++;} depth++ }
-        buf=buf c
-        if (c=="}") { depth--; if (depth==0 && have==1) {
-            print buf > "'"$tmp_um_objs"'.raw"; have=0; buf=""
-        } }
-      }
-      if (depth==0 && have==1) { print buf > "'"$tmp_um_objs"'.raw"; have=0; buf="" }
-    }
-  ' "$tmp_managed_raw"
-
-  # Build JSON array of user-managed objects (after stripping comments)
-  if [ -s "$tmp_um_objs.raw" ]; then
-    printf '[\n' > "$tmp_um_objs"
-    first=1
-    while IFS= read -r obj; do
-      echo "$obj" | strip_comments_trailing > "${tmp_um_objs}.one"
-      if jq -e . "${tmp_um_objs}.one" >/dev/null 2>&1; then
-        [ $first -eq 1 ] || printf ',\n' >> "$tmp_um_objs"
-        cat "${tmp_um_objs}.one" >> "$tmp_um_objs"
-        first=0
-      fi
-    done < "$tmp_um_objs.raw"
-    printf '\n]\n' >> "$tmp_um_objs"
-  else
-    printf '[]\n' > "$tmp_um_objs"
-  fi
-
-  # Build JSON array-of-arrays of preserved fields (aligned by object index 1..N → 0..N-1)
-  if [ -s "$tmp_um_pres.tags" ]; then
-    awk -F'|' '{
-      i=$2; k=$3;
-      a[i]=a[i] (a[i]!=""?RS:"") k
-      if (i>max) max=i
-    } END {
-      printf("[\n")
-      for (i=1;i<=max;i++){
-        split(a[i],arr,"\n"); printf("  [")
-        for (j=1;j<=length(arr);j++){
-          if (arr[j]!=""){ if (j>1) printf(", "); printf("\"%s\"", arr[j]) }
-        }
-        printf("]"); if (i<max) printf(","); printf("\n")
-      }
-      printf("]\n")
-    }' "$tmp_um_pres.tags" > "$tmp_um_pres"
-  else
-    printf '[]\n' > "$tmp_um_pres"
-  fi
-
-  # Parse extras section as a clean array (strip comments/trailing commas)
-  tmp_extras_arr="$(mktemp)"
-  if [ -s "$tmp_extras_raw" ]; then
-    printf '[\n' > "$tmp_extras_arr"
-    # split into objects
-    awk '
-      BEGIN{depth=0; buf=""; have=0}
-      {
-        line=$0
-        for (i=1;i<=length(line);i++) {
-          c=substr(line,i,1)
-          if (c=="{") { if (depth==0){buf=""; have=1;} depth++ }
-          buf=buf c
-          if (c=="}") { depth--; if (depth==0 && have==1) {
-              print buf; have=0; buf=""
-          } }
-        }
-      }' "$tmp_extras_raw" | while IFS= read -r obj; do
-        echo "$obj" | strip_comments_trailing > "${tmp_extras_arr}.one"
-        if jq -e . "${tmp_extras_arr}.one" >/dev/null 2>&1; then
-          if [ -s "${tmp_extras_arr}.printed" ]; then printf ',\n' >> "$tmp_extras_arr"; fi
-          cat "${tmp_extras_arr}.one" >> "$tmp_extras_arr"
-          : > "${tmp_extras_arr}.printed"
-        fi
-      done
-    printf '\n]\n' >> "$tmp_extras_arr"
-    [ -s "${tmp_extras_arr}.printed" ] || printf '[]\n' > "$tmp_extras_arr"
-  else
-    printf '[]\n' > "$tmp_extras_arr"
-  fi
-
-  # ---- Merge (zip repo managed with user managed by index; per-field preserves) ----
+  # Build managed (repo-first, honoring preserve) and extras (user-only) separately
   tmp_both="$(mktemp)"
   jq -n \
+    --slurpfile U "$tmp_user_json" \
     --slurpfile R "$tmp_repo_json" \
-    --slurpfile UMAN "$tmp_um_objs" \
-    --slurpfile PRES "$tmp_um_pres" \
-    --slurpfile EX "$tmp_extras_arr" '
-      def arr(x): if (x|type)=="array"  then x else [] end;
-      def obj(x): if (x|type)=="object" then x else {} end;
+    --slurpfile P "$tmp_preserve" '
+      def arr(x): if (x|type)=="array" then x else [] end;
+      def is_kb($x): ($x|type)=="object" and ($x.key? != null);
+      def kstr($x): (if ($x|type)=="object" and ($x.key? != null) then ($x.key|tostring) else null end);
 
-      (arr($R[0]))       as $R
-      | (arr($UMAN[0]))  as $UM
-      | (arr($PRES[0]))  as $P
-      | (arr($EX[0]))    as $E
+      (arr($U[0])) as $Uraw
+      | (arr($R[0])) as $Rraw
+      | (arr($P[0])) as $PRES
 
-      | ($R|length) as $RL
-      | ($UM|length) as $UL
+      # Filter to objects-with-key
+      | ($Uraw | map(select(is_kb(.)))) as $U
+      | ($Rraw | map(select(is_kb(.)))) as $R
 
-      # Build managed array positionally
-      | [ range(0; $RL) as $i
-          | ( obj($R[$i]) ) as $r
-          | ( if $i < $UL then obj($UM[$i]) else {} end ) as $u
-          | ( if $i < ($P|length) then $P[$i] else [] end ) as $keep
+      # Build maps by key (object → then drop any "null" key)
+      | ($U | map({ (kstr(.)): . }) | add // {} | del(.null)) as $u_by_key
 
-          # merge fields: preserve $u[$k] iff $k in $keep; else use $r[$k]
-          | ( ($r|keys) as $rk
-              | reduce $rk[] as $k ( {};
-                  . + { ($k): (
-                        if ($keep | index($k)) and ($u[$k]? != null)
-                        then $u[$k]?
-                        else $r[$k]?
-                        end
-                      ) }
-                )
-            )
-        ] as $managed
+      # Repo list first, honoring preserve; when repo wins, mark it
+      | ($R
+          | map( . as $o
+                | (kstr($o)) as $k
+                | if (($PRES | index($k)) and ($u_by_key[$k]? != null))
+                  then $u_by_key[$k]
+                  else ( { "__codestrapMerged": true } + $o )
+                  end)
+        ) as $managed
 
-      | { managed: $managed, extras: $E, mlen: ($managed|length), elen: ($E|length) }
+      # Add user extras (keys not already in managed)
+      | ($managed
+          | map(kstr(.))
+          | map(select(. != null))
+          | map({(.):true}) | add // {}
+        ) as $seen
+      | ($U
+          | map( . as $o
+                | (kstr($o)) as $k
+                | select(($k != null) and (($seen[$k]? // false) | not))
+                | $o)
+        ) as $extras
+
+      | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
     ' > "$tmp_both"
 
   mlen="$(jq -r '.mlen' "$tmp_both")"
   elen="$(jq -r '.elen' "$tmp_both")"
 
-  # Pretty-print arrays, strip brackets to inject comments/markers
+  # Pretty-print arrays (each to its own file), then strip outer [ ]
   tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
-  tmp_extras_arr2="$(mktemp)"; jq '.extras'  "$tmp_both" > "$tmp_extras_arr2"
+  tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
 
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
-  extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr2" > "$extras_body"
+  extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # Insert inside-object marker property then convert it to a comment line
+  # Convert the marker property line into a comment INSIDE each managed object
   managed_annotated="$(mktemp)"
   awk '
-    BEGIN{inobj=0; depth=0}
     {
-      line=$0
-      # locate start of each object top-level
-      if (match(line,/^[[:space:]]*{[[:space:]]*$/)) {
-        inobj=1; depth=1; print line; next
+      if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
+        match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH);
+        print indent "//codestrap merged keybinding:";
+        next
       }
-      if (inobj && depth==1 && line ~ /^[[:space:]]*"/) {
-        # first property line: inject a marker line BEFORE it, once
-        print "    \"__codestrapMerged\": true,"; inobj=0
-      }
-      print line
-      # track depth to reset inobj after closing brace
-      for(i=1;i<=length(line);i++){
-        c=substr(line,i,1)
-        if(c=="{") depth++
-        else if(c=="}") depth--
-      }
+      print $0
     }
-  ' "$managed_body" \
-  | awk '
-      {
-        if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
-          match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH);
-          print indent "//codestrap merged keybinding:";
-          next
-        }
-        print $0
-      }
-    ' > "$managed_annotated"
+  ' "$managed_body" > "$managed_annotated"
 
-  # If both segments exist, append a comma to the last non-blank managed line
+  # If both segments exist, append a comma to the last non-blank line of the managed block
   managed_final="$managed_annotated"
   if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
     managed_final="$(mktemp)"
@@ -956,27 +823,30 @@ merge_codestrap_keybindings(){
     ' "$managed_annotated" > "$managed_final"
   fi
 
-  # Compose final with section comments
+  # Compose final array with section comments; keep commas in-line
   tmp_with_comments="$(mktemp)"
   {
     echo "["
     echo "  //codestrap merged keybindings:"
-    if [ -s "$managed_final" ]; then sed 's/^/  /' "$managed_final"; fi
+    if [ -s "$managed_final" ]; then
+      sed 's/^/  /' "$managed_final"
+    fi
     echo "  //user defined keybindings:"
-    if [ -s "$extras_body" ]; then sed 's/^/  /' "$extras_body"; fi
+    if [ -s "$extras_body" ]; then
+      sed 's/^/  /' "$extras_body"
+    fi
     echo "]"
   } > "$tmp_with_comments"
 
+  # Write result
   write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_raw" \
-        "$tmp_managed_raw" "$tmp_extras_raw" \
-        "$tmp_um_objs" "$tmp_um_objs.raw" "$tmp_um_pres" "$tmp_um_pres.tags" \
-        "$tmp_extras_arr" "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr2" \
-        "$managed_body" "$extras_body" "$managed_annotated" "$managed_final" \
-        "$tmp_with_comments" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" \
+        "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr" \
+        "$managed_body" "$extras_body" "$managed_annotated" \
+        "$managed_final" "$tmp_with_comments" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
 }
@@ -1438,6 +1308,7 @@ recompute_base(){
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
+  ensure_preserve_store
   if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
@@ -1465,6 +1336,7 @@ config_interactive(){
 config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
+  ensure_preserve_store
   
   # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
@@ -1686,6 +1558,7 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
+        ensure_preserve_store
         # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
@@ -1774,6 +1647,7 @@ case "${1:-init}" in
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
+    safe_run "[Preserve store]"          ensure_preserve_store
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_extensions
