@@ -794,7 +794,7 @@ merge_codestrap_keybindings(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  # ---- Load USER ----
+  # ---- Load USER as JSON (comments stripped just for parsing) ----
   tmp_user_json="$(mktemp)"
   if [ -f "$KEYB_PATH" ]; then
     if [ ! -s "$KEYB_PATH" ]; then
@@ -816,7 +816,7 @@ merge_codestrap_keybindings(){
     printf '[]\n' > "$tmp_user_json"
   fi
 
-  # ---- Load REPO ----
+  # ---- Load REPO (comments ok) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
@@ -830,126 +830,290 @@ merge_codestrap_keybindings(){
     fi
   fi
 
-  # external preserve list → temp file
-  tmp_preserve="$(mktemp)"
-  printf '%s\n' "$(read_preserve_array_json keybindings)" > "$tmp_preserve"
+  # ================================================================
+  # NEW: scan the *raw* user file to extract:
+  #  - each managed block’s id (//codestrap merged keybinding id#...)
+  #  - the JSON object for that block (comments stripped)
+  #  - list of property names with //preserve
+  # Build two maps: UMAP (id -> user object), PMAP (id -> [preserved keys])
+  # ================================================================
+  umap_tmpdir="$(mktemp -d)"
+  pmap_tmpdir="$(mktemp -d)"
+  umap_json_file="$(mktemp)"
+  pmap_json_file="$(mktemp)"
+  printf '{' >"$umap_json_file"
+  printf '{' >"$pmap_json_file"
+  first_umap=1
+  first_pmap=1
 
-  # Build managed (repo-first, honoring preserve) and extras (user-only) separately
+  if [ -f "$KEYB_PATH" ]; then
+    _banner_strip_first_if_error <"$KEYB_PATH" | awk -v OUTDIR1="$umap_tmpdir" -v OUTDIR2="$pmap_tmpdir" '
+      function trim(s){ sub(/^[ \t\r\n]+/,"",s); sub(/[ \t\r\n]+$/,"",s); return s }
+      BEGIN{ inManaged=0; haveId=0; id=""; grabbing=0; depth=0 }
+      # find the id comment
+      /^\s*\/\/codestrap[[:space:]]+merged[[:space:]]+keybinding[[:space:]]+id#[a-f0-9]+/ {
+        match($0,/id#([a-f0-9]+)/,m)
+        if(m[1]!=""){
+          id=m[1]; haveId=1; inManaged=1; grabbing=0; depth=0
+        }
+        next
+      }
+      # start of object after the id comment
+      inManaged && !grabbing && /\{/ {
+        grabbing=1
+        buf=""
+        depth=0
+      }
+      grabbing {
+        # record preserves as we go (per id)
+        if($0 ~ /\/\/[[:space:]]*preserve[[:space:]]*$/){
+          line=$0
+          sub(/\/\/[[:space:]]*preserve[[:space:]]*$/,"",line)
+          if (match(line,/^[[:space:]]*\"[^\"]+\"[[:space:]]*:/)) {
+            ms=substr(line,RSTART,RLENGTH)
+            q1=index(ms,"\"")
+            if(q1>0){ rest=substr(ms,q1+1); q2=index(rest,"\""); if(q2>1){ k=substr(rest,1,q2-1); if(k!=""){ print k > (OUTDIR2"/p_"id".keys") } } }
+          }
+        }
+        buf = buf $0 "\n"
+        # brace depth tracking
+        openc=gsub(/\{/,"{",$0)
+        closec=gsub(/\}/,"}",$0)
+        depth+=openc
+        depth-=closec
+        if(depth==0 && openc>0){ # closed this object
+          if(haveId){
+            # write raw object to OUTDIR1/id.block (we will strip comments later)
+            f=OUTDIR1"/u_"id".block"
+            print buf > f
+          }
+          inManaged=0; haveId=0; id=""; grabbing=0; buf=""
+        }
+        next
+      }
+      { next }
+    ' >/dev/null 2>&1
+
+    # Build JSON maps from the captured blocks
+    for b in "$umap_tmpdir"/u_*.block 2>/dev/null; do
+      [ -f "$b" ] || continue
+      id="$(basename "$b" .block)"; id="${id#u_}"
+      # strip comments/trailing commas → JSON
+      uobj="$(strip_jsonc_to_json "$b" | sed -E ':a; s/,\s*([}\]])/\1/g; ta')"
+      if echo "$uobj" | jq -e . >/dev/null 2>&1; then
+        # append to UMAP
+        [ $first_umap -eq 1 ] || printf ',' >>"$umap_json_file"
+        first_umap=0
+        printf '"%s":%s' "$id" "$uobj" >>"$umap_json_file"
+      fi
+      # preserved keys (one per line) → array
+      keys_file="$pmap_tmpdir/p_${id}.keys"
+      if [ -f "$keys_file" ]; then
+        arr="$(awk 'BEGIN{printf("[");f=1} NF{gsub(/"/,"\\\""); if(!f)printf(","); printf("\"%s\"", $0); f=0} END{printf("]")}' "$keys_file")"
+        [ $first_pmap -eq 1 ] || printf ',' >>"$pmap_json_file"
+        first_pmap=0
+        printf '"%s":%s' "$id" "$arr" >>"$pmap_json_file"
+      fi
+    done
+  fi
+  printf '}' >>"$umap_json_file"
+  printf '}' >>"$pmap_json_file"
+
+  # ---- Build augmented REPO array with deterministic ids ----
+  tmp_repo_aug_lines="$(mktemp)"
+  jq -c '.[] | select(type=="object")' "$tmp_repo_json" | while IFS= read -r obj; do
+    # id = sha256 of canonical (sorted) JSON
+    canon="$(printf '%s' "$obj" | jq -cS .)"
+    hid="$(printf '%s' "$canon" | sha256sum | awk '{print $1}')"
+    printf '%s\n' "$(printf '%s' "$obj" | jq --arg id "$hid" '. + {"__codestrapMerged":true,"__codestrapId":$id}')" >>"$tmp_repo_aug_lines"
+  done
+  tmp_repo_aug="$(mktemp)"; jq -s '.' "$tmp_repo_aug_lines" > "$tmp_repo_aug"
+
+  # ================================================================
+  # Merge in jq using:
+  #  R = augmented repo items (with id)
+  #  U = entire user array (JSON, comments gone)
+  #  UMAP = { id: userObject }
+  #  PMAP = { id: [preservedKeys...] }
+  # managed = repo items merged per preserved keys (when present)
+  # extras  = user items that are NOT equal to any UMAP[id] (so we drop stale managed blocks)
+  # ================================================================
   tmp_both="$(mktemp)"
   jq -n \
     --slurpfile U "$tmp_user_json" \
-    --slurpfile R "$tmp_repo_json" \
-    --slurpfile P "$tmp_preserve" '
+    --slurpfile R "$tmp_repo_aug" \
+    --slurpfile UMAP "$umap_json_file" \
+    --slurpfile PMAP "$pmap_json_file" '
       def arr(x): if (x|type)=="array" then x else [] end;
-      def is_kb($x): ($x|type)=="object" and ($x.key? != null);
-      def kstr($x): (if ($x|type)=="object" and ($x.key? != null) then ($x.key|tostring) else null end);
 
-      (arr($U[0])) as $Uraw
-      | (arr($R[0])) as $Rraw
-      | (arr($P[0])) as $PRES
+      (arr($U[0])) as $Uall
+      | ($R[0]) as $Raug
+      | ($UMAP[0]) as $UMAP
+      | ($PMAP[0]) as $PMAP
 
-      # Filter to objects-with-key
-      | ($Uraw | map(select(is_kb(.)))) as $U
-      | ($Rraw | map(select(is_kb(.)))) as $R
+      # list of user managed objects (values of UMAP)
+      | ($UMAP | to_entries | map(.value)) as $Umanaged
 
-      # Build maps by key (object → then drop any "null" key)
-      | ($U | map({ (kstr(.)): . }) | add // {} | del(.null)) as $u_by_key
-
-      # Repo list first, honoring preserve; when repo wins, mark it
-      | ($R
-          | map( . as $o
-                | (kstr($o)) as $k
-                | if (($PRES | index($k)) and ($u_by_key[$k]? != null))
-                  then $u_by_key[$k]
-                  else ( { "__codestrapMerged": true } + $o )
-                  end)
+      # build managed from repo, honoring preserves
+      | ( $Raug
+          | map(
+              . as $r
+              | ($r.__codestrapId) as $id
+              | ($UMAP[$id] // {}) as $uo
+              | ($PMAP[$id] // []) as $keep
+              | ($r | del(.__codestrapMerged,.__codestrapId)) as $r0
+              | reduce ($r0 | keys_unsorted[]) as $k
+                  ({}; .[$k] = ( if ($keep | index($k)) and ($uo | has($k))
+                                  then $uo[$k]
+                                  else $r0[$k]
+                                end))
+              | . + {"__codestrapMerged":true,"__codestrapId":$id}
+            )
         ) as $managed
 
-      # Add user extras (keys not already in managed)
-      | ($managed
-          | map(kstr(.))
-          | map(select(. != null))
-          | map({(.):true}) | add // {}
-        ) as $seen
-      | ($U
-          | map( . as $o
-                | (kstr($o)) as $k
-                | select(($k != null) and (($seen[$k]? // false) | not))
-                | $o)
+      # user extras: anything not equal to a managed user object (we drop stale managed blocks)
+      | ( $Uall
+          | map(select( ($Umanaged | index(.)) | not ))
         ) as $extras
 
-      | { managed: $managed, extras: $extras, mlen: ($managed|length), elen: ($extras|length) }
+      | { managed: $managed, extras: $extras }
     ' > "$tmp_both"
 
-  mlen="$(jq -r '.mlen' "$tmp_both")"
-  elen="$(jq -r '.elen' "$tmp_both")"
-
-  # Pretty-print arrays (each to its own file), then strip outer [ ]
+  # ---- Pretty-print arrays, strip outer [ ] for manual section comments ----
   tmp_managed_arr="$(mktemp)"; jq '.managed' "$tmp_both" > "$tmp_managed_arr"
   tmp_extras_arr="$(mktemp)";  jq '.extras'  "$tmp_both" > "$tmp_extras_arr"
 
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # Convert the marker property line into a comment INSIDE each managed object
+  # ---- Turn marker properties into a single comment with id, remove the properties ----
   managed_annotated="$(mktemp)"
   awk '
     {
-      if ($0 ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) {
-        match($0,/^[[:space:]]*/); indent=substr($0,1,RLENGTH);
-        print indent "//codestrap merged keybinding:";
+      line=$0
+      if (match(line,/^[[:space:]]*"__codestrapId"[[:space:]]*:[[:space:]]*"[a-f0-9]+"\s*,?[[:space:]]*$/,m)) {
+        indent=substr(line,1,RLENGTH); sub(/^([[:space:]]*).*/,"\\1",indent)
+        id=line
+        sub(/^[[:space:]]*"__codestrapId"[[:space:]]*:[[:space:]]*"/,"",id)
+        sub(/".*$/,"",id)
+        print indent "//codestrap merged keybinding id#" id
         next
       }
-      print $0
+      if (line ~ /^[[:space:]]*"__codestrapMerged"[[:space:]]*:[[:space:]]*true[[:space:]]*,?[[:space:]]*$/) { next }
+      print line
     }
   ' "$managed_body" > "$managed_annotated"
 
-  # If both segments exist, append a comma to the last non-blank line of the managed block
-  managed_final="$managed_annotated"
-  if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
-    managed_final="$(mktemp)"
-    awk '
-      { if ($0 ~ /[^[:space:]]/) { last=NR } lines[NR]=$0 }
-      END {
-        for(i=1;i<=NR;i++){
-          if (i==last) {
-            sub(/[[:space:]]*$/,"",lines[i]);
-            print lines[i] ","
-          } else {
-            print lines[i]
+  # ---- Re-insert //preserve for preserved fields, keeping commas BEFORE the comment ----
+  managed_with_preserve="$(mktemp)"
+  awk -v PMAP="$pmap_json_file" '
+    function has(arr, key,    i){ for(i=1;i<=arr_len;i++) if(arr[i]==key) return 1; return 0 }
+    BEGIN{
+      # load PMAP: { "id": ["k1","k2"] ... }
+      while((getline < PMAP) > 0){ json = json $0 }
+      close(PMAP)
+      # naive parse to map-of-arrays with jq help
+      # we shell out to jq here for correctness (stdin = json)
+      cmd = "jq -r \"to_entries[] | .key + \\\"\\t\\\" + (.value | join(\\\"\\n\\\"))\" <<'EOF'\n" json "\nEOF\n"
+      while ((cmd | getline) > 0){
+        split($0,parts,"\t"); id=parts[1]; pkeys_raw=parts[2]
+        split("",keys); arr_len=0
+        n=split(pkeys_raw, lines, /\r?\n/)
+        for(i=1;i<=n;i++){ if(length(lines[i])){ arr_len++; keys[arr_len]=lines[i] } }
+        kcount[id]=arr_len
+        for(i=1;i<=arr_len;i++){ keep[id, keys[i]]=1 }
+      }
+      close(cmd)
+      curr_id=""
+    }
+    {
+      line=$0
+      if (match(line,/^[[:space:]]*\/\/codestrap[[:space:]]+merged[[:space:]]+keybinding[[:space:]]+id#([a-f0-9]+)/,m)) {
+        curr_id=m[1]
+        print line
+        next
+      }
+      if (curr_id != "" && match(line, /^[[:space:]]*\"[^\"]+\"[[:space:]]*:/)) {
+        ms = substr(line, RSTART, RLENGTH)
+        q1 = index(ms, "\"")
+        if(q1>0){
+          rest=substr(ms, q1+1)
+          q2 = index(rest, "\"")
+          if(q2>1){
+            k = substr(rest, 1, q2-1)
+            if (keep[curr_id, k]) {
+              # keep comma before comment
+              if (line ~ /,[[:space:]]*$/) {
+                sub(/,[[:space:]]*$/,"",line)
+                sub(/[[:space:]]*$/,"",line)
+                line = line ", //preserve"
+              } else {
+                sub(/[[:space:]]*$/,"",line)
+                line = line " //preserve"
+              }
+              print line
+              next
+            }
           }
         }
       }
-    ' "$managed_annotated" > "$managed_final"
+      print line
+    }
+  ' "$managed_annotated" > "$managed_with_preserve"
+
+  # ---- If both segments exist, append a comma to the last non-blank line of the managed block,
+  #      placing the comma BEFORE any trailing //preserve
+  managed_final="$managed_with_preserve"
+  have_managed=0; [ -s "$managed_with_preserve" ] && have_managed=1
+  have_extras=0;  [ -s "$extras_body" ] && have_extras=1
+  if [ $have_managed -eq 1 ] && [ $have_extras -eq 1 ]; then
+    mf2="$(mktemp)"
+    awk '
+      { if ($0 ~ /[^[:space:]]/) last=NR; lines[NR]=$0 }
+      END{
+        for(i=1;i<=NR;i++){
+          if(i==last){
+            l=lines[i]; sub(/[[:space:]]*$/,"",l)
+            if (l ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
+              sub(/[[:space:]]*\/\/[[:space:]]*preserve[[:space:]]*$/, ", //preserve", l)
+              print l
+            } else {
+              print l ","
+            }
+          } else print lines[i]
+        }
+      }
+    ' "$managed_with_preserve" > "$mf2"
+    managed_final="$mf2"
   fi
 
-  # Compose final array with section comments; keep commas in-line
+  # ---- Compose final array with section comments ----
   tmp_with_comments="$(mktemp)"
   {
     echo "["
     echo "  //codestrap merged keybindings:"
-    if [ -s "$managed_final" ]; then
-      sed 's/^/  /' "$managed_final"
-    fi
+    if [ $have_managed -eq 1 ]; then sed 's/^/  /' "$managed_final"; fi
     echo "  //user defined keybindings:"
-    if [ -s "$extras_body" ]; then
-      sed 's/^/  /' "$extras_body"
-    fi
+    if [ $have_extras -eq 1 ]; then sed 's/^/  /' "$extras_body"; fi
     echo "]"
   } > "$tmp_with_comments"
 
-  # Write result
+  # ---- Write result ----
   write_inplace "$tmp_with_comments" "$KEYB_PATH"
   chown "${PUID}:${PGID}" "$KEYB_PATH" 2>/dev/null || true
   clear_error_banner "$KEYB_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_preserve" \
-        "$tmp_both" "$tmp_managed_arr" "$tmp_extras_arr" \
-        "$managed_body" "$extras_body" "$managed_annotated" \
-        "$managed_final" "$tmp_with_comments" 2>/dev/null || true
+  # ---- Cleanup ----
+  rm -rf "$umap_tmpdir" "$pmap_tmpdir" 2>/dev/null || true
+  rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_aug_lines" "$tmp_repo_aug" \
+        "$umap_json_file" "$pmap_json_file" "$tmp_both" \
+        "$tmp_managed_arr" "$tmp_extras_arr" \
+        "$managed_body" "$managed_annotated" "$managed_with_preserve" "$managed_final" \
+        "$extras_body" "$tmp_with_comments" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
 }
+
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
