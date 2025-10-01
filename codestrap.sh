@@ -948,12 +948,12 @@ merge_codestrap_keybindings(){
   managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
   extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-  # --- Re-write each object: move __tmp_id into a comment line immediately after "{",
-  #     and drop the __tmp_id property itself. (Portable awk; buffer per object.)
+  # --- Re-write each object: insert //id#... as first line inside the object,
+  #     drop the __tmp_id property, and ensure no trailing comma remains before the closing brace.
   managed_annotated="$(mktemp)"
   awk '
     function get_indent(s,    t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
-    BEGIN { indepth=0; inobj=0; n=0 }
+    BEGIN { indepth=0; inobj=0 }
     {
       line=$0
       tmp=line
@@ -962,6 +962,7 @@ merge_codestrap_keybindings(){
 
       if (!inobj) {
         if (ob>0 && indepth==0) {
+          # start buffering this object
           inobj=1; objdepth=ob-cb; n=0; oid=""
           obj_indent=get_indent(line)
           buf[++n]=line
@@ -973,7 +974,7 @@ merge_codestrap_keybindings(){
         objdepth += ob
         objdepth -= cb
 
-        # Capture id property if present on this line
+        # capture __tmp_id value if present
         if (line ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]+"/) {
           oid=line
           sub(/^.*"__tmp_id"[[:space:]]*:[[:space:]]*"/,"",oid)
@@ -981,14 +982,38 @@ merge_codestrap_keybindings(){
         }
 
         if (objdepth<=0) {
-          # Object complete: emit with //id#... after the opening brace
-          print buf[1]
-          if (oid != "") { print obj_indent "  //id#" oid }
+          # object complete → build output lines first
+          outn=0
+          out[++outn]=buf[1]                                     # opening "{ ..."
+
+          if (oid != "") out[++outn]=obj_indent "  //id#" oid    # id comment line
+
+          # copy everything except the __tmp_id property
           for(i=2;i<=n;i++){
             l=buf[i]
-            if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) { continue }
-            print l
+            if (l ~ /^[[:space:]]*"__tmp_id"[[:space:]]*:/) continue
+            out[++outn]=l
           }
+
+          # find closing brace line (last non-empty line)
+          closing_idx=outn
+          while (closing_idx>1 && out[closing_idx] ~ /^[[:space:]]*$/) closing_idx--
+
+          # ensure no trailing comma remains on the property before the closing brace
+          # only if the closing line starts with "}" or "},"
+          if (out[closing_idx] ~ /^[[:space:]]*}[[:space:]]*,?[[:space:]]*$/) {
+            # previous printed non-empty, non-comment line
+            prev=closing_idx-1
+            while (prev>1 && out[prev] ~ /^[[:space:]]*$/) prev--
+            if (prev>1) {
+              # strip trailing comma from that line (before any spaces)
+              sub(/,[[:space:]]*$/,"",out[prev])
+            }
+          }
+
+          # now emit the buffered object
+          for(i=1;i<=outn;i++) print out[i]
+
           inobj=0
         }
       }
