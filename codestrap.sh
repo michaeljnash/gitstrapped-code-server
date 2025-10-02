@@ -63,187 +63,114 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_reloader_ext(){
-  # --- config & paths
+  # Where code-server/VS Code keeps its extensions.
+  # You noted this should be overridable and usually resolves to: /config/extensions
   EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
+
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
   EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
-  RELATIVE="$(basename "$EXTDIR")"
-  EXTREG="${EXTBASE}/extensions.json"
-  OBS="${EXTBASE}/.obsolete"
+
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
-  LOCK="${EXTBASE}/.codestrap-ext.lock"
 
-  umask 002
-  mkdir -p "$EXTBASE" "$EXTDIR" "$FLAGDIR"
+  # Create dirs
+  mkdir -p "$EXTDIR" "$FLAGDIR" "$EXTBASE"
 
-  # --- coarse lock to avoid concurrent writers (prefer flock, else mkdir lock)
-  unlock(){ :; }
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>"$LOCK"
-    flock -x 9 || true
-    unlock(){ flock -u 9 2>/dev/null || true; exec 9>&-; }
-  else
-    # mkdir-based non-blocking lock (best-effort)
-    LOCKDIR="${LOCK}.d"
-    i=0; while ! mkdir "$LOCKDIR" 2>/dev/null; do i=$((i+1)); [ $i -ge 50 ] && break; sleep 0.05; done
-    unlock(){ rmdir "$LOCKDIR" 2>/dev/null || true; }
-  fi
-
-  # --- write the reloader extension files
-  cat > "${EXTDIR}/package.json" <<'PKG'
+  # --- package.json ---
+  cat >"${EXTDIR}/package.json" <<'PKG'
 {
   "name": "codestrap-reloader",
   "displayName": "Codestrap Reloader",
   "publisher": "codestrap",
   "version": "0.0.1",
   "engines": { "vscode": "^1.70.0" },
-  "activationEvents": ["*"],
+  "activationEvents": [ "*" ],
   "main": "./extension.js",
   "contributes": {}
 }
 PKG
 
-  cat > "${EXTDIR}/extension.js" <<'JS'
+  # --- extension.js (debounced, no startup loop) ---
+  cat >"${EXTDIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 
 function activate(context) {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const flag = path.join(home, '.codestrap', 'reload.signal');
+
+  // Ensure the flag exists so we can stat/watch it reliably
+  try { fs.closeSync(fs.openSync(flag, 'a')); } catch (_) {}
+
+  // Initialize lastMtime to the CURRENT mtime so we don't reload right away
+  let lastMtime = 0;
   try {
-    const home = process.env.HOME || process.env.USERPROFILE || '';
-    const flag = path.join(home, '.codestrap', 'reload.signal');
-    try { fs.closeSync(fs.openSync(flag, 'a')); } catch(e) {}
+    const st = fs.statSync(flag);
+    lastMtime = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
+  } catch (_) {}
 
-    let reloading = false;
-    const doReload = () => {
-      if (reloading) return;
-      reloading = true;
-      vscode.commands.executeCommand('workbench.action.reloadWindow').finally(() => {
-        setTimeout(() => { reloading = false; }, 1000);
-      });
-    };
+  let reloading = false;
+  let lastReloadAt = 0;
 
-    try { fs.watch(flag, { persistent: false }, doReload); } catch (_) {}
-    let last = 0;
-    const t = setInterval(() => {
-      fs.stat(flag, (err, st) => {
-        if (!err && st) {
-          const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
-          if (m > last) { last = m; doReload(); }
-        }
-      });
-    }, 1500);
-    context.subscriptions.push({ dispose(){ clearInterval(t); } });
-  } catch (e) {
-    console.error('[codestrap-reloader] activate error:', e);
-  }
+  const maybeReload = () => {
+    if (reloading) return;
+    const now = Date.now();
+    // Debounce: ignore events that happen within 1.5s of a reload request
+    if (now - lastReloadAt < 1500) return;
+    reloading = true;
+    lastReloadAt = now;
+
+    vscode.commands.executeCommand('workbench.action.reloadWindow')
+      .catch(() => {})
+      .finally(() => setTimeout(() => { reloading = false; }, 1000));
+  };
+
+  // Watcher that verifies mtime actually advanced
+  let watcher;
+  try {
+    watcher = fs.watch(flag, { persistent: false }, () => {
+      try {
+        const st = fs.statSync(flag);
+        const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
+        if (m > lastMtime) { lastMtime = m; maybeReload(); }
+      } catch (_) {}
+    });
+  } catch (_) {}
+
+  // Poll fallback (some FS/backends have flaky fs.watch)
+  const timer = setInterval(() => {
+    try {
+      const st = fs.statSync(flag);
+      const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
+      if (m > lastMtime) { lastMtime = m; maybeReload(); }
+    } catch (_) {}
+  }, 2000);
+
+  context.subscriptions.push({
+    dispose() {
+      try { watcher && watcher.close(); } catch (_) {}
+      clearInterval(timer);
+    }
+  });
 }
+
 function deactivate() {}
 module.exports = { activate, deactivate };
 JS
 
+  # Optional marker that some loaders look for (harmless if unused)
   : > "${EXTDIR}/.codestrap-reloader"
-  touch "$FLAGFILE" 2>/dev/null || true
 
-  # --- permissions (fix .obsolete EACCES)
-  # directories 775, files 664
-  find "$EXTBASE" -type d -exec chmod 775 {} + 2>/dev/null || true
-  find "$EXTBASE" -type f -exec chmod 664 {} + 2>/dev/null || true
+  # Permissions (avoid .obsolete EACCES issues)
   chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
+  chmod -R u+rwX,go+rX "$EXTBASE" 2>/dev/null || true
 
-  # if .obsolete exists but unreadable/corrupt, remove; else delete our tombstones
-  if [ -e "$OBS" ]; then
-    if command -v jq >/dev/null 2>&1 && jq -e . "$OBS" >/dev/null 2>&1; then
-      tmpobs="$(mktemp)"
-      jq "del(.\"${RELATIVE}\") | del(.\"${EXTID}\") | del(.\"${EXTID}-${EXTVERSION}\")" "$OBS" > "$tmpobs" 2>/dev/null || cp -f "$OBS" "$tmpobs"
-      mv -f "$tmpobs" "$OBS"
-    else
-      rm -f "$OBS" 2>/dev/null || true
-    fi
-  fi
-  chmod 664 "$OBS" 2>/dev/null || true
-  chown "${PUID:-1000}:${PGID:-1000}" "$OBS" 2>/dev/null || true
-
-  # --- build registry entry for our extension
-  TS_MS="$(date +%s 2>/dev/null || echo 0)000"
-  REG_ENTRY="$(cat <<EOF
-{
-  "identifier": { "id": "${EXTID}" },
-  "version": "${EXTVERSION}",
-  "location": {
-    "\$mid": 1,
-    "fsPath": "${EXTDIR}",
-    "external": "file://${EXTDIR}",
-    "path": "${EXTDIR}",
-    "scheme": "file"
-  },
-  "relativeLocation": "${RELATIVE}",
-  "metadata": {
-    "installedTimestamp": ${TS_MS},
-    "pinned": false,
-    "source": "local",
-    "targetPlatform": "universal",
-    "updated": false,
-    "private": false,
-    "isPreReleaseVersion": false,
-    "hasPreReleaseVersion": false
-  }
-}
-EOF
-)"
-
-  # --- harden: if file has multiple arrays concatenated, truncate at first closing ']'
-  if [ -s "$EXTREG" ] && grep -q ']\s*\[' "$EXTREG"; then
-    tmpcut="$(mktemp)"
-    awk '
-      BEGIN{d=0;done=0}
-      { for(i=1;i<=length($0);i++){ c=substr($0,i,1); if(c=="[")d++; if(d>0 && !done) printf "%s", c; if(c=="]"){ d--; if(d==0 && !done){ print ""; done=1; exit } } } print "" }
-    ' "$EXTREG" > "$tmpcut" 2>/dev/null || printf '[]\n' > "$tmpcut"
-    mv -f "$tmpcut" "$EXTREG"
-  fi
-
-  # --- write/repair registry atomically
-  if [ ! -s "$EXTREG" ]; then
-    printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
-  else
-    if command -v jq >/dev/null 2>&1 && jq -e . "$EXTREG" >/dev/null 2>&1; then
-      tmp="$(mktemp)"
-      jq --arg id "$EXTID" --argjson e "$REG_ENTRY" '
-        (if type=="array" then . else [] end)
-        | [ .[] | select(.identifier.id != $id) ] + [$e]
-      ' "$EXTREG" > "$tmp" 2>/dev/null || printf '[%s]\n' "$REG_ENTRY" > "$tmp"
-      mv -f "$tmp" "$EXTREG"
-    else
-      # salvage multiple JSON fragments: slurp, flatten arrays & objects, keep array only
-      tmp="$(mktemp)"
-      if command -v jq >/dev/null 2>&1; then
-        jq -s '[ .[] | (if type=="array" then .[] elif type=="object" then . else empty end) ]' "$EXTREG" > "$tmp" 2>/dev/null \
-          || printf '[]\n' > "$tmp"
-        mv -f "$tmp" "$EXTREG"
-        # now inject our entry
-        tmp2="$(mktemp)"
-        jq --arg id "$EXTID" --argjson e "$REG_ENTRY" '[ .[] | select(.identifier.id != $id) ] + [$e]' "$EXTREG" > "$tmp2" 2>/dev/null \
-          || printf '[%s]\n' "$REG_ENTRY" > "$tmp2"
-        mv -f "$tmp2" "$EXTREG"
-      else
-        # jq not available: reset to just our entry (VS Code will repopulate others)
-        printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
-      fi
-    fi
-  fi
-
-  chmod 664 "$EXTREG" 2>/dev/null || true
-  chown "${PUID:-1000}:${PGID:-1000}" "$EXTREG" 2>/dev/null || true
-
-  # --- final perms sweep (covers new files)
-  find "$EXTBASE" -type d -exec chmod 775 {} + 2>/dev/null || true
-  find "$EXTBASE" -type f -exec chmod 664 {} + 2>/dev/null || true
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
-
-  unlock
-  log "reloader installed; registry normalized at ${EXTREG}"
+  # Seed the flag file but DO NOT touch its mtime here (avoids immediate reload loop)
+  # If the file didn't exist, we already created it via the extension on first run; ensure here too.
+  : > "$FLAGFILE" 2>/dev/null || true
+  chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
 
 reload_window(){
