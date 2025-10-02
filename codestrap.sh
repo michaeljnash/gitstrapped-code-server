@@ -178,7 +178,7 @@ reload_window(){
   FLAG="${HOME}/.codestrap/reload.signal"
   mkdir -p "$(dirname "$FLAG")"
   touch "$FLAG" 2>/dev/null || true
-  log "requested VS Code window reload"
+  log "requested window reload"
 }
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
@@ -521,6 +521,7 @@ password_change_interactive(){
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"
   CTX_TAG="$_OLD_CTX_TAG"
+  reload_window
 }
 
 # ===== github bootstrap internals =====
