@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=123444548"
+      - "recreate-tag=1234445489"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -46,7 +46,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=12345678"
+      - "recreate-tag=123456789"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
@@ -56,7 +56,7 @@ services:
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
     ports:
-      - "8093:8093"
+      - ":8093"
     expose:
       - "8093"
     depends_on:
