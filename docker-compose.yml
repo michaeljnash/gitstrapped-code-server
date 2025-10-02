@@ -46,7 +46,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=12345"
+      - "recreate-tag=123456"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
@@ -57,6 +57,8 @@ services:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
     ports:
       - ":8080"
+    expose:
+      - "8080"
     depends_on:
       - code
     restart: always
