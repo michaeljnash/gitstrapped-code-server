@@ -65,7 +65,7 @@ ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:
 ensure_codestrap_reloader_ext(){
   # Where VS Code/code-server looks for extensions on your setup
   # (override with CODESTRAP_EXTBASE if needed)
-  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/config/extensions}"
+  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
   EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
