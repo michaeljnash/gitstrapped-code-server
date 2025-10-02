@@ -181,6 +181,127 @@ reload_window(){
   log "requested window reload"
 }
 
+write_codestrap_login() {
+  # Path inside the linuxserver/code-server image
+  PAGES_DIR="/app/code-server/src/browser/pages"
+  mkdir -p "$PAGES_DIR" || true
+
+  # ----- login.html -----
+  cat >"${PAGES_DIR}/login.html" <<'HTML_EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no"
+    />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="style-src 'self'; script-src 'self' 'unsafe-inline'; manifest-src 'self'; img-src 'self' data:; font-src 'self' data:;"
+    />
+    <title>Codestrapped code-server — Sign in</title>
+    <link rel="icon" href="{{CS_STATIC_BASE}}/src/browser/media/favicon-dark-support.svg" />
+    <link rel="alternate icon" href="{{CS_STATIC_BASE}}/src/browser/media/favicon.ico" />
+    <link rel="manifest" href="{{BASE}}/manifest.json" crossorigin="use-credentials" />
+    <link rel="apple-touch-icon" sizes="192x192" href="{{CS_STATIC_BASE}}/src/browser/media/pwa-icon-192.png" />
+    <link rel="apple-touch-icon" sizes="512x512" href="{{CS_STATIC_BASE}}/src/browser/media/pwa-icon-512.png" />
+    <link href="{{CS_STATIC_BASE}}/src/browser/pages/global.css" rel="stylesheet" />
+    <link href="{{CS_STATIC_BASE}}/src/browser/pages/login.css" rel="stylesheet" />
+    <meta id="coder-options" data-settings="{{OPTIONS}}" />
+  </head>
+  <body>
+    <div class="center-container">
+      <div class="card-box cs-card">
+        <div class="header">
+          <h1 class="main cs-title">Welcome to codestrapped code-server!</h1>
+          <div class="sub cs-sub">Enter your password to continue.</div>
+        </div>
+        <div class="content">
+          <form class="login-form" method="post" spellcheck="false" autocomplete="off">
+            <input class="user" type="text" autocomplete="username" />
+            <input id="base" type="hidden" name="base" value="{{BASE}}" />
+            <input id="href" type="hidden" name="href" value="" />
+            <div class="field">
+              <input
+                required
+                autofocus
+                class="password cs-input"
+                type="password"
+                placeholder="Password"
+                name="password"
+                autocomplete="current-password"
+                inputmode="text"
+              />
+              <input class="submit -button cs-button" value="Sign in" type="submit" />
+            </div>
+            {{ERROR}}
+          </form>
+        </div>
+      </div>
+    </div>
+    <script>
+      const el = document.getElementById("href");
+      if (el) el.value = location.href;
+    </script>
+  </body>
+</html>
+HTML_EOF
+
+  # ----- login.css -----
+  cat >"${PAGES_DIR}/login.css" <<'CSS_EOF'
+:root {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --panel: #111827;
+  --border: #374151;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --accent: #3f83f8;
+  --input-bg: #0b1220;
+  --input-br: #4b5563;
+}
+html, body { background: var(--bg); color: var(--text); }
+body {
+  min-height: 568px; min-width: 320px; overflow: auto;
+  font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";
+}
+.cs-card { background: var(--panel)!important; border: 1px solid var(--border)!important; border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.35); }
+.header .main.cs-title { color: var(--text); }
+.header .sub.cs-sub { color: var(--muted); }
+
+.login-form { display:flex; flex-direction:column; flex:1; justify-content:center; }
+.login-form > .field { display:flex; flex-direction:row; width:100%; }
+@media (max-width:600px){ .login-form > .field { flex-direction:column; } }
+
+.login-form > .error { color:#ef4444; margin-top:16px; }
+
+.login-form > .field > .password.cs-input {
+  background: var(--input-bg); border-radius:10px; border:1px solid var(--input-br);
+  color: var(--text); box-sizing:border-box; flex:1; padding:14px 16px;
+}
+.login-form > .field > .password.cs-input::placeholder { color:#94a3b8; }
+.login-form > .field > .password.cs-input:focus { outline:2px solid var(--accent); outline-offset:2px; }
+
+.login-form > .user { display:none; }
+
+.login-form > .field > .submit.cs-button {
+  margin-left:16px; background:#1f2937; color:var(--text);
+  border:1px solid var(--border); border-radius:10px; padding:0 18px; height:48px; cursor:pointer;
+  transition: background .15s ease, border-color .15s ease, transform .02s ease-in;
+}
+.login-form > .field > .submit.cs-button:hover { background:#111827; border-color:var(--input-br); }
+.login-form > .field > .submit.cs-button:active { transform: translateY(1px); }
+@media (max-width:600px){ .login-form > .field > .submit.cs-button { margin-left:0; margin-top:12px; } }
+
+input { -webkit-appearance: none; }
+CSS_EOF
+
+  # permissions (non-root-friendly)
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$PAGES_DIR" 2>/dev/null || true
+}
+
 # ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
 prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
@@ -2529,6 +2650,7 @@ case "${1:-init}" in
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[Codestrap reloader]"      ensure_codestrap_reloader_ext
+    safe_run "[Codestrap UI] Overwrite   login page" write_codestrap_login
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
     safe_run "[Preserve store]"          ensure_preserve_store
