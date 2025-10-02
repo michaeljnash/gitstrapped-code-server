@@ -2082,10 +2082,25 @@ config_hybrid(){
       log "skipped keybindings merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped keybindings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
+    fi
+  fi
+
+  # --tasks
+  if [ -n "${CFG_TASKS+x}" ]; then
+    if [ "$(normalize_bool "$CFG_TASKS")" = "true" ]; then
+      merge_codestrap_tasks
+    else
+      log "skipped tasks merge"
+    fi
+  else
+    if [ "$(prompt_yn "merge strapped tasks.json to user tasks.json? (Y/n)" "y")" = "true" ]; then
+      merge_codestrap_tasks
+    else
+      log "skipped tasks merge"
     fi
   fi
 
@@ -2097,7 +2112,7 @@ config_hybrid(){
       log "skipped extensions merge"
     fi
   else
-    if [ "$(prompt_yn "merge strapped extensions.json to user settings.json? (Y/n)" "y")" = "true" ]; then
+    if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_extensions
     else
       log "skipped extensions merge"
@@ -2240,6 +2255,7 @@ cli_entry(){
       # Parse config flags
       unset CFG_SETTINGS
       unset CFG_KEYB
+      unset CFG_TASKS
       unset CFG_EXT
       while [ $# -gt 0 ]; do
         case "$1" in
@@ -2259,6 +2275,14 @@ cli_entry(){
             ;;
           --keybindings=*)
             CFG_KEYB="${1#*=}"
+            ;;
+          -t|--tasks)
+            shift || true
+            CFG_TASKS="${1:-}"
+            [ -n "${CFG_TASKS:-}" ] || { CTX_TAG="[Bootstrap config]"; err "Flag '--tasks|-t' requires <true|false>"; CTX_TAG=""; exit 2; }
+            ;;
+          --tasks=*)
+            CFG_TASKS="${1#*=}"
             ;;
           -e|--extensions)
             shift || true
@@ -2290,6 +2314,11 @@ cli_entry(){
           if [ "$(normalize_bool "$CFG_KEYB")" = "true" ]; then merge_codestrap_keybindings; else log "skipped keybindings merge"; fi
         else
           merge_codestrap_keybindings
+        fi
+        if [ -n "${CFG_TASKS+x}" ]; then
+          if [ "$(normalize_bool "$CFG_TASKS")" = "true" ]; then merge_codestrap_tasks; else log "skipped tasks merge"; fi
+        else
+          merge_codestrap_tasks
         fi
         if [ -n "${CFG_EXT+x}" ]; then
           if [ "$(normalize_bool "$CFG_EXT")" = "true" ]; then merge_codestrap_extensions; else log "skipped extensions merge"; fi
