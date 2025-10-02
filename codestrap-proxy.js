@@ -1,9 +1,9 @@
 // codestrap-proxy.js — HTTP-only reverse proxy to code-server on 8443
-// Env: PROXY_PORT (8093 default), UP_HOST ("code"), UP_PORT (8443)
+// Env: PROXY_PORT (8080 default), UP_HOST ("code"), UP_PORT (8443)
 const http = require('http');
 const net  = require('net');
 
-const PROXY_PORT = +process.env.PROXY_PORT || 8093;
+const PROXY_PORT = +process.env.PROXY_PORT || 8080;
 const UP_HOST    = process.env.UP_HOST || 'code';
 const UP_PORT    = +process.env.UP_PORT || 8443;
 
