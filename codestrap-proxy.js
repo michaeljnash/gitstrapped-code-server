@@ -1,10 +1,16 @@
-// codestrap-proxy.js
+// codestrap-proxy.js — HTTP-only reverse proxy to code-server on 8443
+// Env: PROXY_PORT (8080 default), UP_HOST ("code"), UP_PORT (8443)
+// Shows a splash that auto-polls /__up and reloads when code-server is ready.
+
 const http = require('http');
 const net  = require('net');
 
-const PROXY_PORT = +process.env.PROXY_PORT || 8080;
+const PROXY_PORT = +(process.env.PROXY_PORT || 8080);
 const UP_HOST    = process.env.UP_HOST || 'code';
-const UP_PORT    = +process.env.UP_PORT || 8443;
+const UP_PORT    = +(process.env.UP_PORT || 8443);
+
+// How long to wait for a TCP connect to the upstream before declaring DOWN
+const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
 function upstreamAlive(cb){
   const s = net.connect({ host: UP_HOST, port: UP_PORT });
@@ -12,29 +18,74 @@ function upstreamAlive(cb){
   const finish = ok => { if (done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
   s.once('connect', ()=>finish(true));
   s.once('error',  ()=>finish(false));
-  s.setTimeout(2500,()=>finish(false));    // was 700ms
+  s.setTimeout(UPSTREAM_CONNECT_TIMEOUT_MS,()=>finish(false));
 }
 
-const restartingHtml = `<!doctype html><meta charset="utf-8">
-<title>code-server…</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e7eb}
+// Auto-polling splash (no-cache) that reloads original URL when /__up is OK.
+function makeSplashHtml() {
+  return `<!doctype html><meta charset="utf-8">
+<title>code-server…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e7eb}
 .wrap{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px}
 .spinner{width:56px;height:56px;border-radius:50%;border:6px solid #334155;border-top-color:#e5e7eb;animation:spin 1s linear infinite;margin-bottom:16px}
-@keyframes spin{to{transform:rotate(360deg)}}</style>
-<div class="wrap"><div class="spinner"></div><h1>Connecting to code-server…</h1></div>`;
+@keyframes spin{to{transform:rotate(360deg)}}
+.small{opacity:.7;font-size:13px;margin-top:8px}
+</style>
+<div class="wrap">
+  <div class="spinner"></div>
+  <h1>Connecting to code-server…</h1>
+  <div class="small" id="tip">Starting services…</div>
+</div>
+<script>
+(function(){
+  let delay = 600, maxDelay = 5000, tries = 0;
+  const original = location.href;
+  function setTip(t){ var el=document.getElementById('tip'); if(el) el.textContent=t; }
+  async function ping(){
+    tries++;
+    try{
+      const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+      if (res.ok) {
+        setTip('Ready! Loading…');
+        location.replace(original);
+        return;
+      }
+    }catch(e){}
+    if (tries === 10) setTip('Still starting…');
+    const jitter = Math.random() * 150;
+    delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
+    setTimeout(ping, delay);
+  }
+  setTimeout(ping, delay);
+})();
+</script>`;
+}
+
+function noStoreHeaders(extra = {}) {
+  return Object.assign({
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'pragma': 'no-cache',
+    'expires': '0',
+    'retry-after': '1'
+  }, extra);
+}
 
 const server = http.createServer((req,res)=>{
-  if (req.url === '/__up') {
+  // Lightweight health endpoint used by the splash polling JS.
+  if (req.url === '/__up' || req.url.startsWith('/__up?')) {
     return upstreamAlive(ok=>{
-      res.writeHead(ok?200:503, {'content-type':'text/plain'}).end(ok?'OK':'DOWN');
+      res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
     });
   }
 
   upstreamAlive(ok=>{
     if (!ok) {
-      console.log(`[proxy] upstream DOWN → ${req.method} ${req.url}`);
-      res.writeHead(503, {'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'1'});
-      return res.end(restartingHtml);
+      console.log('[proxy] upstream DOWN →', req.method, req.url);
+      res.writeHead(503, noStoreHeaders());
+      return res.end(makeSplashHtml());
     }
 
     // strip hop-by-hop
@@ -45,35 +96,51 @@ const server = http.createServer((req,res)=>{
     delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
-    // preserve Traefik/XFH values
-    const xfProto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http');
-    const xfPort  = req.headers['x-forwarded-port']  || (xfProto === 'https' ? '443' : '80');
-    headers['x-forwarded-proto'] = xfProto;
-    headers['x-forwarded-port']  = xfPort;
-    headers['x-forwarded-host']  = req.headers['x-forwarded-host'] || req.headers['host'];
-    headers['host']              = req.headers['host'];
+    // forward info
+    headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
+    headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
+    if (req.socket?.remoteAddress) {
+      headers['x-forwarded-for'] = headers['x-forwarded-for']
+        ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
+        : req.socket.remoteAddress;
+    }
 
-    const p = http.request({ hostname: UP_HOST, port: UP_PORT, path: req.url, method: req.method, headers }, pr => {
-      console.log(`[proxy] ${req.method} ${req.url} → ${pr.statusCode}`);
+    const p = http.request({
+      hostname: UP_HOST,
+      port: UP_PORT,
+      path: req.url,
+      method: req.method,
+      headers
+    }, pr => {
+      // Pass-through response; ensure no cache on 503 just in case
+      if ((pr.statusCode||500) === 503) {
+        Object.assign(pr.headers, noStoreHeaders());
+      }
       res.writeHead(pr.statusCode || 502, pr.headers);
       pr.pipe(res);
+      pr.on('end', ()=> {
+        const sc = pr.statusCode || 0;
+        console.log('[proxy]', req.method, req.url, '→', sc);
+      });
     });
 
     p.on('error', (e)=>{
-      console.log(`[proxy] error forwarding ${req.method} ${req.url}: ${e?.message||e}`);
-      res.writeHead(503, {'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'1'});
-      res.end(restartingHtml);
+      console.log('[proxy] error piping to upstream:', e.message);
+      res.writeHead(503, noStoreHeaders());
+      res.end(makeSplashHtml());
     });
 
     req.pipe(p);
   });
 });
 
-// WebSocket proxy
+// WebSocket proxy (ws → 8443)
 server.on('upgrade', (req, client, head)=>{
   upstreamAlive(ok=>{
-    if (!ok) { console.log('[proxy] WS upstream DOWN'); return client.destroy(); }
-
+    if (!ok) {
+      client.destroy();
+      return;
+    }
     const upstream = net.connect(UP_PORT, UP_HOST);
     upstream.on('connect', () => {
       const lines = [];
@@ -84,8 +151,8 @@ server.on('upgrade', (req, client, head)=>{
       if (head?.length) upstream.write(head);
       upstream.pipe(client); client.pipe(upstream);
     });
-    upstream.on('error', (e)=>{ console.log('[proxy] WS upstream error:', e?.message||e); client.destroy(); });
-    client.on('error',  ()=> upstream.destroy());
+    upstream.on('error', ()=>client.destroy());
+    client.on('error',  ()=>upstream.destroy());
   });
 });
 
