@@ -63,7 +63,7 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_reloader_ext(){
-  # ---- paths (code-server keeps extensions here on your setup) ----
+  # ---- paths ----
   EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
@@ -76,14 +76,14 @@ ensure_codestrap_reloader_ext(){
 
   mkdir -p "$EXTDIR" "$FLAGDIR" "$EXTBASE"
 
-  # ---- extension manifest + code ----
+  # ---- write extension files ----
   cat > "${EXTDIR}/package.json" <<'PKG'
 {
   "name": "codestrap-reloader",
   "displayName": "Codestrap Reloader",
   "publisher": "codestrap",
   "version": "0.0.1",
-  "engines": { "vscode": "^1.50.0" },
+  "engines": { "vscode": "^1.70.0" },
   "activationEvents": ["*"],
   "main": "./extension.js",
   "contributes": {}
@@ -100,7 +100,6 @@ function activate(context) {
     const home = process.env.HOME || process.env.USERPROFILE || '';
     const flag = path.join(home, '.codestrap', 'reload.signal');
 
-    // Ensure the flag file exists so watchers start cleanly
     try { fs.closeSync(fs.openSync(flag, 'a')); } catch(e) {}
 
     let reloading = false;
@@ -112,12 +111,10 @@ function activate(context) {
       });
     };
 
-    // Event-based watcher
     try { fs.watch(flag, { persistent: false }, doReload); } catch (e) {
       console.error('[codestrap-reloader] fs.watch failed:', e);
     }
 
-    // Polling fallback (mtime)
     let lastMtime = 0;
     const tick = () => {
       fs.stat(flag, (err, st) => {
@@ -135,20 +132,16 @@ function activate(context) {
 }
 
 function deactivate() {}
-
 module.exports = { activate, deactivate };
 JS
 
-  : > "${EXTDIR}/.codestrap-reloader"         # harmless marker some loaders look for
-  touch "$FLAGFILE" 2>/dev/null || true       # seed the flag file
+  : > "${EXTDIR}/.codestrap-reloader"
+  touch "$FLAGFILE" 2>/dev/null || true
   chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
 
-  # ---- register in extensions registry so code-server doesn't mark it obsolete ----
-  # Build the registry entry (closest to what code-server writes)
+  # ---- build our registry entry ----
   TS_MS="$(date +%s 2>/dev/null)"; TS_MS="${TS_MS}000"
-  # file:// URI (three slashes before absolute path)
   FILE_URI="file://${EXTDIR}"
-
   REG_ENTRY="$(cat <<EOF
 {
   "identifier": { "id": "${EXTID}" },
@@ -175,46 +168,100 @@ JS
 EOF
 )"
 
-  # Write/update ${EXTBASE}/extensions.json (array of entries)
-  if command -v jq >/dev/null 2>&1; then
-    if [ -s "$EXTREG" ]; then
-      # Remove any stale entries for this id, then append ours (dedup)
-      tmp="$(mktemp)"
-      jq --arg id "$EXTID" --argjson e "$REG_ENTRY" '
-        (.. | objects? // empty) as $x
-        | ( . // [] ) as $arr
-        | if ($arr|type)=="array" then
-            [ $arr[] | select(.identifier.id != $id) ] + [$e]
-          else
-            [ $e ]
-          end
-      ' "$EXTREG" >"$tmp" 2>/dev/null || printf '[%s]\n' "$REG_ENTRY" >"$tmp"
-      mv -f "$tmp" "$EXTREG"
+  # ---- repair registry (handle duplicates / concatenated arrays) ----
+  repair_registry_with_jq(){
+    # If file is empty → start fresh
+    if [ ! -s "$EXTREG" ]; then
+      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+      return
+    fi
+
+    # Try parse as a single JSON array first
+    if jq -e . "$EXTREG" >/dev/null 2>&1; then
+      :
     else
-      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+      # File is invalid (e.g., multiple arrays concatenated) → salvage all arrays
+      tmpfix="$(mktemp)"
+      # Slurp mode: treat the whole file as a stream of JSON values, then flatten all arrays
+      if jq -s '[ .[] | (if type=="array" then .[] else . end) ]' "$EXTREG" > "$tmpfix" 2>/dev/null; then
+        mv -f "$tmpfix" "$EXTREG"
+      else
+        # If salvage fails, hard-reset but try to keep any known folders by scanning
+        rm -f "$tmpfix" 2>/dev/null || true
+        printf '[]\n' > "$EXTREG"
+      fi
     fi
+
+    # De-dup by identifier.id, drop any existing entry for our id, then append ours
+    tmp="$(mktemp)"
+    jq --arg id "$EXTID" --argjson e "$REG_ENTRY" '
+      (if type=="array" then . else [] end)
+      | [ .[] | select(.identifier.id != $id) ] + [$e]
+    ' "$EXTREG" > "$tmp" 2>/dev/null || printf '[%s]\n' "$REG_ENTRY" > "$tmp"
+    mv -f "$tmp" "$EXTREG"
+  }
+
+  repair_registry_without_jq(){
+    # Very coarse fallback: if file contains multiple arrays, keep the first '[' to the matching ']'
+    if [ ! -s "$EXTREG" ]; then
+      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+    else
+      # Try to keep a single array by truncating at the last closing bracket of the first array
+      tmp="$(mktemp)"
+      awk '
+        BEGIN{open=0; out=0}
+        {
+          for(i=1;i<=length($0);i++){
+            c=substr($0,i,1)
+            if(c=="["){ open++ }
+            if(open>0 && out==0){ printf "%s", c }
+            if(c=="]"){ open--; if(open==0){ out=1 } }
+          }
+          if(open==0 && out==1){ printf "\n"; exit }
+          if(NR>1 && open==0 && out==0 && $0 ~ /^[[:space:]]*$/){ next }
+          printf "\n"
+        }
+      ' "$EXTREG" > "$tmp"
+      # Append our entry (naively) into the single array
+      if grep -q '\[' "$tmp"; then
+        sed -i 's/[]]$//' "$tmp" 2>/dev/null || true
+        # Add comma if there are existing elements (detect non-empty content between [ and ])
+        if grep -q '[^[][^]]' "$tmp"; then
+          printf ',\n%s\n]\n' "$REG_ENTRY" >> "$tmp"
+        else
+          printf '%s\n]\n' "$REG_ENTRY" >> "$tmp"
+        fi
+        mv -f "$tmp" "$EXTREG"
+      else
+        printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+        rm -f "$tmp" 2>/dev/null || true
+      fi
+    fi
+  }
+
+  if command -v jq >/dev/null 2>&1; then
+    repair_registry_with_jq
   else
-    # Minimal, jq-less merge: replace file if missing or doesn't already mention our id
-    if ! grep -q '"identifier":{"id":"'"$EXTID"'"' "$EXTREG" 2>/dev/null; then
-      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
-    fi
+    repair_registry_without_jq
   fi
+
   chmod 644 "$EXTREG" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$EXTREG" 2>/dev/null || true
 
-  # ---- clear any ".obsolete" tombstone for this extension ----
+  # ---- clear/repair .obsolete ----
   if [ -f "$OBS" ]; then
     if command -v jq >/dev/null 2>&1 && jq -e . "$OBS" >/dev/null 2>&1; then
-      tmp="$(mktemp)"
-      jq "del(.\"${RELATIVE}\") | del(.\"${EXTID}\") | del(.\"${EXTID}-${EXTVERSION}\")" "$OBS" > "$tmp" 2>/dev/null || true
-      mv -f "$tmp" "$OBS"
+      tmpobs="$(mktemp)"
+      # Delete any keys that could match this ext (relative name, id, or id-version)
+      jq "del(.\"${RELATIVE}\") | del(.\"${EXTID}\") | del(.\"${EXTID}-${EXTVERSION}\")" "$OBS" > "$tmpobs" 2>/dev/null || true
+      mv -f "$tmpobs" "$OBS"
     else
-      # crude: drop the file if it's just marking our id
-      if grep -q "${EXTID}" "$OBS" 2>/dev/null; then rm -f "$OBS" 2>/dev/null || true; fi
+      # If it's corrupt, remove it — VS Code will recreate it when needed
+      rm -f "$OBS" 2>/dev/null || true
     fi
   fi
 
-  log "reloader extension installed (staged + registered) → ${EXTDIR}"
+  log "reloader extension installed + registry repaired → ${EXTDIR}"
 }
 
 reload_window(){
