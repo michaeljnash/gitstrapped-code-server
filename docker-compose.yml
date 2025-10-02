@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=1234"
+      - "recreate-tag=12344"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -41,7 +41,7 @@ services:
       #- ":8080"
       #- "8443:8443"
     expose:
-      - "8443"
+      - "84434"
     restart: always
 
   splash:
@@ -53,6 +53,7 @@ services:
       PROXY_PORT: "8080"        # public
       UP_HOST: "code"           # talk to the code container by name
       UP_PORT: "8443"           # upstream (lsio default)
+      UP_FALLBACK_PORT: "8080"
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
     ports:
