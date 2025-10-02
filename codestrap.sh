@@ -521,6 +521,7 @@ password_change_interactive(){
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"
   CTX_TAG="$_OLD_CTX_TAG"
+  sleep 2.5
   reload_window
 }
 
