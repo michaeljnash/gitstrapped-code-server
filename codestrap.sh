@@ -2500,7 +2500,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
-    safe_run "[Codestrap reloader]" ensure_codestrap_reloader_ext
+    safe_run "[Codestrap reloader]"      ensure_codestrap_reloader_ext
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
     safe_run "[Preserve store]"          ensure_preserve_store
