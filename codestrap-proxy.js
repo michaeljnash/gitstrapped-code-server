@@ -32,11 +32,12 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 .spinner{width:56px;height:56px;border-radius:50%;border:6px solid #334155;border-top-color:#e5e7eb;animation:spin 1s linear infinite;margin-bottom:16px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .small{opacity:.7;font-size:13px;margin-top:8px}
+.subtitle{margin-top: -15px; font-weight: 300;}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
-  <div class="small" style="margin-top: -15px;">This may take some time!</div>
+  <div class="small subtitle">This may take some time!</div>
   <br/>
   <div class="small" id="tip">Starting services…</div>
 </div>
