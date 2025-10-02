@@ -1517,19 +1517,17 @@ merge_codestrap_tasks(){
       managed_final="$managed_final2"
     fi
 
-    # Compose this array block (with section comments indented two levels)
-    out_block="$(mktemp)"
+    # Compose this array BODY (no brackets; no pre-indent)
+    out_body="$(mktemp)"
     {
-      echo "["
-      echo "    //codestrap merged ${arrname}:"
-      if [ -s "$managed_final" ]; then sed 's/^/  /' "$managed_final"; fi
-      echo "    //user defined ${arrname}:"
-      if [ -s "$extras_body" ]; then sed 's/^/  /' "$extras_body"; fi
-      echo "]"
-    } > "$out_block"
+      echo "//codestrap merged ${arrname}:"
+      if [ -s "$managed_final" ]; then cat "$managed_final"; fi
+      echo "//user defined ${arrname}:"
+      if [ -s "$extras_body" ]; then cat "$extras_body"; fi
+    } > "$out_body"
 
-    # Return path to block file via global
-    eval "OUT_${arrname}='$out_block'"
+    # Return path to body file via global
+    eval "OUT_${arrname}='$out_body'"
 
     # cleanup for this array
     rm -f "$tmp_user_arr" "$tmp_repo_arr" "$id_by_index" "$preserve_pairs" "$preserve_vals" \
@@ -1547,17 +1545,20 @@ merge_codestrap_tasks(){
   [ -z "$ver" ] && ver="$(jq -r '.version // empty' "$tmp_repo_obj")"
   [ -z "$ver" ] && ver="2.0.0"
 
-  # Compose final tasks.json
+  # Compose final tasks.json with inline [ ] and tidy commas/indents
   tmp_final="$(mktemp)"
   {
     echo "{"
     printf '  "version": "%s",\n' "$ver"
-    echo '  "tasks":'
-    cat "$OUT_tasks"
-    echo ','
-    echo '  "inputs":'
-    cat "$OUT_inputs"
-    echo ""
+
+    echo '  "tasks": ['
+    if [ -s "$OUT_tasks" ]; then sed 's/^/    /' "$OUT_tasks"; fi
+    echo '  ],'
+
+    echo '  "inputs": ['
+    if [ -s "$OUT_inputs" ]; then sed 's/^/    /' "$OUT_inputs"; fi
+    echo '  ]'
+
     echo "}"
   } > "$tmp_final"
 
