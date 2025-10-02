@@ -1984,7 +1984,7 @@ EOF
   fi
 }
 
-bootstrap_banner(){ if has_tty; then printf "\n[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
+bootstrap_banner(){ if has_tty; then printf "[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
 
 # --- interactive GitHub flow ---
 bootstrap_interactive(){
