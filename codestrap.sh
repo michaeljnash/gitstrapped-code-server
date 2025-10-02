@@ -1193,7 +1193,6 @@ merge_codestrap_keybindings(){
   log "merged keybindings.json → $KEYB_PATH"
 }
 
-# ===== tasks.json merge (tasks[] + inputs[]; ids via //id#; inline //preserve) =====
 # ===== tasks.json merge (tasks + inputs arrays; id comments + //preserve) =====
 merge_codestrap_tasks(){
   REPO_TASKS_SRC="${REPO_TASKS_SRC:-$HOME/codestrap/tasks.json}"
@@ -1209,7 +1208,7 @@ merge_codestrap_tasks(){
   tmp_user_obj="$(mktemp)"
   if [ -f "$TASKS_PATH" ]; then
     if [ ! -s "$TASKS_PATH" ]; then
-      printf '{ "tasks": [], "inputs": [], "version": "2.0.0" }\n' > "$tmp_user_obj"
+      printf '{ "version": "2.0.0", "tasks": [], "inputs": [] }\n' > "$tmp_user_obj"
     else
       if jq -e . "$TASKS_PATH" >/dev/null 2>&1; then
         cp "$TASKS_PATH" "$tmp_user_obj"
@@ -1224,7 +1223,7 @@ merge_codestrap_tasks(){
       fi
     fi
   else
-    printf '{ "tasks": [], "inputs": [], "version": "2.0.0" }\n' > "$tmp_user_obj"
+    printf '{ "version": "2.0.0", "tasks": [], "inputs": [] }\n' > "$tmp_user_obj"
   fi
 
   # --- Load REPO (allow comments only) ---
@@ -1258,22 +1257,27 @@ merge_codestrap_tasks(){
     if [ -f "$TASKS_PATH" ]; then
       _banner_strip_first_if_error <"$TASKS_PATH" | awk -v TARGET="$arrname" -v OUT1="$id_by_index" -v OUT2="$preserve_pairs" -v OUT3="$preserve_vals" '
         BEGIN{
-          top=0; in_target=0; targ_depth=0; arr_depth=0; obj_depth=0;
+          in_target=0; saw_key=0; arr_depth=0; obj_depth=0;
           idx=-1; cur=-1; have_id=0; cur_id="";
         }
         {
           line=$0
 
-          # detect entering/leaving the TARGET array at top-level:
-          #   "tasks":[   or   "inputs": [
+          # robust detection of:  "TARGET": [   (same line)  OR
+          #                        "TARGET":    (newline)    and then [ on a later line
           if (!in_target) {
-            if (line ~ /^[[:space:]]*\"/ && index(line, "\""TARGET"\"")>0 && line ~ /\[[[:space:]]*$/) {
-              in_target=1; targ_depth=0; arr_depth=0; obj_depth=0; idx=-1; cur=-1; have_id=0; cur_id="";
+            if (line ~ /^[[:space:]]*\"/ && index(line, "\""TARGET"\"")>0) {
+              saw_key=1
+              if (line ~ /\[[[:space:]]*$/) {
+                in_target=1; arr_depth=0; obj_depth=0; idx=-1; cur=-1; have_id=0; cur_id=""; saw_key=0
+              }
+            } else if (saw_key && line ~ /^[[:space:]]*\[[[:space:]]*$/) {
+              in_target=1; arr_depth=0; obj_depth=0; idx=-1; cur=-1; have_id=0; cur_id=""; saw_key=0
             }
           }
 
-          # if in target array, track braces/brackets char-by-char
           if (in_target) {
+            # depth tracking
             n=split(line, C, "")
             for(i=1;i<=n;i++){
               ch=C[i]
