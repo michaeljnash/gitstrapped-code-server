@@ -1526,6 +1526,10 @@ merge_codestrap_tasks(){
       if [ -s "$extras_body" ]; then cat "$extras_body"; fi
     } > "$out_body"
 
+    out_body_norm="$(mktemp)"
+    sed -E 's/^  //' "$out_body" > "$out_body_norm"
+    mv -f "$out_body_norm" "$out_body"
+
     # Return path to body file via global
     eval "OUT_${arrname}='$out_body'"
 
