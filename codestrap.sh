@@ -1194,6 +1194,7 @@ merge_codestrap_keybindings(){
 }
 
 # ===== tasks.json merge (tasks[] + inputs[]; ids via //id#; inline //preserve) =====
+# ===== tasks.json merge (tasks + inputs arrays; id comments + //preserve) =====
 merge_codestrap_tasks(){
   REPO_TASKS_SRC="${REPO_TASKS_SRC:-$HOME/codestrap/tasks.json}"
   [ -f "$REPO_TASKS_SRC" ] || { log "no repo tasks.json; skipping tasks merge"; return 0; }
@@ -1201,20 +1202,21 @@ merge_codestrap_tasks(){
 
   ensure_dir "$USER_DIR"; ensure_dir "$STATE_DIR"
 
-  kb_hash(){ jq -cS . | tr -d '\n\t ' | sha1sum | awk '{print substr($1,1,8)}'; }  # same hash logic
+  # canonical short id (8 chars) for any object
+  _obj_hash(){ jq -cS . | tr -d '\n\t ' | sha1sum | awk '{print substr($1,1,8)}'; }
 
-  # ---- Load USER (allow comments only) ----
-  tmp_user_json="$(mktemp)"
+  # --- Load USER (allow comments only) ---
+  tmp_user_obj="$(mktemp)"
   if [ -f "$TASKS_PATH" ]; then
     if [ ! -s "$TASKS_PATH" ]; then
-      printf '{ "version":"2.0.0","tasks":[],"inputs":[] }\n' > "$tmp_user_json"
+      printf '{ "tasks": [], "inputs": [], "version": "2.0.0" }\n' > "$tmp_user_obj"
     else
       if jq -e . "$TASKS_PATH" >/dev/null 2>&1; then
-        cp "$TASKS_PATH" "$tmp_user_json"
+        cp "$TASKS_PATH" "$tmp_user_obj"
       else
-        strip_jsonc_to_json "$TASKS_PATH" >"$tmp_user_json" || true
-        if ! jq -e . "$tmp_user_json" >/dev/null 2>&1; then
-          rm -f "$tmp_user_json" 2>/dev/null || true
+        strip_jsonc_to_json "$TASKS_PATH" >"$tmp_user_obj" || true
+        if ! jq -e . "$tmp_user_obj" >/dev/null 2>&1; then
+          rm -f "$tmp_user_obj" 2>/dev/null || true
           put_error_banner_this "$TASKS_PATH" "user tasks.json is malformed; skipped merge to avoid data loss."
           abort_or_continue "[Bootstrap config]" "user tasks.json is malformed; skipped merge to avoid data loss."
           return 0
@@ -1222,90 +1224,91 @@ merge_codestrap_tasks(){
       fi
     fi
   else
-    printf '{ "version":"2.0.0","tasks":[],"inputs":[] }\n' > "$tmp_user_json"
+    printf '{ "tasks": [], "inputs": [], "version": "2.0.0" }\n' > "$tmp_user_obj"
   fi
 
-  # ---- Load REPO (allow comments only) ----
-  tmp_repo_json="$(mktemp)"
+  # --- Load REPO (allow comments only) ---
+  tmp_repo_obj="$(mktemp)"
   if jq -e . "$REPO_TASKS_SRC" >/dev/null 2>&1; then
-    cp "$REPO_TASKS_SRC" "$tmp_repo_json"
+    cp "$REPO_TASKS_SRC" "$tmp_repo_obj"
   else
-    strip_jsonc_to_json "$REPO_TASKS_SRC" >"$tmp_repo_json" || true
-    if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
-      rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
+    strip_jsonc_to_json "$REPO_TASKS_SRC" >"$tmp_repo_obj" || true
+    if ! jq -e . "$tmp_repo_obj" >/dev/null 2>&1; then
+      rm -f "$tmp_user_obj" "$tmp_repo_obj" 2>/dev/null || true
       put_error_banner_repo "$TASKS_PATH" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge." "repo tasks.json" "$REPO_TASKS_SRC"
       abort_or_continue "[Bootstrap config]" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge."
       return 0
     fi
   fi
 
-  # ===== helper: merge one array (name: tasks|inputs) =====
-  merge_one_array(){ # usage: merge_one_array tasks <out_managed_body> <out_extras_body>
-    _ARR="$1"; out_managed="$2"; out_extras="$3"
+  # ---- helper to merge one top-level array: "tasks" or "inputs" ----
+  merge_one_array(){ # arg1=array name ("tasks" or "inputs")
+    arrname="$1"
 
-    # Extract arrays (JSON) for repo and user
-    tmp_user_arr="$(mktemp)"; jq -c --arg a "$_ARR" '.[$a] // []' "$tmp_user_json" >"$tmp_user_arr"
-    tmp_repo_arr="$(mktemp)"; jq -c --arg a "$_ARR" '.[$a] // []' "$tmp_repo_json" >"$tmp_repo_arr"
+    # Extract arrays (JSON) from parsed user/repo objects
+    tmp_user_arr="$(mktemp)"; jq -c --arg a "$arrname" '.[$a] // []' "$tmp_user_obj"  > "$tmp_user_arr"
+    tmp_repo_arr="$(mktemp)"; jq -c --arg a "$arrname" '.[$a] // []' "$tmp_repo_obj"  > "$tmp_repo_arr"
 
-    # ---- PASS 1 (RAW user file): capture index→id and (id,prop,rawval) for this array only ----
-    id_by_index="$(mktemp)"; : >"$id_by_index"        # "<idx>\t<id>"
-    preserve_pairs="$(mktemp)"; : >"$preserve_pairs"  # "<id>\t<prop>"
-    preserve_vals="$(mktemp)"; : >"$preserve_vals"    # "<id>\t<prop>\t<raw_json_token>"
+    # Pass 1: scan RAW user file to capture id by array-index and preserves (prop + raw value) for this array only
+    id_by_index="$(mktemp)"          # "<idx>\t<id>"
+    preserve_pairs="$(mktemp)"       # "<id>\t<prop>"
+    preserve_vals="$(mktemp)"        # "<id>\t<prop>\t<raw_json_value>"
+    : >"$id_by_index"; : >"$preserve_pairs"; : >"$preserve_vals"
 
     if [ -f "$TASKS_PATH" ]; then
-      _banner_strip_first_if_error <"$TASKS_PATH" | awk -v TARGET="\"$_ARR\"" -v OUT1="$id_by_index" -v OUT2="$preserve_pairs" -v OUT3="$preserve_vals" '
+      _banner_strip_first_if_error <"$TASKS_PATH" | awk -v TARGET="$arrname" -v OUT1="$id_by_index" -v OUT2="$preserve_pairs" -v OUT3="$preserve_vals" '
         BEGIN{
-          arr=0; obj=0; idx=-1; cur=-1;
-          which="";
-          have_id=0; id_for_cur="";
-          seeking_arr=0; arr_depth=0;
+          top=0; in_target=0; targ_depth=0; arr_depth=0; obj_depth=0;
+          idx=-1; cur=-1; have_id=0; cur_id="";
         }
         {
           line=$0
 
-          # enter/leave the target array by spotting: "tasks": [   OR   "inputs": [
-          if (line ~ "^[[:space:]]*" TARGET "[[:space:]]*:[[:space:]]*\\[") {
-            which="yes"; seeking_arr=1;
-          }
-          # track bracket depth for array/object precisely
-          n=split(line, c, "")
-          for (i=1;i<=n;i++){
-            ch=c[i]
-            if (which=="yes"){
-              if (ch=="["){ arr_depth++; if (seeking_arr && arr_depth==1){ idx=-1; cur=-1; } }
-              else if (ch=="]"){ arr_depth--; if (arr_depth==0){ which=""; have_id=0; id_for_cur=""; } }
-              else if (ch=="{"){
-                if (arr_depth==1 && obj==0){ idx++; cur=idx; have_id=0; id_for_cur="" }
-                obj++
-              } else if (ch=="}"){
-                obj--; if (obj==0){ cur=-1; have_id=0; id_for_cur="" }
-              }
+          # detect entering/leaving the TARGET array at top-level:
+          #   "tasks":[   or   "inputs": [
+          if (!in_target) {
+            if (line ~ /^[[:space:]]*\"/ && index(line, "\""TARGET"\"")>0 && line ~ /\[[[:space:]]*$/) {
+              in_target=1; targ_depth=0; arr_depth=0; obj_depth=0; idx=-1; cur=-1; have_id=0; cur_id="";
             }
           }
 
-          # Only act while inside the named array
-          if (which=="yes"){
-            # id comment
-            if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/){
-              id=line; sub(/^.*id#/,"",id); sub(/[^0-9a-fA-F].*$/,"",id)
-              if (cur>=0 && id!=""){ print cur "\t" id >> OUT1; id_for_cur=id; have_id=1 }
+          # if in target array, track braces/brackets char-by-char
+          if (in_target) {
+            n=split(line, C, "")
+            for(i=1;i<=n;i++){
+              ch=C[i]
+              if (ch=="[") { arr_depth++ }
+              else if (ch=="]") { arr_depth--; if (arr_depth==0){ in_target=0 } }
+              else if (ch=="{") {
+                if (arr_depth==1 && obj_depth==0) { idx++; cur=idx; have_id=0; cur_id="" }
+                obj_depth++
+              } else if (ch=="}") {
+                obj_depth--
+                if (obj_depth==0) { cur=-1; have_id=0; cur_id="" }
+              }
             }
-            # preserve
-            if (line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/ && have_id){
+
+            # capture //id#... inside current object
+            if (line ~ /\/\/[[:space:]]*id#[0-9a-fA-F]+/ && cur>=0) {
+              id=line; sub(/^.*id#/,"",id); sub(/[^0-9a-fA-F].*$/, "", id)
+              if (id!="") { print cur "\t" id >> OUT1; cur_id=id; have_id=1 }
+            }
+
+            # capture //preserve on a prop line, and its raw JSON value token
+            if (have_id && line ~ /\/\/[[:space:]]*preserve[[:space:]]*$/) {
               prop=line
               sub(/^[ \t]*/, "", prop)
-              if (prop ~ /^\"[^\"]+\"[ \t]*:/){
+              if (prop ~ /^\"[^\"]+\"[ \t]*:/) {
                 sub(/^\"/, "", prop); sub(/\".*/, "", prop)
-                if (prop!=""){
-                  print id_for_cur "\t" prop >> OUT2
-                  # raw JSON token after colon (strip comment/comma)
+                if (prop != "") {
+                  print cur_id "\t" prop >> OUT2
                   val=line
                   sub(/^[ \t]*/, "", val)
                   sub(/^\"[^"]+\"[ \t]*:[ \t]*/, "", val)
                   sub(/[ \t]*\/\/.*$/, "", val)
                   sub(/[ \t]*$/, "", val)
                   sub(/,[ \t]*$/, "", val)
-                  print id_for_cur "\t" prop "\t" val >> OUT3
+                  print cur_id "\t" prop "\t" val >> OUT3
                 }
               }
             }
@@ -1314,7 +1317,7 @@ merge_codestrap_tasks(){
       '
     fi
 
-    # Build JSON maps
+    # Build JSON: id -> [props...]
     preserve_json="$(mktemp)"
     if [ -s "$preserve_pairs" ]; then
       awk -F'\t' 'NF==2{printf("{\"id\":\"%s\",\"prop\":\"%s\"}\n",$1,$2)}' "$preserve_pairs" \
@@ -1323,36 +1326,50 @@ merge_codestrap_tasks(){
       printf '{}\n' > "$preserve_json"
     fi
 
+    # Build JSON: id -> user object (from user array by index)
     user_id_map="$(mktemp)"; printf '{}\n' > "$user_id_map"
     if [ -s "$id_by_index" ]; then
-      while IFS=$'\t' read -r i id; do
-        [ -n "$i" ] && [ -n "$id" ] || continue
-        uobj="$(jq -c --argjson idx "$i" '.[ $idx ]' "$tmp_user_arr" 2>/dev/null || printf '{}')"
+      while IFS=$'\t' read -r idx id; do
+        [ -n "$idx" ] && [ -n "$id" ] || continue
+        uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_arr" 2>/dev/null || printf '{}')"
         jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$user_id_map" > "$user_id_map.tmp" && mv -f "$user_id_map.tmp" "$user_id_map"
       done < "$id_by_index"
     fi
 
-    # repo with temp ids
+    # Repo with temp ids
     repo_with_ids="$(mktemp)"
     jq -c '.[]' "$tmp_repo_arr" | while IFS= read -r robj; do
       [ -n "$robj" ] || continue
-      rid="$(printf '%s' "$robj" | kb_hash)"
+      rid="$(printf '%s' "$robj" | _obj_hash)"
       printf '%s\n' "$robj" | jq --arg id "$rid" '. + { "__tmp_id": $id }'
     done | jq -s '.' > "$repo_with_ids"
 
-    # merge managed (by id), copy preserved props from user object
+    # Build seen index map for user array (string keys) → true
+    seen_map="$(mktemp)"
+    if [ -s "$id_by_index" ]; then
+      awk 'NF==2{print $1}' "$id_by_index" \
+        | jq -s 'map(tostring) | reduce .[] as $k ({}; .[$k]=true)' > "$seen_map"
+    else
+      printf '{}\n' > "$seen_map"
+    fi
+
+    # Merge (managed by id), compute extras via seen index map (no tonumber)
     merged_tmp="$(mktemp)"
     jq -n \
       --slurpfile U "$tmp_user_arr" \
       --slurpfile R "$repo_with_ids" \
       --slurpfile P "$preserve_json" \
-      --slurpfile UM "$user_id_map" '
+      --slurpfile UM "$user_id_map" \
+      --slurpfile S "$seen_map" '
         def arr(x): if (x|type)=="array" then x else [] end;
         def obj(x): if (x|type)=="object" then x else {} end;
+
         (arr($U[0])) as $Uraw
         | (arr($R[0])) as $R
         | (obj($P[0])) as $PRES
         | (obj($UM[0])) as $U_by_id
+        | ($S[0] // {})  as $seen
+
         | ($R
             | map(
                 . as $repo
@@ -1367,22 +1384,22 @@ merge_codestrap_tasks(){
                   end
               )
           ) as $managed
-        # extras = user entries without id (by index)
-        | ($Uraw | to_entries | map(.key|tostring)) as $idxs
-        | ($idxs
-            | map( select( ($U_by_id[.])? == null ) )    # indexes (as strings) that had no id
-          ) as $noid_idx
-        | [ $Uraw as $U | $noid_idx[] | ($U[tonumber(.)]) ]
+
+        # extras = user entries whose index was NOT seen with an id comment
+        | [ range(0; ($Uraw|length)) as $i
+            | select( ($seen[($i|tostring)] // false) | not )
+            | $Uraw[$i]
+          ]
         | { managed: $managed, extras: (map(select(type=="object"))) }
       ' > "$merged_tmp"
 
-    # pretty-print sections
-    managed_arr="$(mktemp)"; jq '.managed' "$merged_tmp" > "$managed_arr"
-    extras_arr="$(mktemp)";  jq '.extras'  "$merged_tmp" > "$extras_arr"
-    managed_body="$(mktemp)"; sed '1d;$d' "$managed_arr" > "$managed_body"
-    extras_body="$(mktemp)";  sed '1d;$d' "$extras_arr" > "$extras_body"
+    # Pretty-print arrays and strip outer brackets
+    tmp_managed_arr="$(mktemp)"; jq '.managed' "$merged_tmp" > "$tmp_managed_arr"
+    tmp_extras_arr="$(mktemp)";  jq '.extras'  "$merged_tmp" > "$tmp_extras_arr"
+    managed_body="$(mktemp)"; sed '1d;$d' "$tmp_managed_arr" > "$managed_body"
+    extras_body="$(mktemp)";  sed '1d;$d' "$tmp_extras_arr"  > "$extras_body"
 
-    # insert //id#..., drop __tmp_id, fix trailing commas
+    # Insert //id#..., drop __tmp_id, fix trailing commas
     managed_annotated="$(mktemp)"
     awk '
       function get_indent(s,    t){ t=s; match(t,/^[[:space:]]*/); return substr(t,RSTART,RLENGTH) }
@@ -1430,16 +1447,15 @@ merge_codestrap_tasks(){
       }
     ' "$managed_body" > "$managed_annotated"
 
-    # apply preserved values + ensure //preserve on those lines
+    # Apply preserved values and re-append //preserve (comma before the comment)
     managed_with_preserve="$(mktemp)"
     awk -v PAIRS="$preserve_pairs" -v VALS="$preserve_vals" '
       BEGIN {
-        while ((getline m < PAIRS) > 0) { p=index(m,"\t"); if(p){ id=substr(m,1,p-1); pr=substr(m,p+1); keep[id "\t" pr]=1 } }
+        while ((getline m < PAIRS) > 0) { p = index(m, "\t"); if (p>0) { id=substr(m,1,p-1); pr=substr(m,p+1); keep[id "\t" pr]=1 } }
         close(PAIRS)
         while ((getline v < VALS) > 0) {
-          p1=index(v,"\t"); if(!p1) continue
-          id=substr(v,1,p1-1); rest=substr(v,p1+1)
-          p2=index(rest,"\t"); if(!p2) continue
+          p1=index(v,"\t"); if(!p1)continue; id=substr(v,1,p1-1)
+          rest=substr(v,p1+1); p2=index(rest,"\t"); if(!p2)continue
           pr=substr(rest,1,p2-1); val=substr(rest,p2+1)
           vals[id "\t" pr]=val
         }
@@ -1460,30 +1476,25 @@ merge_codestrap_tasks(){
             pat="^([[:space:]]*\"" prop_esc "\"[[:space:]]*:[[:space:]]*)"
             prefix=line
             if (match(prefix, pat)) { prefix=substr(prefix,RSTART,RLENGTH) } else { print line; next }
-            has_comma=(line ~ /,[[:space:]]*$/)
-            val=vals[key]
-            if (val==""){
-              val=line
-              sub(pat,"",val)
-              sub(/[ \t]*\/\/.*$/,"",val)
-              sub(/[ \t]*$/,"",val)
-              sub(/,[ \t]*$/,"",val)
+            hadc = (line ~ /,[[:space:]]*$/)
+            val = vals[key]
+            if (val=="") {
+              val=line; sub(pat,"",val); sub(/[ \t]*\/\/.*$/,"",val); sub(/[ \t]*$/,"",val); sub(/,[ \t]*$/,"",val)
               if (val=="") val="null"
             }
-            newline=prefix val
-            if (has_comma) newline=newline ","
-            newline=newline " //preserve"
-            print newline; next
+            nl = prefix val
+            if (hadc) nl = nl ","
+            nl = nl " //preserve"
+            print nl; next
           }
         }
         print line
       }
     ' "$managed_annotated" > "$managed_with_preserve"
 
-    # prepare managed/extras bodies (with proper trailing comma if extras exist)
-    mlen="$(jq -r '. | length' "$managed_arr" 2>/dev/null || echo 0)"
-    elen="$(jq -r '. | length' "$extras_arr"  2>/dev/null || echo 0)"
-
+    # Add a comma to the last managed line if extras exist (before //preserve when present)
+    mlen="$(jq -r '. | length' "$tmp_managed_arr" 2>/dev/null || echo 0)"
+    elen="$(jq -r '. | length' "$tmp_extras_arr"  2>/dev/null || echo 0)"
     managed_final="$managed_with_preserve"
     if [ "$mlen" -gt 0 ] && [ "$elen" -gt 0 ]; then
       managed_final2="$(mktemp)"
@@ -1502,57 +1513,55 @@ merge_codestrap_tasks(){
       managed_final="$managed_final2"
     fi
 
-    # write out bodies for caller
-    cp "$managed_final" "$out_managed"
-    cp "$extras_body"   "$out_extras"
+    # Compose this array block (with section comments indented two levels)
+    out_block="$(mktemp)"
+    {
+      echo "["
+      echo "    //codestrap merged ${arrname}:"
+      if [ -s "$managed_final" ]; then sed 's/^/  /' "$managed_final"; fi
+      echo "    //user defined ${arrname}:"
+      if [ -s "$extras_body" ]; then sed 's/^/  /' "$extras_body"; fi
+      echo "]"
+    } > "$out_block"
 
-    # cleanup local temps
+    # Return path to block file via global
+    eval "OUT_${arrname}='$out_block'"
+
+    # cleanup for this array
     rm -f "$tmp_user_arr" "$tmp_repo_arr" "$id_by_index" "$preserve_pairs" "$preserve_vals" \
-          "$preserve_json" "$user_id_map" "$repo_with_ids" "$merged_tmp" \
-          "$managed_arr" "$extras_arr" "$managed_body" "$extras_body" \
+          "$preserve_json" "$user_id_map" "$repo_with_ids" "$seen_map" "$merged_tmp" \
+          "$tmp_managed_arr" "$tmp_extras_arr" "$managed_body" "$extras_body" \
           "$managed_annotated" "$managed_with_preserve" "$managed_final" 2>/dev/null || true
   }
 
-  # ---- run merge for both arrays ----
-  tasks_managed="$(mktemp)"; tasks_extras="$(mktemp)"
-  inputs_managed="$(mktemp)"; inputs_extras="$(mktemp)"
-  : >"$tasks_managed"; : >"$tasks_extras"; : >"$inputs_managed"; : >"$inputs_extras"
+  # Merge tasks and inputs
+  merge_one_array "tasks"
+  merge_one_array "inputs"
 
-  merge_one_array "tasks"  "$tasks_managed"  "$tasks_extras"
-  merge_one_array "inputs" "$inputs_managed" "$inputs_extras"
+  # Choose version (prefer user, else repo, else 2.0.0)
+  ver="$(jq -r '.version // empty' "$tmp_user_obj")"
+  [ -z "$ver" ] && ver="$(jq -r '.version // empty' "$tmp_repo_obj")"
+  [ -z "$ver" ] && ver="2.0.0"
 
-  # pick version: prefer user version, else repo, else 2.0.0
-  ver="$(jq -r '.version // empty' "$tmp_user_json")"
-  [ -n "$ver" ] || ver="$(jq -r '.version // empty' "$tmp_repo_json")"
-  [ -n "$ver" ] || ver="2.0.0"
-
-  # ---- compose final file with section comments; no trailing commas ----
-  tmp_with_comments="$(mktemp)"
+  # Compose final tasks.json
+  tmp_final="$(mktemp)"
   {
     echo "{"
     printf '  "version": "%s",\n' "$ver"
-
-    echo '  "tasks": ['
-    echo '    //codestrap merged tasks:'
-    if [ -s "$tasks_managed" ]; then sed 's/^/    /' "$tasks_managed"; fi
-    echo '    //user defined tasks:'
-    if [ -s "$tasks_extras" ];  then sed 's/^/    /' "$tasks_extras";  fi
-    echo '  ],'
-
-    echo '  "inputs": ['
-    echo '    //codestrap merged inputs:'
-    if [ -s "$inputs_managed" ]; then sed 's/^/    /' "$inputs_managed"; fi
-    echo '    //user defined inputs:'
-    if [ -s "$inputs_extras" ];  then sed 's/^/    /' "$inputs_extras";  fi
-    echo '  ]'
+    echo '  "tasks":'
+    cat "$OUT_tasks"
+    echo ','
+    echo '  "inputs":'
+    cat "$OUT_inputs"
+    echo ""
     echo "}"
-  } > "$tmp_with_comments"
+  } > "$tmp_final"
 
-  write_inplace "$tmp_with_comments" "$TASKS_PATH"
+  write_inplace "$tmp_final" "$TASKS_PATH"
   chown "${PUID}:${PGID}" "$TASKS_PATH" 2>/dev/null || true
   clear_error_banner "$TASKS_PATH"
 
-  rm -f "$tmp_user_json" "$tmp_repo_json" "$tasks_managed" "$tasks_extras" "$inputs_managed" "$inputs_extras" "$tmp_with_comments" 2>/dev/null || true
+  rm -f "$tmp_user_obj" "$tmp_repo_obj" "$tmp_final" "$OUT_tasks" "$OUT_inputs" 2>/dev/null || true
 
   log "merged tasks.json → $TASKS_PATH"
 }
