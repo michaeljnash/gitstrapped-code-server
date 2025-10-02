@@ -63,33 +63,34 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_reloader_ext(){
-  # Where VS Code/code-server looks for extensions on your setup
-  # (override with CODESTRAP_EXTBASE if needed)
-  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
+  # ---- paths (code-server keeps extensions here on your setup) ----
+  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/config/extensions}"
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
   EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
+  RELATIVE="$(basename "$EXTDIR")"
+  EXTREG="${EXTBASE}/extensions.json"
+  OBS="${EXTBASE}/.obsolete"
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
 
-  mkdir -p "$EXTDIR" "$FLAGDIR"
+  mkdir -p "$EXTDIR" "$FLAGDIR" "$EXTBASE"
 
-  # package.json
-  cat >"${EXTDIR}/package.json" <<'PKG'
+  # ---- extension manifest + code ----
+  cat > "${EXTDIR}/package.json" <<'PKG'
 {
   "name": "codestrap-reloader",
   "displayName": "Codestrap Reloader",
   "publisher": "codestrap",
   "version": "0.0.1",
-  "engines": { "vscode": "^1.70.0" },
-  "activationEvents": [ "*" ],
+  "engines": { "vscode": "^1.50.0" },
+  "activationEvents": ["*"],
   "main": "./extension.js",
   "contributes": {}
 }
 PKG
 
-  # extension.js
-  cat >"${EXTDIR}/extension.js" <<'JS'
+  cat > "${EXTDIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
@@ -111,14 +112,12 @@ function activate(context) {
       });
     };
 
-    // Primary: event-based watcher
-    try {
-      fs.watch(flag, { persistent: false }, doReload);
-    } catch (e) {
+    // Event-based watcher
+    try { fs.watch(flag, { persistent: false }, doReload); } catch (e) {
       console.error('[codestrap-reloader] fs.watch failed:', e);
     }
 
-    // Fallback: poll mtime (some platforms can be flaky)
+    // Polling fallback (mtime)
     let lastMtime = 0;
     const tick = () => {
       fs.stat(flag, (err, st) => {
@@ -140,14 +139,82 @@ function deactivate() {}
 module.exports = { activate, deactivate };
 JS
 
-  # Marker file some loaders look for (harmless otherwise)
-  : > "${EXTDIR}/.codestrap-reloader"
-
-  # Permissions + seed flag file
+  : > "${EXTDIR}/.codestrap-reloader"         # harmless marker some loaders look for
+  touch "$FLAGFILE" 2>/dev/null || true       # seed the flag file
   chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
-  touch "$FLAGFILE" 2>/dev/null || true
 
-  log "reloader extension staged → ${EXTDIR}"
+  # ---- register in extensions registry so code-server doesn't mark it obsolete ----
+  # Build the registry entry (closest to what code-server writes)
+  TS_MS="$(date +%s 2>/dev/null)"; TS_MS="${TS_MS}000"
+  # file:// URI (three slashes before absolute path)
+  FILE_URI="file://${EXTDIR}"
+
+  REG_ENTRY="$(cat <<EOF
+{
+  "identifier": { "id": "${EXTID}" },
+  "version": "${EXTVERSION}",
+  "location": {
+    "\$mid": 1,
+    "fsPath": "${EXTDIR}",
+    "external": "${FILE_URI}",
+    "path": "${EXTDIR}",
+    "scheme": "file"
+  },
+  "relativeLocation": "${RELATIVE}",
+  "metadata": {
+    "installedTimestamp": ${TS_MS},
+    "pinned": false,
+    "source": "local",
+    "targetPlatform": "universal",
+    "updated": false,
+    "private": false,
+    "isPreReleaseVersion": false,
+    "hasPreReleaseVersion": false
+  }
+}
+EOF
+)"
+
+  # Write/update ${EXTBASE}/extensions.json (array of entries)
+  if command -v jq >/dev/null 2>&1; then
+    if [ -s "$EXTREG" ]; then
+      # Remove any stale entries for this id, then append ours (dedup)
+      tmp="$(mktemp)"
+      jq --arg id "$EXTID" --argjson e "$REG_ENTRY" '
+        (.. | objects? // empty) as $x
+        | ( . // [] ) as $arr
+        | if ($arr|type)=="array" then
+            [ $arr[] | select(.identifier.id != $id) ] + [$e]
+          else
+            [ $e ]
+          end
+      ' "$EXTREG" >"$tmp" 2>/dev/null || printf '[%s]\n' "$REG_ENTRY" >"$tmp"
+      mv -f "$tmp" "$EXTREG"
+    else
+      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+    fi
+  else
+    # Minimal, jq-less merge: replace file if missing or doesn't already mention our id
+    if ! grep -q '"identifier":{"id":"'"$EXTID"'"' "$EXTREG" 2>/dev/null; then
+      printf '[%s]\n' "$REG_ENTRY" > "$EXTREG"
+    fi
+  fi
+  chmod 644 "$EXTREG" 2>/dev/null || true
+  chown "${PUID:-1000}:${PGID:-1000}" "$EXTREG" 2>/dev/null || true
+
+  # ---- clear any ".obsolete" tombstone for this extension ----
+  if [ -f "$OBS" ]; then
+    if command -v jq >/dev/null 2>&1 && jq -e . "$OBS" >/dev/null 2>&1; then
+      tmp="$(mktemp)"
+      jq "del(.\"${RELATIVE}\") | del(.\"${EXTID}\") | del(.\"${EXTID}-${EXTVERSION}\")" "$OBS" > "$tmp" 2>/dev/null || true
+      mv -f "$tmp" "$OBS"
+    else
+      # crude: drop the file if it's just marking our id
+      if grep -q "${EXTID}" "$OBS" 2>/dev/null; then rm -f "$OBS" 2>/dev/null || true; fi
+    fi
+  fi
+
+  log "reloader extension installed (staged + registered) → ${EXTDIR}"
 }
 
 reload_window(){
