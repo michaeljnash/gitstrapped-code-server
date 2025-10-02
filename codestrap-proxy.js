@@ -36,7 +36,7 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
-  <div class="small" id="tip">This may take some time!</div>
+  <div class="small" style="margin-top: -15px;">This may take some time!</div>
   <br/>
   <div class="small" id="tip">Starting services…</div>
 </div>
