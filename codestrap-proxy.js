@@ -95,7 +95,6 @@ function resolveCodeContainerId(cb) {
 }
 
 // Docker logs framing demux (when TTY=false)
-// See: https://docs.docker.com/engine/api/v1.43/#operation/ContainerLogs
 function demuxDockerFrames(stream, onLine) {
   let buf = Buffer.alloc(0);
 
@@ -113,7 +112,6 @@ function demuxDockerFrames(stream, onLine) {
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 8) {
       // header: 8 bytes
-      const streamType = buf.readUInt8(0); // 1=stdout, 2=stderr
       const msgLen = buf.readUInt32BE(4);
       if (buf.length < 8 + msgLen) break;
       const payload = buf.slice(8, 8 + msgLen);
@@ -198,18 +196,18 @@ function makeSplashHtml() {
 <script>
 (function(){
   // --- dots animation (fixed-width, no layout shift)
+  const NBSP = '\\u00A0';
   const dotsEl = document.getElementById('dots');
-  const frames = ['\\u00A0\\u00A0\\u00A0','.\\u00A0\\u00A0','..\\u00A0','...'];
+  const frames = [NBSP+NBSP+NBSP, '.'+NBSP+NBSP, '..'+NBSP, '...'];
   let fi = 0;
-  function tickDots(){ dotsEl.innerHTML = frames[fi = (fi+1) % frames.length]; }
+  function tickDots(){ dotsEl.textContent = frames[fi = (fi+1) % frames.length]; }
   setInterval(tickDots, 350); // start immediately
   tickDots();
 
   // --- health polling
-  let delay = 600, maxDelay = 5000, tries = 0;
+  let delay = 600, maxDelay = 5000;
   const original = location.href;
   async function ping(){
-    tries++;
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
       if (res.ok) { location.replace(original); return; }
@@ -226,25 +224,18 @@ function makeSplashHtml() {
   let es = null;
   function startLogs(){
     if (es) return;
-    // Use SSE; server will push initial backlog then follow
     es = new EventSource('/__logs?ts='+Date.now());
     es.onmessage = (e)=>{
       if (!e.data) return;
       box.textContent += e.data + '\\n';
-      // Trim to last ~500 lines to avoid runaway memory
       const lines = box.textContent.split('\\n');
-      if (lines.length > 800) {
-        box.textContent = lines.slice(-500).join('\\n');
-      }
+      if (lines.length > 800) box.textContent = lines.slice(-500).join('\\n');
       box.scrollTop = box.scrollHeight;
     };
-    es.onerror = ()=>{ /* keep alive; server restarts will reconnect */ };
+    es.onerror = ()=>{ /* keep alive; reconnect handled by browser */ };
   }
   function stopLogs(){ if (es) { es.close(); es=null; } }
-
-  panel.addEventListener('toggle', ()=>{
-    if (panel.open) startLogs(); else stopLogs();
-  });
+  panel.addEventListener('toggle', ()=>{ if (panel.open) startLogs(); else stopLogs(); });
 })();
 </script>`;
 }
@@ -276,9 +267,8 @@ const server = http.createServer((req, res) => {
 
     const send = (line) => {
       if (closed) return;
-      // Basic sanitization; SSE event
-      const safe = String(line).replace(/\\u0000/g, '');
-      res.write('data: ' + safe + '\\n\\n');
+      const safe = String(line).replace(/\u0000/g, '');
+      res.write('data: ' + safe + '\n\n');
     };
 
     resolveCodeContainerId((err, cid) => {
@@ -292,23 +282,20 @@ const server = http.createServer((req, res) => {
         stdout: '1', stderr: '1', follow: '1', tail: '200'
       }).toString();
 
-      const path = \`/containers/\${cid}/logs?\${q}\`;
+      const path = `/containers/${cid}/logs?${q}`;
       const r = http.request({ socketPath: DOCKER_SOCKET, path, method: 'GET' }, (dr) => {
-        // If TTY=true, raw stream (no headers); else multiplexed frames
         const ct = (dr.headers['content-type'] || '').toLowerCase();
         const isRaw = ct.includes('application/vnd.docker.raw-stream');
 
         if (isRaw) {
           dr.setEncoding('utf8');
           dr.on('data', chunk => {
-            // split to lines
-            chunk.split(/\\r?\\n/).forEach(line => { if (line) send(line); });
+            chunk.split(/\r?\n/).forEach(line => { if (line) send(line); });
           });
         } else {
           demuxDockerFrames(dr, send);
         }
-
-        dr.on('end', () => { /* stream ended; client may reconnect */ });
+        dr.on('end', () => { /* stream ended */ });
       });
 
       r.on('error', e => send('[logs] error: ' + e.message));
@@ -339,7 +326,7 @@ const server = http.createServer((req, res) => {
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
       headers['x-forwarded-for'] = headers['x-forwarded-for']
-        ? \`\${headers['x-forwarded-for']}, \${req.socket.remoteAddress}\`
+        ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
         : req.socket.remoteAddress;
     }
 
@@ -353,7 +340,7 @@ const server = http.createServer((req, res) => {
       const sc = pr.statusCode || 502;
       const ct = (pr.headers['content-type'] || '').toLowerCase();
 
-      // Force-dark login page only (doesn't touch the app)
+      // Force-dark login page only
       const isLoginHtml = req.method === 'GET'
         && req.url.split('?')[0] === '/login'
         && ct.includes('text/html');
