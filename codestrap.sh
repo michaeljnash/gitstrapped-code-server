@@ -64,7 +64,7 @@ ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:
 
 ensure_codestrap_reloader_ext(){
   # ---- paths (code-server keeps extensions here on your setup) ----
-  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/config/extensions}"
+  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
   EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
