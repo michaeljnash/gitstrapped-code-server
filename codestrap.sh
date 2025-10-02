@@ -436,8 +436,8 @@ trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 
 install_restart_splash_proxy(){
   require_root || { warn "need root for splash proxy install (skipping)"; return 0; }
 
-  PROXY_PORT="${CODESTRAP_PROXY_PORT:-8443}"
-  UP_PORT="${CODESTRAP_UPSTREAM_PORT:-8080}"
+  PROXY_PORT="${CODESTRAP_PROXY_PORT:-8080}"
+  UP_PORT="${CODESTRAP_UPSTREAM_PORT:-8443}"
   UP_HOST="${CODESTRAP_UPSTREAM_HOST:-127.0.0.1}"
   NODE_BIN=""
   for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do [ -x "$p" ] && { NODE_BIN="$p"; break; }; done
@@ -449,9 +449,9 @@ const http = require('http');
 const net = require('net');
 const { URL } = require('url');
 
-const PROXY_PORT = parseInt(process.env.PROXY_PORT || '8443', 10);
+const PROXY_PORT = parseInt(process.env.PROXY_PORT || '8080', 10);
 const UP_HOST    = process.env.UP_HOST || '127.0.0.1';
-const UP_PORT    = parseInt(process.env.UP_PORT || '8080', 10);
+const UP_PORT    = parseInt(process.env.UP_PORT || '8443', 10);
 
 const restartingHtml = `<!doctype html>
 <meta charset="utf-8">

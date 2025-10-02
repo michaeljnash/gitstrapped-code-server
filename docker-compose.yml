@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=123456789"
+      - "recreate-tag=1234567890"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -39,7 +39,7 @@ services:
       - ./tasks.json:/config/codestrap/tasks.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     ports:
-      - ":8443"
+      - ":8080"
       #- "8443:8443"
     restart: always
 
