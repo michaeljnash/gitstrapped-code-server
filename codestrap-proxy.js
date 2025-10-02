@@ -47,8 +47,13 @@ const server = http.createServer((req,res)=>{
     delete headers['transfer-encoding'];
 
     // forward info
-    headers['x-forwarded-proto'] = 'http';
-    headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
+    const xfProto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http');
+    const xfPort  = req.headers['x-forwarded-port']  || (xfProto === 'https' ? '443' : '80');
+    headers['x-forwarded-proto'] = xfProto;
+    headers['x-forwarded-port']  = xfPort;
+    headers['x-forwarded-host']  = req.headers['x-forwarded-host'] || req.headers['host'];
+    // make sure Host reaches upstream (some apps care)
+    headers['host'] = req.headers['host'];
     if (req.socket?.remoteAddress) {
       headers['x-forwarded-for'] = headers['x-forwarded-for']
         ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
