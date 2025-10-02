@@ -38,7 +38,7 @@ services:
       - ./tasks.json:/config/codestrap/tasks.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     #ports:
-      #- ":8080"
+      #- ":8090"
       #- "8443:8443"
     expose:
       - "8443"
@@ -50,15 +50,15 @@ services:
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
-      PROXY_PORT: "8080"
+      PROXY_PORT: "8090"
       UP_HOST: "code"
       UP_PORT: "8443"
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
     ports:
-      - "8080:8080"
+      - "8090:8090"
     expose:
-      - "8080"
+      - "8090"
     depends_on:
       - code
     restart: always
