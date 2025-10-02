@@ -433,6 +433,142 @@ EOF
 }
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
 
+install_restart_splash_proxy(){
+  require_root || { warn "need root for splash proxy install (skipping)"; return 0; }
+
+  PROXY_PORT="${CODESTRAP_PROXY_PORT:-8443}"
+  UP_PORT="${CODESTRAP_UPSTREAM_PORT:-8080}"
+  UP_HOST="${CODESTRAP_UPSTREAM_HOST:-127.0.0.1}"
+  NODE_BIN=""
+  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do [ -x "$p" ] && { NODE_BIN="$p"; break; }; done
+  [ -n "$NODE_BIN" ] || { warn "Node not found; cannot install splash proxy"; return 0; }
+
+  mkdir -p /usr/local/bin
+  cat >/usr/local/bin/codestrap-proxy.js <<'EOF'
+const http = require('http');
+const net = require('net');
+const { URL } = require('url');
+
+const PROXY_PORT = parseInt(process.env.PROXY_PORT || '8443', 10);
+const UP_HOST    = process.env.UP_HOST || '127.0.0.1';
+const UP_PORT    = parseInt(process.env.UP_PORT || '8080', 10);
+
+const restartingHtml = `<!doctype html>
+<meta charset="utf-8">
+<title>Code server restarting…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  html,body{height:100%;margin:0;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,sans-serif;background:#0f172a;color:#e5e7eb}
+  .wrap{display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;text-align:center;padding:24px}
+  .spinner{width:56px;height:56px;border-radius:50%;border:6px solid #334155;border-top-color:#e5e7eb;animation:spin 1s linear infinite;margin-bottom:16px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .sub{opacity:.75}
+  button{margin-top:16px;padding:8px 14px;border-radius:10px;border:1px solid #334155;background:#111827;color:#e5e7eb;cursor:pointer}
+  button:disabled{opacity:.6;cursor:default}
+</style>
+<div class="wrap">
+  <div class="spinner"></div>
+  <h1>Restarting code server…</h1>
+  <div class="sub">We’ll reconnect automatically.</div>
+  <button id="reload" disabled>Reload now</button>
+</div>
+<script>
+  const btn = document.getElementById('reload');
+  btn.onclick = () => location.reload();
+  let seenUp = false;
+  async function ping(){
+    try{
+      const r = await fetch('/__up', {cache:'no-store'});
+      if(r.ok){ seenUp = true; btn.disabled = false; setTimeout(()=>location.reload(), 400); return; }
+    }catch(e){}
+    setTimeout(ping, 800);
+  }
+  ping();
+</script>`;
+
+function upstreamAlive(cb){
+  const s = net.connect({host: UP_HOST, port: UP_PORT});
+  let done = false;
+  const finish = (ok)=>{ if(done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
+  s.once('connect', ()=>finish(true));
+  s.once('error',  ()=>finish(false));
+  s.setTimeout(300, ()=>finish(false));
+}
+
+const server = http.createServer((req,res)=>{
+  // health endpoint the splash page polls
+  if (req.url === '/__up') {
+    return upstreamAlive(ok=>{
+      if (ok) { res.writeHead(200,{'content-type':'text/plain'}).end('OK'); }
+      else    { res.writeHead(503,{'content-type':'text/plain','retry-after':'1'}).end('DOWN'); }
+    });
+  }
+
+  upstreamAlive(ok=>{
+    if (!ok) {
+      res.writeHead(503, {'content-type':'text/html; charset=utf-8', 'cache-control':'no-store', 'retry-after':'1'});
+      res.end(restartingHtml);
+      return;
+    }
+
+    // Simple HTTP proxy (no websockets here; code-server’s UI can reload once up)
+    const target = new URL(`http://${UP_HOST}:${UP_PORT}${req.url}`);
+    const options = {
+      hostname: target.hostname,
+      port: target.port,
+      path: target.pathname + (target.search||''),
+      method: req.method,
+      headers: req.headers
+    };
+    const p = http.request(options, (pr)=>{
+      res.writeHead(pr.statusCode || 502, pr.headers);
+      pr.pipe(res);
+    });
+    p.on('error', ()=>{
+      res.writeHead(503, {'content-type':'text/html; charset=utf-8', 'cache-control':'no-store', 'retry-after':'1'});
+      res.end(restartingHtml);
+    });
+    req.pipe(p);
+  });
+});
+
+// Very small websocket passthrough for code-server (best-effort, still shows splash on failure)
+server.on('upgrade', (req, socket, head)=>{
+  upstreamAlive(ok=>{
+    if(!ok){ socket.destroy(); return; }
+    const ps = net.connect(UP_PORT, UP_HOST, ()=>{
+      socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
+                   'Connection: Upgrade\r\n' +
+                   (req.headers['sec-websocket-accept'] ? '' : '') + '\r\n');
+      ps.write(head);
+      ps.pipe(socket);
+      socket.pipe(ps);
+    });
+    ps.on('error', ()=>socket.destroy());
+  });
+});
+
+server.listen(PROXY_PORT, '0.0.0.0', ()=>{
+  console.log(`[codestrap-proxy] listening on 0.0.0.0:${PROXY_PORT} → upstream ${UP_HOST}:${UP_PORT}`);
+});
+EOF
+  chmod 755 /usr/local/bin/codestrap-proxy.js
+
+  mkdir -p /etc/services.d/codestrap-proxy
+  cat >/etc/services.d/codestrap-proxy/run <<EOF
+#!/usr/bin/env sh
+export PROXY_PORT="${PROXY_PORT}"
+export UP_HOST="${UP_HOST}"
+export UP_PORT="${UP_PORT}"
+exec "${NODE_BIN}" /usr/local/bin/codestrap-proxy.js
+EOF
+  chmod +x /etc/services.d/codestrap-proxy/run
+  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/codestrap-proxy/finish && chmod +x /etc/services.d/codestrap-proxy/finish
+
+  log "installed splash proxy service → listens :${PROXY_PORT}, proxies to ${UP_HOST}:${UP_PORT}"
+  ylw "Important: run code-server on ${UP_HOST}:${UP_PORT} and expose the proxy port (${PROXY_PORT}) to clients."
+}
+
 # ===== first-boot default password =====
 init_default_password(){
   DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-}"
@@ -2528,6 +2664,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[Splash proxy]"            install_restart_splash_proxy
     safe_run "[Codestrap reloader]"      ensure_codestrap_reloader_ext
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
