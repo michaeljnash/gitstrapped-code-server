@@ -4,33 +4,31 @@
 // auto-polls to reload when it's UP. Splash has a collapsible "Live logs"
 // section that streams logs from the code container via the Docker socket.
 //
-// ENV:
-//   PROXY_PORT      : public port to listen on (default 8080)
-//   UP_HOST         : upstream host (default "code")
-//   UP_PORT         : upstream port (default 8443)
-//   UP_TIMEOUT_MS   : TCP connect timeout to upstream (default 2500)
-//   LOG_CAP         : proxy ring-buffer size for internal msgs (default 500)
-//   DOCKER_SOCK     : path to Docker socket (default "/var/run/docker.sock")
-//   CODE_SERVICE    : REQUIRED to enable container logs (compose service name)
+// ENV (set these in compose):
+//   PROXY_PORT         : public port to listen on (default 8080)
+//   CODE_SERVICE_NAME  : REQUIRED (compose service name of code-server, e.g. "code")
+//   CODE_EXPOSED_PORT  : upstream port exposed by that service (default 8443)
+//   UP_TIMEOUT_MS      : TCP connect timeout to upstream (default 2500)
+//   LOG_CAP            : proxy ring-buffer size for internal msgs (default 500)
+//   DOCKER_SOCK        : path to Docker socket (default "/var/run/docker.sock")
 //
 // Notes:
 //   - Mount /var/run/docker.sock:ro into this container to enable live logs.
-//   - If CODE_SERVICE is unset (or socket missing), logs panel remains available
-//     but will show "unavailable" when opened.
+//   - If CODE_SERVICE_NAME is unset or the socket is missing, the logs panel
+//     will show "unavailable" when opened.
 
 const http = require('http');
 const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
 
-const PROXY_PORT = +(process.env.PROXY_PORT || 8080);
-const UP_HOST    = process.env.UP_HOST || 'code';
-const UP_PORT    = +(process.env.UP_PORT || 8443);
+const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
+const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || ''; // required by you; no default
+const CODE_EXPOSED_PORT = +(process.env.CODE_EXPOSED_PORT || 8443);
 const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
-const LOG_CAP    = +(process.env.LOG_CAP || 500);
-const DOCKER_SOCK= process.env.DOCKER_SOCK || '/var/run/docker.sock';
-const CODE_SERVICE = process.env.CODE_SERVICE || ''; // no default by design
+const LOG_CAP     = +(process.env.LOG_CAP || 500);
+const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
 
@@ -50,7 +48,7 @@ function getLogsText() { return logBuf.join('\n') + (logBuf.length ? '\n' : '');
 /* --------------------- upstream health check --------------------- */
 
 function upstreamAlive(cb){
-  const s = net.connect({ host: UP_HOST, port: UP_PORT });
+  const s = net.connect({ host: CODE_SERVICE_NAME || '127.0.0.1', port: CODE_EXPOSED_PORT });
   let done = false;
   const finish = ok => { if (done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
   s.once('connect', ()=>finish(true));
@@ -60,7 +58,7 @@ function upstreamAlive(cb){
 let lastUp = null;
 function probeAndNote(cb) {
   upstreamAlive(ok => {
-    if (lastUp === null) pushLog(`upstream initial state: ${ok ? 'UP' : 'DOWN'} (${UP_HOST}:${UP_PORT})`);
+    if (lastUp === null) pushLog(`upstream initial state: ${ok ? 'UP' : 'DOWN'} (${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT})`);
     else if (ok !== lastUp) pushLog(`upstream state change: ${ok ? 'UP' : 'DOWN'}`);
     lastUp = ok;
     cb(ok);
@@ -77,7 +75,7 @@ const docker = {
 };
 
 try { fs.accessSync(DOCKER_SOCK); docker.enabled = true; } catch(_) { docker.enabled = false; }
-docker.wantLogs = docker.enabled && !!CODE_SERVICE;
+docker.wantLogs = docker.enabled && !!CODE_SERVICE_NAME;
 
 function dockerRequest(path, method='GET', headers={}, cb) {
   const req = http.request({ socketPath: docker.socketPath, path, method, headers }, res => cb(null, res));
@@ -94,7 +92,7 @@ function resolveContainerId(cb) {
   if (docker.containerId) return cb(null, docker.containerId);
 
   // Resolve by compose label (preferred) or name contains
-  const filters = { label: [`com.docker.compose.service=${CODE_SERVICE}`] };
+  const filters = { label: [`com.docker.compose.service=${CODE_SERVICE_NAME}`] };
   const path = `/v1.41/containers/json?all=0&filters=${jsonEncodeFilters(filters)}`;
   dockerRequest(path, 'GET', {}, (err, res)=>{
     if (err) return cb(err);
@@ -104,7 +102,7 @@ function resolveContainerId(cb) {
       try {
         let arr = JSON.parse(body);
         if (!Array.isArray(arr) || arr.length === 0) {
-          // fallback: list all and try name contains /CODE_SERVICE
+          // fallback: list all and try name contains /CODE_SERVICE_NAME
           dockerRequest(`/v1.41/containers/json?all=0`, 'GET', {}, (e2, r2)=>{
             if (e2) return cb(e2);
             let b2=''; r2.setEncoding('utf8'); r2.on('data',c=>b2+=c);
@@ -112,8 +110,8 @@ function resolveContainerId(cb) {
               try {
                 const all = JSON.parse(b2);
                 const hit = all.find(c =>
-                  (c.Labels && c.Labels['com.docker.compose.service'] === CODE_SERVICE) ||
-                  (Array.isArray(c.Names) && c.Names.some(n => n.includes(`/${CODE_SERVICE}`)))
+                  (c.Labels && c.Labels['com.docker.compose.service'] === CODE_SERVICE_NAME) ||
+                  (Array.isArray(c.Names) && c.Names.some(n => n.includes(`/${CODE_SERVICE_NAME}`)))
                 );
                 if (hit) { docker.containerId = hit.Id; cb(null, docker.containerId); }
                 else cb(new Error('no container matched service'), null);
@@ -129,7 +127,7 @@ function resolveContainerId(cb) {
   });
 }
 
-// Demux Docker multiplexed logs (non-TTY); falls back to raw if headers look bad.
+// Demux Docker multiplexed logs (non-TTY); fallback to raw when needed.
 function createDockerDemux(onLine) {
   let buf = Buffer.alloc(0);
   let assumeTTY = false;
@@ -146,7 +144,7 @@ function createDockerDemux(onLine) {
     while (buf.length >= 8) {
       const stream = buf.readUInt8(0);
       const length = buf.readUInt32BE(4);
-      if (length > 10 * 1024 * 1024) { // nonsense
+      if (length > 10 * 1024 * 1024) {
         badHeaders++;
         if (badHeaders >= 2) { assumeTTY = true; emitText(buf); buf = Buffer.alloc(0); }
         break;
@@ -185,11 +183,11 @@ function streamDockerLogs(containerId, res, sinceSec) {
       res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`);
     });
     dres.on('data', chunk => demux(chunk));
-    dres.on('end',  ()=> { try{res.write(`data: [codelogs] ended\n\n`);}catch(_){} });
+    dres.on('end',  ()=> { try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
   });
 }
 
-/* --------------------- splash HTML (logs collapsed by default) -------------- */
+/* --------------------- splash HTML (dots animate 1→2→3) -------------------- */
 
 function makeSplashHtml() {
   return `<!doctype html><meta charset="utf-8">
@@ -218,7 +216,7 @@ details[open] .chev{transform:rotate(90deg)}
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-  <div class="small" id="tip">Starting services…</div>
+  <div class="small" id="tip"><span id="tip-base">Starting services</span><span id="tip-dots">.</span></div>
 
   <div class="container">
     <details class="card" id="logsbox">
@@ -235,19 +233,32 @@ details[open] .chev{transform:rotate(90deg)}
 </div>
 <script>
 (function(){
-  let delay = 600, maxDelay = 5000, tries = 0;
+  let delay = 600, maxDelay = 5000, tries = 0, dots = 1, dotTimer = null;
   const original = location.href;
   const tipEl = document.getElementById('tip');
+  const dotEl = document.getElementById('tip-dots');
   const logEl = document.getElementById('log');
   const statusEl = document.getElementById('log-status');
   const logsBox = document.getElementById('logsbox');
 
-  function setTip(t){ if(tipEl) tipEl.textContent=t; }
+  function setTip(t){ if(tipEl) tipEl.textContent = t; }
   function setStatus(t){ if(statusEl) statusEl.textContent=t; }
   function addLines(t){
     if (!logEl || !t) return;
     logEl.textContent += t.replace(/\\r?\\n/g,'\\n');
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Dots animation: 1 → 2 → 3 → 1 …
+  function startDots(){
+    if (dotTimer) return;
+    dotTimer = setInterval(()=>{
+      dots = dots % 3 + 1; // 1..3
+      if (dotEl) dotEl.textContent = '.'.repeat(dots);
+    }, 500);
+  }
+  function stopDots(){
+    if (dotTimer) { clearInterval(dotTimer); dotTimer = null; }
   }
 
   // Only initialize log streams the first time user opens the details
@@ -277,12 +288,14 @@ details[open] .chev{transform:rotate(90deg)}
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
       if (res.ok) {
+        stopDots();
         setTip('Ready! Loading…');
         location.replace(original);
         return;
       }
     }catch(e){}
-    if (tries === 10) setTip('Still starting…');
+    if (tries === 3) startDots();
+    if (tries === 10) { /* subtle hint after a while */ }
     const jitter = Math.random() * 150;
     delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
     setTimeout(ping, delay);
@@ -322,7 +335,7 @@ const server = http.createServer((req,res)=>{
     return res.end(getLogsText());
   }
 
-  // Internal SSE for proxy messages (not used by splash UI but handy)
+  // Internal SSE for proxy messages (handy for debugging)
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -341,12 +354,12 @@ const server = http.createServer((req,res)=>{
   if (u.pathname === '/__code_logs') {
     if (!docker.wantLogs) {
       res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-      return res.end('[codelogs] unavailable (docker socket or CODE_SERVICE)\n');
+      return res.end('[codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n');
     }
     resolveContainerId((err, id)=>{
       if (err || !id) {
         res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-        return res.end('[codelogs] container not found for CODE_SERVICE\n');
+        return res.end('[codelogs] container not found for CODE_SERVICE_NAME\n');
       }
       fetchDockerLogsTail(id, 200, (e, text)=>{
         if (e) {
@@ -368,9 +381,9 @@ const server = http.createServer((req,res)=>{
       'connection': 'keep-alive',
       'x-accel-buffering': 'no'
     });
-    if (!docker.wantLogs) { res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE)\n\n`); return; }
+    if (!docker.wantLogs) { res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n\n`); return; }
     resolveContainerId((err, id)=>{
-      if (err || !id) { res.write(`data: [codelogs] container not found for CODE_SERVICE\n\n`); return; }
+      if (err || !id) { res.write(`data: [codelogs] container not found for CODE_SERVICE_NAME\n\n`); return; }
       const since = Math.floor(Date.now()/1000) - 20;
       streamDockerLogs(id, res, since);
       req.on('close', ()=>{ try{res.end();}catch(_){ } });
@@ -404,8 +417,8 @@ const server = http.createServer((req,res)=>{
     }
 
     const p = http.request({
-      hostname: UP_HOST,
-      port: UP_PORT,
+      hostname: CODE_SERVICE_NAME || '127.0.0.1',
+      port: CODE_EXPOSED_PORT,
       path: req.url,
       method: req.method,
       headers
@@ -431,7 +444,7 @@ const server = http.createServer((req,res)=>{
 server.on('upgrade', (req, client, head)=>{
   probeAndNote(ok=>{
     if (!ok) { try{client.destroy();}catch(_){ } return; }
-    const upstream = net.connect(UP_PORT, UP_HOST);
+    const upstream = net.connect(CODE_EXPOSED_PORT, CODE_SERVICE_NAME || '127.0.0.1');
     upstream.on('connect', () => {
       const lines = [];
       lines.push(`${req.method} ${req.url} HTTP/${req.httpVersion}`);
@@ -449,11 +462,14 @@ server.on('upgrade', (req, client, head)=>{
 /* --------------------- boot --------------------- */
 
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
-  pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${UP_HOST}:${UP_PORT}`);
+  pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT}`);
+  if (!CODE_SERVICE_NAME) {
+    pushLog(`WARNING: CODE_SERVICE_NAME is not set — upstream+logs may not work as expected`);
+  }
   if (docker.wantLogs) {
-    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE}`);
+    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE_NAME}`);
   } else if (docker.enabled) {
-    pushLog(`docker socket present, but CODE_SERVICE not set → logs disabled`);
+    pushLog(`docker socket present, but CODE_SERVICE_NAME not set → logs disabled`);
   } else {
     pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
   }
