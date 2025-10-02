@@ -436,17 +436,20 @@ trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 
 install_restart_splash_proxy(){
   require_root || { warn "need root for splash proxy install (skipping)"; return 0; }
 
-  PROXY_PORT="${CODESTRAP_PROXY_PORT:-8080}"
-  UP_PORT="${CODESTRAP_UPSTREAM_PORT:-8443}"
+  PROXY_PORT="${CODESTRAP_PROXY_PORT:-8080}"      # public/listen
+  UP_PORT="${CODESTRAP_UPSTREAM_PORT:-8443}"      # code-server upstream
   UP_HOST="${CODESTRAP_UPSTREAM_HOST:-127.0.0.1}"
   NODE_BIN=""
-  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do [ -x "$p" ] && { NODE_BIN="$p"; break; }; done
+  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do
+    [ -x "$p" ] && { NODE_BIN="$p"; break; }
+  done
   [ -n "$NODE_BIN" ] || { warn "Node not found; cannot install splash proxy"; return 0; }
 
   mkdir -p /usr/local/bin
   cat >/usr/local/bin/codestrap-proxy.js <<'EOF'
+// /usr/local/bin/codestrap-proxy.js
 const http = require('http');
-const net = require('net');
+const net  = require('net');
 const { URL } = require('url');
 
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '8080', 10);
@@ -475,11 +478,10 @@ const restartingHtml = `<!doctype html>
 <script>
   const btn = document.getElementById('reload');
   btn.onclick = () => location.reload();
-  let seenUp = false;
   async function ping(){
     try{
       const r = await fetch('/__up', {cache:'no-store'});
-      if(r.ok){ seenUp = true; btn.disabled = false; setTimeout(()=>location.reload(), 400); return; }
+      if(r.ok){ btn.disabled = false; setTimeout(()=>location.reload(), 400); return; }
     }catch(e){}
     setTimeout(ping, 800);
   }
@@ -489,62 +491,85 @@ const restartingHtml = `<!doctype html>
 function upstreamAlive(cb){
   const s = net.connect({host: UP_HOST, port: UP_PORT});
   let done = false;
-  const finish = (ok)=>{ if(done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
+  const finish = ok => { if(done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
   s.once('connect', ()=>finish(true));
   s.once('error',  ()=>finish(false));
   s.setTimeout(300, ()=>finish(false));
 }
 
 const server = http.createServer((req,res)=>{
-  // health endpoint the splash page polls
+  // Health endpoint the splash page polls
   if (req.url === '/__up') {
     return upstreamAlive(ok=>{
-      if (ok) { res.writeHead(200,{'content-type':'text/plain'}).end('OK'); }
-      else    { res.writeHead(503,{'content-type':'text/plain','retry-after':'1'}).end('DOWN'); }
+      if (ok) res.writeHead(200, {'content-type':'text/plain'}).end('OK');
+      else     res.writeHead(503, {'content-type':'text/plain','retry-after':'1'}).end('DOWN');
     });
   }
 
   upstreamAlive(ok=>{
     if (!ok) {
-      res.writeHead(503, {'content-type':'text/html; charset=utf-8', 'cache-control':'no-store', 'retry-after':'1'});
-      res.end(restartingHtml);
-      return;
+      res.writeHead(503, {
+        'content-type':'text/html; charset=utf-8',
+        'cache-control':'no-store',
+        'retry-after':'1'
+      });
+      return res.end(restartingHtml);
     }
 
-    // Simple HTTP proxy (no websockets here; code-server’s UI can reload once up)
+    // Basic reverse proxy for HTTP
     const target = new URL(`http://${UP_HOST}:${UP_PORT}${req.url}`);
-    const options = {
+    const headers = { ...req.headers };
+    // strip hop-by-hop headers
+    delete headers['connection'];
+    delete headers['upgrade'];
+    delete headers['proxy-connection'];
+    delete headers['keep-alive'];
+    delete headers['transfer-encoding'];
+
+    const p = http.request({
       hostname: target.hostname,
       port: target.port,
-      path: target.pathname + (target.search||''),
+      path: target.pathname + (target.search || ''),
       method: req.method,
-      headers: req.headers
-    };
-    const p = http.request(options, (pr)=>{
+      headers
+    }, pr => {
       res.writeHead(pr.statusCode || 502, pr.headers);
       pr.pipe(res);
     });
+
     p.on('error', ()=>{
-      res.writeHead(503, {'content-type':'text/html; charset=utf-8', 'cache-control':'no-store', 'retry-after':'1'});
+      res.writeHead(503, {
+        'content-type':'text/html; charset=utf-8',
+        'cache-control':'no-store',
+        'retry-after':'1'
+      });
       res.end(restartingHtml);
     });
+
     req.pipe(p);
   });
 });
 
-// Very small websocket passthrough for code-server (best-effort, still shows splash on failure)
-server.on('upgrade', (req, socket, head)=>{
+// Proper WebSocket tunneling: forward client's raw upgrade request to upstream
+server.on('upgrade', (req, client, head)=>{
   upstreamAlive(ok=>{
-    if(!ok){ socket.destroy(); return; }
-    const ps = net.connect(UP_PORT, UP_HOST, ()=>{
-      socket.write('HTTP/1.1 101 Switching Protocols\r\n' +
-                   'Connection: Upgrade\r\n' +
-                   (req.headers['sec-websocket-accept'] ? '' : '') + '\r\n');
-      ps.write(head);
-      ps.pipe(socket);
-      socket.pipe(ps);
+    if (!ok) { client.destroy(); return; }
+    const upstream = net.connect(UP_PORT, UP_HOST, ()=>{
+      // Reconstruct the original upgrade request exactly
+      const lines = [];
+      lines.push(`${req.method} ${req.url} HTTP/${req.httpVersion}`);
+      for (const [k, v] of Object.entries(req.headers)) {
+        lines.push(`${k}: ${v}`);
+      }
+      lines.push('', ''); // end headers
+      upstream.write(lines.join('\r\n'));
+      if (head && head.length) upstream.write(head);
+      // Bi-directional tunnel
+      upstream.pipe(client);
+      client.pipe(upstream);
     });
-    ps.on('error', ()=>socket.destroy());
+    upstream.on('error', ()=> client.destroy());
+    client.on('error',  ()=> upstream.destroy());
   });
 });
 
