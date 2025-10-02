@@ -63,8 +63,9 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_reloader_ext(){
-  # Where code-server keeps its extensions (works for code-server and most VS Code Server builds)
-  EXTBASE="${HOME}/.local/share/code-server/extensions"
+  # Where VS Code/code-server looks for extensions on your setup
+  # (override with CODESTRAP_EXTBASE if needed)
+  EXTBASE="${CODESTRAP_EXTBASE:-$HOME/config/extensions}"
   EXTID="codestrap.codestrap-reloader"
   EXTVERSION="0.0.1"
   EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
@@ -98,34 +99,36 @@ function activate(context) {
     const home = process.env.HOME || process.env.USERPROFILE || '';
     const flag = path.join(home, '.codestrap', 'reload.signal');
 
-    // Make sure the flag file exists so fs.watch starts cleanly
+    // Ensure the flag file exists so watchers start cleanly
     try { fs.closeSync(fs.openSync(flag, 'a')); } catch(e) {}
 
-    // Watch for changes and reload the window
     let reloading = false;
     const doReload = () => {
       if (reloading) return;
       reloading = true;
       vscode.commands.executeCommand('workbench.action.reloadWindow').finally(() => {
-        // Safety timer in case multiple changes come in
         setTimeout(() => { reloading = false; }, 1000);
       });
     };
 
-    // Use fs.watch; also poll mtime as a fallback on platforms where watch is flaky
-    fs.watch(flag, { persistent: false }, doReload);
+    // Primary: event-based watcher
+    try {
+      fs.watch(flag, { persistent: false }, doReload);
+    } catch (e) {
+      console.error('[codestrap-reloader] fs.watch failed:', e);
+    }
 
+    // Fallback: poll mtime (some platforms can be flaky)
     let lastMtime = 0;
     const tick = () => {
       fs.stat(flag, (err, st) => {
-        if (!err) {
-          const m = st.mtimeMs || st.mtime.getTime();
+        if (!err && st) {
+          const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
           if (m > lastMtime) { lastMtime = m; doReload(); }
         }
       });
     };
     const timer = setInterval(tick, 1500);
-
     context.subscriptions.push({ dispose(){ clearInterval(timer); } });
   } catch (e) {
     console.error('[codestrap-reloader] activate error:', e);
@@ -137,23 +140,22 @@ function deactivate() {}
 module.exports = { activate, deactivate };
 JS
 
-  # Create a marker file expected by VS Code extension loader
-  printf '' > "${EXTDIR}/.codestrap-reloader"
+  # Marker file some loaders look for (harmless otherwise)
+  : > "${EXTDIR}/.codestrap-reloader"
 
-  # Make sure permissions are OK
+  # Permissions + seed flag file
   chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
-  # Seed the flag file
   touch "$FLAGFILE" 2>/dev/null || true
+
+  log "reloader extension staged → ${EXTDIR}"
 }
 
-maybe_reload_vscode_window(){
-  if [ "${NEEDS_RELOAD:-0}" -eq 1 ]; then
-    FLAG="${HOME}/.codestrap/reload.signal"
-    mkdir -p "$(dirname "$FLAG")"
-    # update mtime to trigger the watcher
-    touch "$FLAG" 2>/dev/null || true
-    log "config changed → asked VS Code to reload window"
-  fi
+reload_window(){
+  # unconditionally ask the running code-server window to reload
+  FLAG="${HOME}/.codestrap/reload.signal"
+  mkdir -p "$(dirname "$FLAG")"
+  touch "$FLAG" 2>/dev/null || true
+  log "requested VS Code window reload"
 }
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
@@ -2154,7 +2156,7 @@ config_interactive(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
-  maybe_reload_vscode_window
+  reload_window
 }
 
 # --- hybrid / flag-aware config flow ---
@@ -2226,7 +2228,7 @@ config_hybrid(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
-  maybe_reload_vscode_window
+  reload_window
 }
 
 # ===== github flags handler =====
@@ -2432,6 +2434,7 @@ cli_entry(){
         fi
         log "Bootstrap config completed"
         CTX_TAG=""
+        reload_window
       fi
       ;;
     extensions)
