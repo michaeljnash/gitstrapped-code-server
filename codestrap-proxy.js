@@ -32,7 +32,7 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 .spinner{width:56px;height:56px;border-radius:50%;border:6px solid #334155;border-top-color:#e5e7eb;animation:spin 1s linear infinite;margin-bottom:16px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .small{opacity:.7;font-size:13px;margin-top:8px}
-.subtitle{margin-top: -15px; font-weight: 600;}
+.subtitle{margin-top: -12.5px; font-weight: 750;}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
