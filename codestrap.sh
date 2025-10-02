@@ -62,6 +62,100 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
+ensure_codestrap_reloader_ext(){
+  # Where code-server keeps its extensions (works for code-server and most VS Code Server builds)
+  EXTBASE="${HOME}/.local/share/code-server/extensions"
+  EXTID="codestrap.codestrap-reloader"
+  EXTVERSION="0.0.1"
+  EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
+  FLAGDIR="${HOME}/.codestrap"
+  FLAGFILE="${FLAGDIR}/reload.signal"
+
+  mkdir -p "$EXTDIR" "$FLAGDIR"
+
+  # package.json
+  cat >"${EXTDIR}/package.json" <<'PKG'
+{
+  "name": "codestrap-reloader",
+  "displayName": "Codestrap Reloader",
+  "publisher": "codestrap",
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.70.0" },
+  "activationEvents": [ "*" ],
+  "main": "./extension.js",
+  "contributes": {}
+}
+PKG
+
+  # extension.js
+  cat >"${EXTDIR}/extension.js" <<'JS'
+const vscode = require('vscode');
+const fs = require('fs');
+const path = require('path');
+
+function activate(context) {
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    const flag = path.join(home, '.codestrap', 'reload.signal');
+
+    // Make sure the flag file exists so fs.watch starts cleanly
+    try { fs.closeSync(fs.openSync(flag, 'a')); } catch(e) {}
+
+    // Watch for changes and reload the window
+    let reloading = false;
+    const doReload = () => {
+      if (reloading) return;
+      reloading = true;
+      vscode.commands.executeCommand('workbench.action.reloadWindow').finally(() => {
+        // Safety timer in case multiple changes come in
+        setTimeout(() => { reloading = false; }, 1000);
+      });
+    };
+
+    // Use fs.watch; also poll mtime as a fallback on platforms where watch is flaky
+    fs.watch(flag, { persistent: false }, doReload);
+
+    let lastMtime = 0;
+    const tick = () => {
+      fs.stat(flag, (err, st) => {
+        if (!err) {
+          const m = st.mtimeMs || st.mtime.getTime();
+          if (m > lastMtime) { lastMtime = m; doReload(); }
+        }
+      });
+    };
+    const timer = setInterval(tick, 1500);
+
+    context.subscriptions.push({ dispose(){ clearInterval(timer); } });
+  } catch (e) {
+    console.error('[codestrap-reloader] activate error:', e);
+  }
+}
+
+function deactivate() {}
+
+module.exports = { activate, deactivate };
+JS
+
+  # Create a marker file expected by VS Code extension loader
+  printf '' > "${EXTDIR}/.codestrap-reloader"
+
+  # Make sure permissions are OK
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
+  # Seed the flag file
+  touch "$FLAGFILE" 2>/dev/null || true
+}
+
+maybe_reload_vscode_window(){
+  if [ "${NEEDS_RELOAD:-0}" -eq 1 ]; then
+    FLAG="${HOME}/.codestrap/reload.signal"
+    mkdir -p "$(dirname "$FLAG")"
+    # update mtime to trigger the watcher
+    touch "$FLAG" 2>/dev/null || true
+    log "config changed → asked VS Code to reload window"
+  fi
+}
+
 # ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
 prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
@@ -2060,6 +2154,7 @@ config_interactive(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
+  maybe_reload_vscode_window
 }
 
 # --- hybrid / flag-aware config flow ---
@@ -2131,6 +2226,7 @@ config_hybrid(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
+  maybe_reload_vscode_window
 }
 
 # ===== github flags handler =====
@@ -2404,6 +2500,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[Codestrap reloader]" ensure_codestrap_reloader_ext
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
     safe_run "[Preserve store]"          ensure_preserve_store
