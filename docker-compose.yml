@@ -48,16 +48,18 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=123456r443der37re89544"
+      - "recreate-tag=123456er443der37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
+      CODE_SERVICE: code
       PROXY_PORT: "8080"
       UP_HOST: "code"
       UP_PORT: "8443"
     networks: [appnet]
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - ":8080"
     depends_on:
