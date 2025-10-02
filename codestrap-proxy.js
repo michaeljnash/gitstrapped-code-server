@@ -211,12 +211,43 @@ pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;ove
 kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .chev{display:inline-block;transition:transform .15s ease}
 details[open] .chev{transform:rotate(90deg)}
+
+/* --- dot animation that does NOT reflow --- */
+.tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
+.dots{
+  display:inline-grid;
+  grid-auto-flow:column;
+  grid-template-columns:repeat(3,1ch);
+  width:3ch;               /* fixed width so the line never shifts */
+}
+.dots span{
+  display:inline-block;
+  width:1ch; text-align:left;
+  opacity:0;
+  animation: steps(1,end) 1.2s infinite dotReset;
+}
+/* 1st dot visible the whole cycle */
+.dots span:nth-child(1){ animation-name: dot1; }
+/* 2nd dot becomes visible after 1/3 */
+.dots span:nth-child(2){ animation-name: dot2; }
+/* 3rd dot becomes visible after 2/3 */
+.dots span:nth-child(3){ animation-name: dot3; }
+
+@keyframes dot1 { 0%,100% { opacity:1 } }
+@keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
+@keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
+/* Just a placeholder so we can set defaults above; not used directly */
+@keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-  <div class="small" id="tip"><span id="tip-base">Starting services</span><span id="tip-dots">.</span></div>
+
+  <div class="small tip-line" id="tip">
+    <span id="tip-base">Starting services</span>
+    <span class="dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+  </div>
 
   <div class="container">
     <details class="card" id="logsbox">
@@ -233,15 +264,14 @@ details[open] .chev{transform:rotate(90deg)}
 </div>
 <script>
 (function(){
-  let delay = 600, maxDelay = 5000, tries = 0, dots = 1, dotTimer = null;
+  let delay = 600, maxDelay = 5000, tries = 0;
   const original = location.href;
-  const tipEl = document.getElementById('tip');
-  const dotEl = document.getElementById('tip-dots');
+  const tipBaseEl = document.getElementById('tip-base');
   const logEl = document.getElementById('log');
   const statusEl = document.getElementById('log-status');
   const logsBox = document.getElementById('logsbox');
 
-  function setTip(t){ if(tipEl) tipEl.textContent = t; }
+  function setTipBase(t){ if(tipBaseEl) tipBaseEl.textContent = t; }
   function setStatus(t){ if(statusEl) statusEl.textContent=t; }
   function addLines(t){
     if (!logEl || !t) return;
@@ -249,19 +279,7 @@ details[open] .chev{transform:rotate(90deg)}
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // Dots animation: 1 → 2 → 3 → 1 …
-  function startDots(){
-    if (dotTimer) return;
-    dotTimer = setInterval(()=>{
-      dots = dots % 3 + 1; // 1..3
-      if (dotEl) dotEl.textContent = '.'.repeat(dots);
-    }, 500);
-  }
-  function stopDots(){
-    if (dotTimer) { clearInterval(dotTimer); dotTimer = null; }
-  }
-
-  // Only initialize log streams the first time user opens the details
+  // Live logs: initialize only when opened
   let logsInit = false;
   logsBox?.addEventListener('toggle', ()=>{
     if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
@@ -283,19 +301,17 @@ details[open] .chev{transform:rotate(90deg)}
     } catch (_) { setStatus('unavailable'); }
   });
 
+  // Start polling immediately (dots are CSS-driven and already running)
   async function ping(){
     tries++;
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
       if (res.ok) {
-        stopDots();
-        setTip('Ready! Loading…');
+        setTipBase('Ready! Loading…');
         location.replace(original);
         return;
       }
     }catch(e){}
-    if (tries === 3) startDots();
-    if (tries === 10) { /* subtle hint after a while */ }
     const jitter = Math.random() * 150;
     delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
     setTimeout(ping, delay);
@@ -304,6 +320,7 @@ details[open] .chev{transform:rotate(90deg)}
 })();
 </script>`;
 }
+
 
 /* --------------------- helpers --------------------- */
 
