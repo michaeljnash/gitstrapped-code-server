@@ -1,20 +1,27 @@
-// codestrap-proxy.js — Reverse proxy + splash with LIVE code-server container logs
-// Proxy: HTTP+WS to upstream (code-server) with auto-splash while DOWN.
-// Logs: streams Docker container logs via UNIX socket (no extra deps).
+// codestrap-proxy.js — Reverse proxy + splash (auto-reload) + optional live code-server logs
+//
+// Proxy: HTTP+WS → code-server. Shows a splash while upstream is DOWN and
+// auto-polls to reload when it's UP. Splash has a collapsible "Live logs"
+// section that streams logs from the code container via the Docker socket.
 //
 // ENV:
-//   PROXY_PORT         : public port to listen on (default 8080)
-//   UP_HOST            : upstream host (default "code")
-//   UP_PORT            : upstream port (default 8443)
-//   UP_TIMEOUT_MS      : TCP connect timeout to upstream (default 2500)
-//   LOG_CAP            : in-memory ring buffer for proxy messages (default 500)
-//   DOCKER_SOCK        : path to Docker socket (default "/var/run/docker.sock")
-//   CODE_CONTAINER     : exact container id/name to read logs from (preferred)
-//   CODE_SERVICE       : compose service name to resolve a container (default "code")
+//   PROXY_PORT      : public port to listen on (default 8080)
+//   UP_HOST         : upstream host (default "code")
+//   UP_PORT         : upstream port (default 8443)
+//   UP_TIMEOUT_MS   : TCP connect timeout to upstream (default 2500)
+//   LOG_CAP         : proxy ring-buffer size for internal msgs (default 500)
+//   DOCKER_SOCK     : path to Docker socket (default "/var/run/docker.sock")
+//   CODE_SERVICE    : REQUIRED to enable container logs (compose service name)
+//
+// Notes:
+//   - Mount /var/run/docker.sock:ro into this container to enable live logs.
+//   - If CODE_SERVICE is unset (or socket missing), logs panel remains available
+//     but will show "unavailable" when opened.
 
 const http = require('http');
 const net  = require('net');
 const url  = require('url');
+const fs   = require('fs');
 
 const PROXY_PORT = +(process.env.PROXY_PORT || 8080);
 const UP_HOST    = process.env.UP_HOST || 'code';
@@ -23,8 +30,7 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
 const LOG_CAP    = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK= process.env.DOCKER_SOCK || '/var/run/docker.sock';
-const CODE_CONTAINER = process.env.CODE_CONTAINER || '';
-const CODE_SERVICE   = process.env.CODE_SERVICE || 'code';
+const CODE_SERVICE = process.env.CODE_SERVICE || ''; // no default by design
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
 
@@ -61,13 +67,17 @@ function probeAndNote(cb) {
   });
 }
 
-/* --------------------- Docker logs (snapshot + follow via SSE) -------------- */
+/* --------------------- Docker logs (via socket) ---------------------------- */
 
 const docker = {
   enabled: false,
+  socketPath: DOCKER_SOCK,
   containerId: null,
-  socketPath: DOCKER_SOCK
+  wantLogs: false
 };
+
+try { fs.accessSync(DOCKER_SOCK); docker.enabled = true; } catch(_) { docker.enabled = false; }
+docker.wantLogs = docker.enabled && !!CODE_SERVICE;
 
 function dockerRequest(path, method='GET', headers={}, cb) {
   const req = http.request({ socketPath: docker.socketPath, path, method, headers }, res => cb(null, res));
@@ -80,24 +90,10 @@ function jsonEncodeFilters(obj){
 }
 
 function resolveContainerId(cb) {
-  if (!docker.enabled) return cb(null, null);
+  if (!docker.wantLogs) return cb(new Error('logs disabled'), null);
   if (docker.containerId) return cb(null, docker.containerId);
 
-  if (CODE_CONTAINER) {
-    // Try to inspect by the provided name/ID; if it works, use it.
-    dockerRequest(`/v1.41/containers/${encodeURIComponent(CODE_CONTAINER)}/json`, 'GET', {}, (err, res)=>{
-      if (err || res.statusCode !== 200) return cb(new Error('CODE_CONTAINER not found'));
-      let body=''; res.setEncoding('utf8');
-      res.on('data', c=>body+=c);
-      res.on('end', ()=>{
-        try { const j = JSON.parse(body); docker.containerId = j.Id; cb(null, docker.containerId); }
-        catch(e){ cb(e); }
-      });
-    });
-    return;
-  }
-
-  // Resolve by service name (compose label or partial name match)
+  // Resolve by compose label (preferred) or name contains
   const filters = { label: [`com.docker.compose.service=${CODE_SERVICE}`] };
   const path = `/v1.41/containers/json?all=0&filters=${jsonEncodeFilters(filters)}`;
   dockerRequest(path, 'GET', {}, (err, res)=>{
@@ -108,7 +104,7 @@ function resolveContainerId(cb) {
       try {
         let arr = JSON.parse(body);
         if (!Array.isArray(arr) || arr.length === 0) {
-          // fallback: list all and try name contains
+          // fallback: list all and try name contains /CODE_SERVICE
           dockerRequest(`/v1.41/containers/json?all=0`, 'GET', {}, (e2, r2)=>{
             if (e2) return cb(e2);
             let b2=''; r2.setEncoding('utf8'); r2.on('data',c=>b2+=c);
@@ -120,7 +116,7 @@ function resolveContainerId(cb) {
                   (Array.isArray(c.Names) && c.Names.some(n => n.includes(`/${CODE_SERVICE}`)))
                 );
                 if (hit) { docker.containerId = hit.Id; cb(null, docker.containerId); }
-                else cb(new Error('No container matched CODE_SERVICE'));
+                else cb(new Error('no container matched service'), null);
               } catch(e){ cb(e); }
             });
           });
@@ -133,33 +129,30 @@ function resolveContainerId(cb) {
   });
 }
 
-// Demux Docker log stream if not TTY (8-byte headers), else passthrough.
+// Demux Docker multiplexed logs (non-TTY); falls back to raw if headers look bad.
 function createDockerDemux(onLine) {
   let buf = Buffer.alloc(0);
-  let assumeTTY = false; // flip to true if headers look invalid repeatedly
+  let assumeTTY = false;
   let badHeaders = 0;
 
   function emitText(b) {
-    // Split on newlines and emit lines
     const s = b.toString('utf8');
     s.split(/\r?\n/).forEach(line => { if (line.length) onLine(line); });
   }
 
   return function onChunk(chunk) {
     if (assumeTTY) { emitText(chunk); return; }
-
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 8) {
-      const stream = buf.readUInt8(0);        // 0,1,2
-      const length = buf.readUInt32BE(4);     // payload len
-      if (length > 10 * 1024 * 1024) { // sanity check
+      const stream = buf.readUInt8(0);
+      const length = buf.readUInt32BE(4);
+      if (length > 10 * 1024 * 1024) { // nonsense
         badHeaders++;
         if (badHeaders >= 2) { assumeTTY = true; emitText(buf); buf = Buffer.alloc(0); }
         break;
       }
       if (buf.length < 8 + length) break;
       const payload = buf.subarray(8, 8 + length);
-      // prefix stream marker
       const prefix = stream === 2 ? '[stderr] ' : '';
       payload.toString('utf8').split(/\r?\n/).forEach(line=>{
         if (line.length) onLine(prefix + line);
@@ -169,7 +162,6 @@ function createDockerDemux(onLine) {
   };
 }
 
-// Snapshot logs (tail=N)
 function fetchDockerLogsTail(containerId, tail, cb) {
   const p = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&tail=${tail||200}`;
   dockerRequest(p, 'GET', {}, (err, res)=>{
@@ -181,7 +173,6 @@ function fetchDockerLogsTail(containerId, tail, cb) {
   });
 }
 
-// Follow logs via SSE (since=seconds)
 function streamDockerLogs(containerId, res, sinceSec) {
   const since = Math.max(0, sinceSec|0);
   const path = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&since=${since}`;
@@ -198,15 +189,7 @@ function streamDockerLogs(containerId, res, sinceSec) {
   });
 }
 
-// Detect whether we can use Docker logs
-try {
-  require('fs').accessSync(DOCKER_SOCK);
-  docker.enabled = true;
-} catch(_) {
-  docker.enabled = false;
-}
-
-/* --------------------- splash HTML (with live code logs) -------------------- */
+/* --------------------- splash HTML (logs collapsed by default) -------------- */
 
 function makeSplashHtml() {
   return `<!doctype html><meta charset="utf-8">
@@ -222,10 +205,14 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 .container{width:100%;max-width:1024px;margin-top:18px}
 .card{background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden}
 .head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px}
-h3{margin:0;font-size:14px;font-weight:600}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary{display:flex;align-items:center;gap:.5rem}
+.badge{font-size:11px;opacity:.8;border:1px solid #374151;border-radius:999px;padding:2px 8px}
 pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;overflow:auto;font-size:12px;line-height:1.35;background:#0b1220}
 kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.badge{font-size:11px;opacity:.8}
+.chev{display:inline-block;transition:transform .15s ease}
+details[open] .chev{transform:rotate(90deg)}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
@@ -234,13 +221,13 @@ kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6p
   <div class="small" id="tip">Starting services…</div>
 
   <div class="container">
-    <div class="card">
-      <div class="head">
-        <h3>Live logs: code-server container</h3>
-        <span class="badge" id="log-status">initializing…</span>
-      </div>
+    <details class="card" id="logsbox">
+      <summary class="head">
+        <span><span class="chev">▶</span> Show live logs</span>
+        <span class="badge" id="log-status">hidden</span>
+      </summary>
       <pre id="log"></pre>
-    </div>
+    </details>
     <div class="small" style="opacity:.65;margin-top:10px">
       This page auto-reloads when code-server is ready. You can also press <kbd>⌘/Ctrl</kbd>+<kbd>R</kbd>.
     </div>
@@ -253,6 +240,7 @@ kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6p
   const tipEl = document.getElementById('tip');
   const logEl = document.getElementById('log');
   const statusEl = document.getElementById('log-status');
+  const logsBox = document.getElementById('logsbox');
 
   function setTip(t){ if(tipEl) tipEl.textContent=t; }
   function setStatus(t){ if(statusEl) statusEl.textContent=t; }
@@ -262,21 +250,27 @@ kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6p
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // Seed recent lines (snapshot), then follow via SSE.
-  fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>{
-    if (r.ok) return r.text();
-    throw new Error('snapshot unavailable');
-  }).then(t=>{
-    if (t) addLines(t);
-    setStatus('live');
-  }).catch(()=>{ setStatus('unavailable'); });
+  // Only initialize log streams the first time user opens the details
+  let logsInit = false;
+  logsBox?.addEventListener('toggle', ()=>{
+    if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
+    logsInit = true;
+    setStatus('initializing…');
+    fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>{
+      if (r.ok) return r.text();
+      throw new Error('snapshot unavailable');
+    }).then(t=>{
+      if (t) addLines(t);
+      setStatus('live');
+    }).catch(()=>{ setStatus('unavailable'); });
 
-  try {
-    const es = new EventSource('/__code_events');
-    es.addEventListener('message', ev => { addLines(ev.data + "\\n"); });
-    es.onopen = ()=> setStatus('live');
-    es.onerror = ()=> setStatus('disconnected (retrying…)');
-  } catch (_) { setStatus('unavailable'); }
+    try {
+      const es = new EventSource('/__code_events');
+      es.addEventListener('message', ev => { addLines(ev.data + "\\n"); });
+      es.onopen = ()=> setStatus('live');
+      es.onerror = ()=> setStatus('disconnected (retrying…)');
+    } catch (_) { setStatus('unavailable'); }
+  });
 
   async function ping(){
     tries++;
@@ -322,13 +316,13 @@ const server = http.createServer((req,res)=>{
     });
   }
 
-  // Proxy ring-buffer logs (snapshot) — not shown in UI now, but handy for debug
+  // Proxy logs (ring buffer) snapshot
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Proxy SSE (internal)
+  // Internal SSE for proxy messages (not used by splash UI but handy)
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -345,14 +339,14 @@ const server = http.createServer((req,res)=>{
 
   // Code container logs (snapshot)
   if (u.pathname === '/__code_logs') {
-    if (!docker.enabled) {
+    if (!docker.wantLogs) {
       res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-      return res.end('[codelogs] docker socket not available\n');
+      return res.end('[codelogs] unavailable (docker socket or CODE_SERVICE)\n');
     }
     resolveContainerId((err, id)=>{
       if (err || !id) {
         res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-        return res.end('[codelogs] container not found\n');
+        return res.end('[codelogs] container not found for CODE_SERVICE\n');
       }
       fetchDockerLogsTail(id, 200, (e, text)=>{
         if (e) {
@@ -366,30 +360,17 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Code container logs (follow via SSE)
+  // Code container logs (follow SSE)
   if (u.pathname === '/__code_events') {
-    if (!docker.enabled) {
-      res.writeHead(200, {
-        'content-type': 'text/event-stream; charset=utf-8',
-        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-        'connection': 'keep-alive',
-        'x-accel-buffering': 'no'
-      });
-      res.write(`data: [codelogs] docker socket not available\n\n`);
-      return;
-    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-cache, max-age=0',
+      'connection': 'keep-alive',
+      'x-accel-buffering': 'no'
+    });
+    if (!docker.wantLogs) { res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE)\n\n`); return; }
     resolveContainerId((err, id)=>{
-      res.writeHead(200, {
-        'content-type': 'text/event-stream; charset=utf-8',
-        'cache-control': 'no-store, no-cache, max-age=0',
-        'connection': 'keep-alive',
-        'x-accel-buffering': 'no'
-      });
-      if (err || !id) {
-        res.write(`data: [codelogs] container not found\n\n`);
-        return;
-      }
-      // since now-20s so a little context on connect
+      if (err || !id) { res.write(`data: [codelogs] container not found for CODE_SERVICE\n\n`); return; }
       const since = Math.floor(Date.now()/1000) - 20;
       streamDockerLogs(id, res, since);
       req.on('close', ()=>{ try{res.end();}catch(_){ } });
@@ -469,8 +450,10 @@ server.on('upgrade', (req, client, head)=>{
 
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
   pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${UP_HOST}:${UP_PORT}`);
-  if (docker.enabled) {
-    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — container: ${CODE_CONTAINER||'(resolve via service ' + CODE_SERVICE + ')'}`);
+  if (docker.wantLogs) {
+    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE}`);
+  } else if (docker.enabled) {
+    pushLog(`docker socket present, but CODE_SERVICE not set → logs disabled`);
   } else {
     pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
   }
