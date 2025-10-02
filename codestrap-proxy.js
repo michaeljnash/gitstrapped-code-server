@@ -1,5 +1,4 @@
-// codestrap-proxy.js — HTTP-only reverse proxy to code-server on 8443
-// Env: PROXY_PORT (8080 default), UP_HOST ("code"), UP_PORT (8443)
+// codestrap-proxy.js
 const http = require('http');
 const net  = require('net');
 
@@ -13,12 +12,11 @@ function upstreamAlive(cb){
   const finish = ok => { if (done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
   s.once('connect', ()=>finish(true));
   s.once('error',  ()=>finish(false));
-  s.setTimeout(700,()=>finish(false));
+  s.setTimeout(2500,()=>finish(false));    // was 700ms
 }
 
 const restartingHtml = `<!doctype html><meta charset="utf-8">
-<title>code-server…</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>code-server…</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e7eb}
 .wrap{height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;padding:24px}
 .spinner{width:56px;height:56px;border-radius:50%;border:6px solid #334155;border-top-color:#e5e7eb;animation:spin 1s linear infinite;margin-bottom:16px}
@@ -34,6 +32,7 @@ const server = http.createServer((req,res)=>{
 
   upstreamAlive(ok=>{
     if (!ok) {
+      console.log(`[proxy] upstream DOWN → ${req.method} ${req.url}`);
       res.writeHead(503, {'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'1'});
       return res.end(restartingHtml);
     }
@@ -46,32 +45,22 @@ const server = http.createServer((req,res)=>{
     delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
-    // forward info
+    // preserve Traefik/XFH values
     const xfProto = req.headers['x-forwarded-proto'] || (req.socket?.encrypted ? 'https' : 'http');
     const xfPort  = req.headers['x-forwarded-port']  || (xfProto === 'https' ? '443' : '80');
     headers['x-forwarded-proto'] = xfProto;
     headers['x-forwarded-port']  = xfPort;
     headers['x-forwarded-host']  = req.headers['x-forwarded-host'] || req.headers['host'];
-    // make sure Host reaches upstream (some apps care)
-    headers['host'] = req.headers['host'];
-    if (req.socket?.remoteAddress) {
-      headers['x-forwarded-for'] = headers['x-forwarded-for']
-        ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
-        : req.socket.remoteAddress;
-    }
+    headers['host']              = req.headers['host'];
 
-    const p = http.request({
-      hostname: UP_HOST,
-      port: UP_PORT,
-      path: req.url,
-      method: req.method,
-      headers
-    }, pr => {
+    const p = http.request({ hostname: UP_HOST, port: UP_PORT, path: req.url, method: req.method, headers }, pr => {
+      console.log(`[proxy] ${req.method} ${req.url} → ${pr.statusCode}`);
       res.writeHead(pr.statusCode || 502, pr.headers);
       pr.pipe(res);
     });
 
-    p.on('error', ()=>{
+    p.on('error', (e)=>{
+      console.log(`[proxy] error forwarding ${req.method} ${req.url}: ${e?.message||e}`);
       res.writeHead(503, {'content-type':'text/html; charset=utf-8','cache-control':'no-store','retry-after':'1'});
       res.end(restartingHtml);
     });
@@ -80,10 +69,10 @@ const server = http.createServer((req,res)=>{
   });
 });
 
-// WebSocket proxy (ws → 8443)
+// WebSocket proxy
 server.on('upgrade', (req, client, head)=>{
   upstreamAlive(ok=>{
-    if (!ok) return client.destroy();
+    if (!ok) { console.log('[proxy] WS upstream DOWN'); return client.destroy(); }
 
     const upstream = net.connect(UP_PORT, UP_HOST);
     upstream.on('connect', () => {
@@ -95,8 +84,8 @@ server.on('upgrade', (req, client, head)=>{
       if (head?.length) upstream.write(head);
       upstream.pipe(client); client.pipe(upstream);
     });
-    upstream.on('error', ()=>client.destroy());
-    client.on('error',  ()=>upstream.destroy());
+    upstream.on('error', (e)=>{ console.log('[proxy] WS upstream error:', e?.message||e); client.destroy(); });
+    client.on('error',  ()=> upstream.destroy());
   });
 });
 
