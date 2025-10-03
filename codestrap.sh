@@ -68,13 +68,13 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.2.1"   # bump to force rescan
+  NEW_VER="0.1.6"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
-  # --- force iframe-backed webviews (avoid service worker entirely) ---
+  # --- helper: force iframe-backed webviews (avoids service worker registration) ---
   _force_iframe_webviews(){
     USER_DIR="$HOME/data/User"
     SETTINGS_PATH="$USER_DIR/settings.json"
@@ -83,21 +83,42 @@ ensure_codestrap_extension(){
     if command -v jq >/dev/null 2>&1; then
       tmp="$(mktemp)"
       if [ -s "$SETTINGS_PATH" ]; then
+        # Try parse; if JSONC, strip comments first
         if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-          jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
-            || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+          jq '. + {
+                "webview.experimental.useIframes": true,
+                "workbench.webview.experimental.useIframes": true,
+                "workbench.experimental.useIframeWebview": true
+              }' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
+          || printf '{ "webview.experimental.useIframes": true,
+                       "workbench.webview.experimental.useIframes": true,
+                       "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
         else
           sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" \
-            | jq '. + {"webview.experimental.useIframes": true}' >"$tmp" 2>/dev/null \
-            || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+          | jq '. + {
+                "webview.experimental.useIframes": true,
+                "workbench.webview.experimental.useIframes": true,
+                "workbench.experimental.useIframeWebview": true
+              }' >"$tmp" 2>/dev/null \
+          || printf '{ "webview.experimental.useIframes": true,
+                       "workbench.webview.experimental.useIframes": true,
+                       "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
         fi
       else
-        printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+        printf '{ "webview.experimental.useIframes": true,
+                  "workbench.webview.experimental.useIframes": true,
+                  "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
       fi
+      # Write without replacing inode (keeps watchers happy)
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
       rm -f "$tmp" 2>/dev/null || true
     else
-      [ -s "$SETTINGS_PATH" ] || printf '{ "webview.experimental.useIframes": true }\n' >"$SETTINGS_PATH"
+      # No jq — initialize only if empty/missing
+      if [ ! -s "$SETTINGS_PATH" ]; then
+        printf '{ "webview.experimental.useIframes": true,
+                  "workbench.webview.experimental.useIframes": true,
+                  "workbench.experimental.useIframeWebview": true }\n' >"$SETTINGS_PATH"
+      fi
     fi
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
@@ -110,26 +131,24 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json ---
+    # --- package.json (NOTE: { type: "webview" } is required) ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.2.1",
+  "version": "0.1.6",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.panel",
-    "onCommand:codestrap.openPanel",
-    "onCommand:codestrap.debug.showPanel"
+    "onCommand:codestrap.openPanel"
   ],
   "contributes": {
     "commands": [
-      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" },
-      { "command": "codestrap.debug.showPanel", "title": "Codestrap: Debug Webview Panel" }
+      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -140,60 +159,52 @@ ensure_codestrap_extension(){
       "codestrap": [
         { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
-    },
-    "viewsWelcome": [
-      {
-        "view": "codestrap.panel",
-        "contents": "### Codestrap\nIf this message is visible, the view is registered but has not rendered HTML yet.\n\n- Try **Open Debug Webview Panel** to verify webview rendering.\n\n[Open Debug Webview Panel](command:codestrap.debug.showPanel)"
-      }
-    ]
+    }
   }
 }
 PKG
 
-    # --- icon ---
+    # icon
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
-  <circle cx="12" cy="12" r="9" opacity=".25"/>
-  <path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="12" cy="12" r="9" opacity=".25"/><path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # --- extension.js ---
+    # --- extension.js (reads ./webview.html via VS Code FS API) ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
+const path = require('path');
 
-function activate(context) {
-  try { vscode.window.showInformationMessage('Codestrap extension activated'); } catch (_) {}
-
-  // WebviewView provider (sidebar)
+function activate(context){
   const provider = {
-    resolveWebviewView(webviewView) {
-      webviewView.webview.options = { enableScripts: false, retainContextWhenHidden: true };
-      webviewView.title = 'Codestrap';
-      webviewView.webview.html = getHtml('WebviewView');
+    async resolveWebviewView(view){
+      const webview = view.webview;
+      webview.options = {
+        enableScripts: true,
+        // allow loading local resources from the extension folder
+        localResourceRoots: [vscode.Uri.file(context.extensionPath)]
+      };
+
+      // Read the webview.html file shipped with the extension
+      const htmlUri = vscode.Uri.file(path.join(context.extensionPath, 'webview.html'));
+      const htmlBytes = await vscode.workspace.fs.readFile(htmlUri);
+      let html = Buffer.from(htmlBytes).toString('utf8');
+
+      // (If you later add local assets, convert their src/href using asWebviewUri)
+
+      webview.html = html;
     }
   };
+
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
-      webviewOptions: { retainContextWhenHidden: true }
-    })
+    vscode.window.registerWebviewViewProvider(
+      'codestrap.panel',
+      provider,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
   );
 
-  // Command to open a regular WebviewPanel tab — for debugging
-  context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.debug.showPanel', () => {
-      const panel = vscode.window.createWebviewPanel(
-        'codestrap.debug',
-        'Codestrap Debug Webview',
-        vscode.ViewColumn.Active,
-        { enableScripts: false, retainContextWhenHidden: true }
-      );
-      panel.webview.html = getHtml('WebviewPanel');
-    })
-  );
-
-  // Command to focus our view container
   context.subscriptions.push(
     vscode.commands.registerCommand('codestrap.openPanel', () =>
       vscode.commands.executeCommand('workbench.view.extension.codestrap')
@@ -201,42 +212,43 @@ function activate(context) {
   );
 }
 
-function getHtml(kind){
-  const now = new Date().toISOString();
-  return `<!DOCTYPE html>
+function deactivate(){}
+module.exports = { activate, deactivate };
+JS
+
+    # --- webview.html (simple proof-of-life UI) ---
+    cat >"${NEW_DIR}/webview.html" <<'HTML'
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:;">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; img-src data: blob: *; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'nonce-boot';">
+  <meta name="color-scheme" content="dark">
   <title>Codestrap</title>
   <style>
     :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
-    html,body{height:100%;background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
-    .wrap{min-height:100%;display:flex}
-    .card{margin:12px;background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px;max-width:580px}
-    h2{margin:0 0 6px 0;font-size:16px}
-    p{margin:0 0 6px 0}
-    .ts{opacity:.7;font-size:12px}
-    .border{border:2px dashed #3b82f6;border-radius:10px;padding:8px;margin-top:8px}
+    html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
+    .wrap{padding:12px}
+    .card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
+    h2{margin:0 0 6px 0}
+    .muted{color:var(--muted)}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h2>✅ ${kind} Loaded</h2>
-      <p class="ts">Rendered at: ${now}</p>
-      <div class="border">If you can see this, HTML painted successfully.</div>
+      <h2>Codestrap panel</h2>
+      <p class="muted">Loaded from <code>webview.html</code>. If you can see this, webviews are healthy and the view provider is registered.</p>
+      <p>Time: <code id="t"></code></p>
     </div>
   </div>
+  <script nonce="boot">
+    document.getElementById('t').textContent = new Date().toISOString();
+  </script>
 </body>
-</html>`;
-}
-
-function deactivate(){}
-
-module.exports = { activate, deactivate };
-JS
+</html>
+HTML
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
@@ -249,6 +261,7 @@ JS
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
+  # Force iframe webviews to avoid service worker auth issues
   _force_iframe_webviews
 
   # Nudge window reload so the extension is re-scanned
@@ -256,7 +269,6 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
-
 
 
 reload_window(){
