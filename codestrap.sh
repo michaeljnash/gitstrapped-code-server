@@ -63,39 +63,16 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_extension(){
-  # Candidate extension roots
+  # Where to place the extension (write to a few common roots)
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.2.0"   # bump to force rescan
+  NEW_VER="0.3.0"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
-
-  # Stop forcing iframe webviews
-  _disable_iframe_webviews(){
-    USER_DIR="$HOME/data/User"
-    SETTINGS_PATH="$USER_DIR/settings.json"
-    mkdir -p "$USER_DIR" || true
-    if command -v jq >/dev/null 2>&1; then
-      tmp_in="$(mktemp)"; tmp_out="$(mktemp)"
-      if [ -s "$SETTINGS_PATH" ] && jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-        cp "$SETTINGS_PATH" "$tmp_in"
-      elif [ -s "$SETTINGS_PATH" ]; then
-        sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" >"$tmp_in" || printf '{}' >"$tmp_in"
-      else
-        printf '{}' >"$tmp_in"
-      fi
-      jq 'del(.["webview.experimental.useIframes"])
-          | del(.["workbench.webview.experimental.useIframes"])
-          | del(.["workbench.experimental.useIframeWebview"])' "$tmp_in" >"$tmp_out" 2>/dev/null || cp "$tmp_in" "$tmp_out"
-      if [ -f "$SETTINGS_PATH" ]; then cat "$tmp_out" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp_out" "$SETTINGS_PATH"; fi
-      rm -f "$tmp_in" "$tmp_out" 2>/dev/null || true
-    fi
-    chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
-  }
 
   write_one(){
     _base="$1"
@@ -104,28 +81,30 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json: container + TreeView + WebviewView ---
+    # ---------- package.json (TreeView-only UI) ----------
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.2.0",
-  "description": "Codestrap sidebar with a basic TreeView and a WebviewView",
+  "version": "0.3.0",
+  "description": "Codestrap sidebar: TreeView-only UI with buttons and inputs that drive your CLI in a terminal.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.tree",
-    "onView:codestrap.webview",
     "onCommand:codestrap.openContainer",
-    "onCommand:codestrap.showHelloPanel"
+    "onCommand:codestrap.addItem",
+    "onCommand:codestrap.runItem",
+    "onCommand:codestrap.editItem",
+    "onCommand:codestrap.deleteItem",
+    "onCommand:codestrap.refresh",
+    "onCommand:codestrap.runQuickPick",
+    "onCommand:codestrap.runAdhoc",
+    "onCommand:codestrap.openTerminal"
   ],
   "contributes": {
-    "commands": [
-      { "command": "codestrap.openContainer", "title": "Codestrap: Open Sidebar" },
-      { "command": "codestrap.showHelloPanel", "title": "Codestrap: Show Hello Webview Panel" }
-    ],
     "viewsContainers": {
       "activitybar": [
         { "id": "codestrap", "title": "Codestrap", "icon": "icon.svg" }
@@ -133,114 +112,233 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.tree", "name": "Codestrap Items" },
-        { "id": "codestrap.webview", "name": "Codestrap Webview", "type": "webview" }
+        { "id": "codestrap.tree", "name": "Codestrap Items" }
+      ]
+    },
+    "commands": [
+      { "command": "codestrap.openContainer", "title": "Codestrap: Open Sidebar" },
+      { "command": "codestrap.addItem", "title": "Codestrap: Add Item" },
+      { "command": "codestrap.runItem", "title": "Codestrap: Run Item" },
+      { "command": "codestrap.editItem", "title": "Codestrap: Edit Item" },
+      { "command": "codestrap.deleteItem", "title": "Codestrap: Delete Item" },
+      { "command": "codestrap.refresh", "title": "Codestrap: Refresh Items" },
+      { "command": "codestrap.runQuickPick", "title": "Codestrap: Run… (Quick Pick)" },
+      { "command": "codestrap.runAdhoc", "title": "Codestrap: Run Ad-hoc Command" },
+      { "command": "codestrap.openTerminal", "title": "Codestrap: Show Terminal" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "codestrap.addItem",     "when": "view == codestrap.tree", "group": "navigation@1" },
+        { "command": "codestrap.runQuickPick","when": "view == codestrap.tree", "group": "navigation@2" },
+        { "command": "codestrap.runAdhoc",    "when": "view == codestrap.tree", "group": "navigation@3" },
+        { "command": "codestrap.openTerminal","when": "view == codestrap.tree", "group": "navigation@4" },
+        { "command": "codestrap.refresh",     "when": "view == codestrap.tree", "group": "navigation@9" }
+      ],
+      "view/item/context": [
+        { "command": "codestrap.runItem",   "when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@1" },
+        { "command": "codestrap.editItem",  "when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@2" },
+        { "command": "codestrap.deleteItem","when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@3" }
       ]
     },
     "viewsWelcome": [
       {
         "view": "codestrap.tree",
-        "contents": "If you see a list of items here, the container works.\n\nTry **Codestrap: Show Hello Webview Panel** from the Command Palette."
-      },
-      {
-        "view": "codestrap.webview",
-        "contents": "If this stays blank, run **Codestrap: Open Sidebar**."
+        "contents": "Add items with the **Add** button. Hover an item to **Run / Edit / Delete**. Use **Run…** to pick and run quickly, or **Run Ad-hoc** to execute any command.\n"
       }
     ]
   }
 }
 PKG
 
-    # icon
+    # ---------- icon ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
-  <circle cx="12" cy="12" r="9" opacity=".25"/>
-  <path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af" role="img" aria-label="Codestrap">
+  <circle cx="12" cy="12" r="9" opacity=".15"/>
+  <path d="M7 12h10M12 7v10" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # --- extension.js: tree provider + webview provider + debug panel ---
+    # ---------- extension.js ----------
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
-/** Minimal HTML for the webview content */
-function helloHtml(label){
-  return `<!doctype html>
-<html><head><meta charset="utf-8"><title>${label}</title></head>
-<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto;background:#0f172a;color:#e5e7eb">
-  <div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">
-    <h2 style="margin:0 0 6px 0;font-weight:600">${label}</h2>
-    <p style="margin:0;opacity:.9">hello from Codestrap (webview)</p>
-  </div>
-</body></html>`;
+/** simple persisted store (globalState) */
+class Store {
+  constructor(ctx) {
+    this.ctx = ctx;
+    this.key = 'codestrap.items.v1';
+    if (!this.ctx.globalState.get(this.key)) {
+      // Seed with a few examples – replace with your CLI commands
+      this.ctx.globalState.update(this.key, [
+        { label: 'Status',   detail: 'Show status',   cmd: 'codestrap status' },
+        { label: 'Up',       detail: 'Start services',cmd: 'codestrap up' },
+        { label: 'Down',     detail: 'Stop services', cmd: 'codestrap down' }
+      ]);
+    }
+  }
+  get items() { return this.ctx.globalState.get(this.key) || []; }
+  set items(v) { return this.ctx.globalState.update(this.key, v); }
 }
 
-/** Simple tree data provider that always returns static items */
-class CodestrapTreeProvider {
-  getTreeItem(element){ return element; }
-  getChildren(element){
-    if (element) return [];
-    return [
-      new vscode.TreeItem('Item A', vscode.TreeItemCollapsibleState.None),
-      new vscode.TreeItem('Item B', vscode.TreeItemCollapsibleState.None),
-      new vscode.TreeItem('Item C', vscode.TreeItemCollapsibleState.None)
-    ];
+/** Tree items */
+class CodestrapItem extends vscode.TreeItem {
+  constructor(model) {
+    super(model.label, vscode.TreeItemCollapsibleState.None);
+    this.model = model;
+    this.description = model.detail || model.cmd;
+    this.tooltip = `Command: ${model.cmd}`;
+    this.contextValue = 'codestrap.item';
+    this.iconPath = new vscode.ThemeIcon('terminal');
+    this.command = { command: 'codestrap.runItem', title: 'Run', arguments: [this] };
   }
 }
 
-/** WebviewView provider */
-const webviewProvider = {
-  resolveWebviewView(view){
-    const webview = view.webview;
-    webview.options = { enableScripts: true }; // no iframes forced
-    webview.html = helloHtml('Codestrap Webview');
+class TreeProvider {
+  constructor(store) {
+    this.store = store;
+    this._emitter = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._emitter.event;
   }
-};
+  getTreeItem(el) { return el; }
+  getChildren() { return this.store.items.map(i => new CodestrapItem(i)); }
+  refresh(){ this._emitter.fire(); }
+}
+
+/** One shared terminal that we reuse so commands run in a stable shell */
+class Term {
+  static get(name='Codestrap'){
+    if (!this._term || this._termExit) {
+      this._term = vscode.window.createTerminal({ name });
+      this._termExit = false;
+      vscode.window.onDidCloseTerminal(t => {
+        if (t === this._term) this._termExit = true;
+      });
+    }
+    return this._term;
+  }
+  static show(){ this.get().show(true); }
+  static send(cmd, cwd){
+    const t = this.get();
+    if (cwd) t.sendText(`cd "${cwd}"`, true);
+    t.sendText(cmd, true);
+    this.show();
+  }
+}
+
+/** helpers */
+async function pickWorkspaceCwd(){
+  const folders = vscode.workspace.workspaceFolders || [];
+  if (folders.length <= 1) return folders[0]?.uri.fsPath;
+  const pick = await vscode.window.showQuickPick(
+    folders.map(f => ({ label: f.name, description: f.uri.fsPath, fsPath: f.uri.fsPath })),
+    { placeHolder: 'Pick a working directory (optional)' }
+  );
+  return pick?.fsPath;
+}
 
 function activate(context){
-  console.log('[codestrap] activate');
+  console.log('[codestrap] TreeView UI activated');
+  const store = new Store(context);
+  const provider = new TreeProvider(store);
+  context.subscriptions.push(vscode.window.registerTreeDataProvider('codestrap.tree', provider));
 
-  // Register tree provider (this must always paint something)
-  const treeProvider = new CodestrapTreeProvider();
-  context.subscriptions.push(
-    vscode.window.registerTreeDataProvider('codestrap.tree', treeProvider)
-  );
+  // open container (activity bar)
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openContainer', () =>
+    vscode.commands.executeCommand('workbench.view.extension.codestrap')
+  ));
 
-  // Register webview provider for the second view
-  context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('codestrap.webview', webviewProvider, {
-      webviewOptions: { retainContextWhenHidden: true }
-    })
-  );
+  // refresh
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => provider.refresh()));
 
-  // Reveal our container
-  context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.openContainer', async () => {
-      await vscode.commands.executeCommand('workbench.view.extension.codestrap');
-    })
-  );
+  // add item
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.addItem', async () => {
+    const label = await vscode.window.showInputBox({ prompt: 'Label for this action', validateInput:v=>!v.trim()?'Required':'' });
+    if (!label) return;
+    const cmd = await vscode.window.showInputBox({ prompt: 'Shell command to run (will be sent to a terminal)', value: 'codestrap ' });
+    if (!cmd) return;
+    const detail = await vscode.window.showInputBox({ prompt: 'Optional description', value: '' }) || '';
+    const cwd = await pickWorkspaceCwd();
+    const items = store.items;
+    items.push({ label, detail, cmd, cwd });
+    await store.items = items;
+    provider.refresh();
+  }));
 
-  // Debug helper: open a standalone WebviewPanel to rule out sidebar issues
-  context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.showHelloPanel', () => {
-      const panel = vscode.window.createWebviewPanel(
-        'codestrapHello',
-        'Codestrap Hello',
-        vscode.ViewColumn.Active,
-        { enableScripts: true }
-      );
-      panel.webview.html = helloHtml('Codestrap Hello Panel');
-    })
-  );
+  // run item
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.runItem', async (item) => {
+    const m = item?.model || item; // tolerate being passed the raw model
+    if (!m || !m.cmd) return;
+    vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Running: ${m.label}`, cancellable: false }, async () => {
+      Term.send(m.cmd, m.cwd);
+    });
+  }));
+
+  // edit item
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.editItem', async (item) => {
+    const items = store.items.slice();
+    const idx = items.findIndex(x => x.label === item.model.label && x.cmd === item.model.cmd);
+    if (idx < 0) return;
+    const label = await vscode.window.showInputBox({ prompt: 'Edit label', value: items[idx].label }) || items[idx].label;
+    const cmd   = await vscode.window.showInputBox({ prompt: 'Edit command', value: items[idx].cmd }) || items[idx].cmd;
+    const detail= await vscode.window.showInputBox({ prompt: 'Edit description', value: items[idx].detail || '' }) || '';
+    const cwdPick = await vscode.window.showQuickPick(
+      [{label:'Keep current', description: items[idx].cwd || '(none)', val: items[idx].cwd},
+       {label:'Choose workspace folder…', description:'Pick a folder to run in', val:'__pick__'},
+       {label:'Unset working directory', description:'Run in default shell CWD', val:''}],
+      { placeHolder: 'Working directory' }
+    );
+    let cwd = items[idx].cwd;
+    if (cwdPick) {
+      if (cwdPick.val === '__pick__') cwd = await pickWorkspaceCwd();
+      else cwd = cwdPick.val;
+    }
+    items[idx] = { label, cmd, detail, cwd };
+    await store.items = items;
+    provider.refresh();
+  }));
+
+  // delete item
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.deleteItem', async (item) => {
+    const accept = await vscode.window.showWarningMessage(`Delete "${item.model.label}"?`, { modal:true }, 'Delete');
+    if (accept !== 'Delete') return;
+    const items = store.items.filter(x => !(x.label === item.model.label && x.cmd === item.model.cmd));
+    await store.items = items;
+    provider.refresh();
+  }));
+
+  // run quick pick
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.runQuickPick', async ()=>{
+    const items = store.items;
+    if (!items.length) { vscode.window.showInformationMessage('No Codestrap items yet. Use Add.'); return; }
+    const pick = await vscode.window.showQuickPick(items.map(i => ({
+      label: i.label,
+      description: i.detail || i.cmd,
+      detail: i.cwd ? `cwd: ${i.cwd}` : '',
+      model: i
+    })), { placeHolder: 'Select an action to run' });
+    if (pick) Term.send(pick.model.cmd, pick.model.cwd);
+  }));
+
+  // run arbitrary ad-hoc
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.runAdhoc', async ()=>{
+    const cmd = await vscode.window.showInputBox({ prompt:'Enter a shell command to run', value:'codestrap ' });
+    if (!cmd) return;
+    const cwd = await pickWorkspaceCwd();
+    Term.send(cmd, cwd);
+  }));
+
+  // show terminal
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', ()=>Term.show()));
 }
 
 function deactivate(){}
+
 module.exports = { activate, deactivate };
 JS
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
-    echo "[codestrap] wrote extension → $NEW_DIR"
+    echo "[codestrap] wrote TreeView-only extension → $NEW_DIR"
   }
 
   # Write to all candidate extension roots
@@ -249,9 +347,7 @@ JS
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  _disable_iframe_webviews
-
-  # Trigger reload/rescan
+  # Signal the outer app to reload/scan extensions
   mkdir -p "$FLAGDIR" || true
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
