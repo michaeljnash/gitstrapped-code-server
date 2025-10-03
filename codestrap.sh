@@ -63,12 +63,11 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_extension(){
-  # Candidate extension roots (write to all; whichever VS Code scans will work)
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.2"   # bump to force rescan
+  NEW_VER="0.1.3"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -81,17 +80,18 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json: minimal + correct wiring ---
+    # --- package.json: NOTE the "type": "webview" ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.2",
-  "description": "Minimal webview view provider for Codestrap.",
+  "version": "0.1.3",
+  "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onView:codestrap.panel",
     "onCommand:codestrap.openPanel"
   ],
@@ -106,84 +106,60 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.panel", "name": "Codestrap" }
+        { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
     }
   }
 }
 PKG
 
-    # --- icon.svg (tiny placeholder) ---
+    # icon
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
   <circle cx="12" cy="12" r="9" opacity=".25"/><path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # --- extension.js: super-minimal, robust registration ---
+    # extension.js
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
 function activate(context) {
-  try {
-    const provider = {
-      resolveWebviewView(webviewView/*, ctx, token */) {
-        try {
-          webviewView.webview.options = { enableScripts: true };
-          webviewView.webview.html = `<!doctype html>
+  const provider = {
+    resolveWebviewView(webviewView) {
+      webviewView.webview.options = { enableScripts: true };
+      webviewView.webview.html = `<!doctype html>
 <meta charset="utf-8">
 <title>Codestrap</title>
 <style>
   :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
   html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
-  .wrap{padding:12px}
-  .card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
+  .wrap{padding:12px}.card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
 </style>
 <div class="wrap">
   <div class="card">
     <h2>✅ Codestrap panel loaded</h2>
-    <p>If you can see this, the webview view provider is registered for <code>codestrap.panel</code>.</p>
-    <button id="ping">Ping</button>
-    <pre id="out"></pre>
+    <p>This is a <b>webview view</b>. The "no data provider" error should be gone.</p>
   </div>
-</div>
-<script>
-  const vscode = acquireVsCodeApi();
-  const out = document.getElementById('out');
-  document.getElementById('ping').onclick = () => {
-    vscode.postMessage({kind:'ping', when: Date.now()});
-  };
-  window.addEventListener('message', (e)=>{
-    if(e.data && e.data.kind==='pong'){
-      out.textContent += 'PONG: ' + new Date(e.data.when).toISOString() + '\\n';
+</div>`;
     }
-  });
-</script>`;
-        } catch (e) {
-          console.error('[codestrap] error in resolveWebviewView:', e);
-        }
-      }
-    };
+  };
 
-    // Register the provider (critical for avoiding "no data provider" error)
-    context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
-        webviewOptions: { retainContextWhenHidden: true }
-      })
-    );
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    })
+  );
 
-    // Convenience command to reveal the view container
-    context.subscriptions.push(
-      vscode.commands.registerCommand('codestrap.openPanel', () => {
-        vscode.commands.executeCommand('workbench.view.extension.codestrap');
-      })
-    );
-  } catch (e) {
-    console.error('[codestrap] activate() failed:', e);
-  }
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codestrap.openPanel', () => {
+      vscode.commands.executeCommand('workbench.view.extension.codestrap');
+    })
+  );
 }
 
-function deactivate() {}
+function deactivate(){}
+
 module.exports = { activate, deactivate };
 JS
 
@@ -198,11 +174,12 @@ JS
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Nudge the window to reload so the extension is scanned
+  # Nudge window reload so the extension is re-scanned
   mkdir -p "$FLAGDIR" || true
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
+
 
 
 reload_window(){
