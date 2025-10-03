@@ -2957,7 +2957,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
-    safe_run "[Marketplace]"             ensure_openvsx_registry
+    #safe_run "[Marketplace]"             ensure_openvsx_registry
     safe_run "[Codestrap Extension]"     ensure_codestrap_extension
     safe_run "[Codestrap UI] Overwrite   login page" write_codestrap_login
     safe_run "[CLI shim]"                install_cli_shim
