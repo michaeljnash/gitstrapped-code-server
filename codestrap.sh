@@ -68,22 +68,19 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.20"   # bump to force rescan
+  NEW_VER="0.2.0"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
-  # --- helper: ensure we are NOT forcing iframe webviews anymore ---
+  # Stop forcing iframe webviews
   _disable_iframe_webviews(){
     USER_DIR="$HOME/data/User"
     SETTINGS_PATH="$USER_DIR/settings.json"
     mkdir -p "$USER_DIR" || true
-
-    # If jq is present, cleanly remove the three keys we previously added.
     if command -v jq >/dev/null 2>&1; then
       tmp_in="$(mktemp)"; tmp_out="$(mktemp)"
-      # Load (tolerate JSONC by stripping comments if necessary)
       if [ -s "$SETTINGS_PATH" ] && jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
         cp "$SETTINGS_PATH" "$tmp_in"
       elif [ -s "$SETTINGS_PATH" ]; then
@@ -93,13 +90,10 @@ ensure_codestrap_extension(){
       fi
       jq 'del(.["webview.experimental.useIframes"])
           | del(.["workbench.webview.experimental.useIframes"])
-          | del(.["workbench.experimental.useIframeWebview"])' "$tmp_in" >"$tmp_out" 2>/dev/null \
-      || cp "$tmp_in" "$tmp_out"
-      # write back without replacing inode
+          | del(.["workbench.experimental.useIframeWebview"])' "$tmp_in" >"$tmp_out" 2>/dev/null || cp "$tmp_in" "$tmp_out"
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp_out" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp_out" "$SETTINGS_PATH"; fi
       rm -f "$tmp_in" "$tmp_out" 2>/dev/null || true
     fi
-
     chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
   }
 
@@ -110,26 +104,27 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json (explicit webview view) ---
+    # --- package.json: container + TreeView + WebviewView ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.20",
-  "description": "Codestrap side panel (no-iframe)",
+  "version": "0.2.0",
+  "description": "Codestrap sidebar with a basic TreeView and a WebviewView",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:codestrap.panel",
-    "onCommand:codestrap.openPanel",
-    "onCommand:codestrap.showHello"
+    "onView:codestrap.tree",
+    "onView:codestrap.webview",
+    "onCommand:codestrap.openContainer",
+    "onCommand:codestrap.showHelloPanel"
   ],
   "contributes": {
     "commands": [
-      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" },
-      { "command": "codestrap.showHello", "title": "Codestrap: Show Hello Panel" }
+      { "command": "codestrap.openContainer", "title": "Codestrap: Open Sidebar" },
+      { "command": "codestrap.showHelloPanel", "title": "Codestrap: Show Hello Webview Panel" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -138,14 +133,18 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
+        { "id": "codestrap.tree", "name": "Codestrap Items" },
+        { "id": "codestrap.webview", "name": "Codestrap Webview", "type": "webview" }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "codestrap.panel",
-        "contents": "If this stays blank, run **Codestrap: Open Panel**.\n\n(We also register a temporary command **Codestrap: Show Hello Panel** to prove webviews render.)",
-        "when": "view == codestrap.panel"
+        "view": "codestrap.tree",
+        "contents": "If you see a list of items here, the container works.\n\nTry **Codestrap: Show Hello Webview Panel** from the Command Palette."
+      },
+      {
+        "view": "codestrap.webview",
+        "contents": "If this stays blank, run **Codestrap: Open Sidebar**."
       }
     ]
   }
@@ -155,70 +154,82 @@ PKG
     # icon
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
-  <circle cx="12" cy="12" r="9" opacity=".25"/><path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="12" cy="12" r="9" opacity=".25"/>
+  <path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # --- extension.js: NO IFRAMES setting, enableScripts: true, ultra-minimal HTML ---
+    # --- extension.js: tree provider + webview provider + debug panel ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
+/** Minimal HTML for the webview content */
 function helloHtml(label){
   return `<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>${label}</title></head>
+<html><head><meta charset="utf-8"><title>${label}</title></head>
 <body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto;background:#0f172a;color:#e5e7eb">
   <div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">
     <h2 style="margin:0 0 6px 0;font-weight:600">${label}</h2>
-    <p style="margin:0;opacity:.9">hello from Codestrap (no iframe)</p>
+    <p style="margin:0;opacity:.9">hello from Codestrap (webview)</p>
   </div>
-</body>
-</html>`;
+</body></html>`;
 }
+
+/** Simple tree data provider that always returns static items */
+class CodestrapTreeProvider {
+  getTreeItem(element){ return element; }
+  getChildren(element){
+    if (element) return [];
+    return [
+      new vscode.TreeItem('Item A', vscode.TreeItemCollapsibleState.None),
+      new vscode.TreeItem('Item B', vscode.TreeItemCollapsibleState.None),
+      new vscode.TreeItem('Item C', vscode.TreeItemCollapsibleState.None)
+    ];
+  }
+}
+
+/** WebviewView provider */
+const webviewProvider = {
+  resolveWebviewView(view){
+    const webview = view.webview;
+    webview.options = { enableScripts: true }; // no iframes forced
+    webview.html = helloHtml('Codestrap Webview');
+  }
+};
 
 function activate(context){
   console.log('[codestrap] activate');
 
-  // Side bar webview view
-  const provider = {
-    resolveWebviewView(view){
-      console.log('[codestrap] resolveWebviewView');
-      const webview = view.webview;
-      webview.options = {
-        enableScripts: true,
-        // NOTE: not forcing iframe; let VS Code choose default (service-worker path)
-      };
-      webview.html = helloHtml('Codestrap panel');
-    }
-  };
-
+  // Register tree provider (this must always paint something)
+  const treeProvider = new CodestrapTreeProvider();
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(
-      'codestrap.panel',
-      provider,
-      { webviewOptions: { retainContextWhenHidden: true } }
-    )
+    vscode.window.registerTreeDataProvider('codestrap.tree', treeProvider)
   );
 
-  // Command to focus our view container
+  // Register webview provider for the second view
   context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.openPanel', async () => {
-      try{
-        await vscode.commands.executeCommand('workbench.view.extension.codestrap');
-      }catch(e){ console.error('[codestrap] openPanel error', e); }
+    vscode.window.registerWebviewViewProvider('codestrap.webview', webviewProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
     })
   );
 
-  // Extra: open a dedicated WebviewPanel (debug helper) so we can see content even if the contributed view isn’t visible yet.
+  // Reveal our container
   context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.showHello', () => {
+    vscode.commands.registerCommand('codestrap.openContainer', async () => {
+      await vscode.commands.executeCommand('workbench.view.extension.codestrap');
+    })
+  );
+
+  // Debug helper: open a standalone WebviewPanel to rule out sidebar issues
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codestrap.showHelloPanel', () => {
       const panel = vscode.window.createWebviewPanel(
         'codestrapHello',
         'Codestrap Hello',
         vscode.ViewColumn.Active,
         { enableScripts: true }
       );
-      panel.webview.html = helloHtml('Codestrap Hello');
+      panel.webview.html = helloHtml('Codestrap Hello Panel');
     })
   );
 }
@@ -226,17 +237,6 @@ function activate(context){
 function deactivate(){}
 module.exports = { activate, deactivate };
 JS
-
-    # (Optional) static HTML file — not required by the provider, kept for inspection.
-    cat >"${NEW_DIR}/webview.html" <<'HTML'
-<!doctype html><meta charset="utf-8"><title>Codestrap (static)</title>
-<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto;background:#0f172a;color:#e5e7eb">
-  <div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">
-    <h2 style="margin:0 0 6px 0;font-weight:600">Codestrap (static)</h2>
-    <p style="margin:0;opacity:.9">This file is not used directly; the provider injects inline HTML.</p>
-  </div>
-</body>
-HTML
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
@@ -249,10 +249,9 @@ HTML
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Make sure we are NOT forcing iframe webviews anymore
   _disable_iframe_webviews
 
-  # Ask the running window to reload/rescan extensions
+  # Trigger reload/rescan
   mkdir -p "$FLAGDIR" || true
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
