@@ -68,7 +68,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.6"   # bump to force rescan
+  NEW_VER="0.1.7"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -86,7 +86,7 @@ ensure_codestrap_extension(){
         jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
           || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
       else
-        # strip comments if JSONC, then try again
+        # strip comments if JSONC
         if [ -s "$SETTINGS_PATH" ] && ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
           sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" \
             | jq '. + {"webview.experimental.useIframes": true}' >"$tmp" 2>/dev/null \
@@ -95,14 +95,11 @@ ensure_codestrap_extension(){
           printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
         fi
       fi
-      # write without inode swap (keeps file watchers happy)
+      # keep inode for file watchers
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
       rm -f "$tmp" 2>/dev/null || true
     else
-      # no jq — initialize minimal settings only if missing/empty
-      if [ ! -s "$SETTINGS_PATH" ]; then
-        printf '{ "webview.experimental.useIframes": true }\n' >"$SETTINGS_PATH"
-      fi
+      [ -s "$SETTINGS_PATH" ] || printf '{ "webview.experimental.useIframes": true }\n' >"$SETTINGS_PATH"
     fi
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
@@ -115,13 +112,13 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json (VALID JSON, no comments) ---
+    # --- package.json (VALID JSON) ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -141,7 +138,7 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.panel", "name": "Codestrap" }
+        { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
     }
   }
@@ -237,6 +234,8 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
+
+
 
 reload_window(){
   # unconditionally ask the running code-server window to reload
