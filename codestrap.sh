@@ -62,72 +62,319 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
-ensure_codestrap_reloader_ext(){
-  # Where code-server/VS Code keeps its extensions.
-  # You noted this should be overridable and usually resolves to: /config/extensions
+ensure_codestrap_extension(){
+  # Where VS Code/code-server keeps its extensions (defaults to /config/extensions)
   EXTBASE="${CODESTRAP_EXTBASE:-$HOME/extensions}"
 
-  EXTID="codestrap.codestrap-reloader"
-  EXTVERSION="0.0.1"
-  EXTDIR="${EXTBASE}/${EXTID}-${EXTVERSION}"
+  NEW_ID="codestrap.codestrap"
+  NEW_VER="0.1.0"
+  NEW_DIR="${EXTBASE}/${NEW_ID}-${NEW_VER}"
+
+  OLD_ID="codestrap.codestrap-reloader"
+  OLD_VER="0.0.1"
+  OLD_DIR="${EXTBASE}/${OLD_ID}-${OLD_VER}"
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
+  mkdir -p "$EXTBASE" "$NEW_DIR" "$FLAGDIR"
 
-  # Create dirs
-  mkdir -p "$EXTDIR" "$FLAGDIR" "$EXTBASE"
+  # Remove the old reloader extension folder if present (safe cleanup)
+  [ -d "$OLD_DIR" ] && rm -rf "$OLD_DIR" 2>/dev/null || true
 
   # --- package.json ---
-  cat >"${EXTDIR}/package.json" <<'PKG'
+  cat >"${NEW_DIR}/package.json" <<'PKG'
 {
-  "name": "codestrap-reloader",
-  "displayName": "Codestrap Reloader",
+  "name": "codestrap",
+  "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "Codestrap UI for password, config merge, extensions sync, GitHub bootstrap — plus window reload watcher.",
   "engines": { "vscode": "^1.70.0" },
-  "activationEvents": [ "*" ],
+  "activationEvents": ["*", "onView:codestrap.panel"],
   "main": "./extension.js",
-  "contributes": {}
+  "contributes": {
+    "commands": [
+      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" },
+      { "command": "codestrap.reloadWindow", "title": "Codestrap: Reload Window" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codestrap",
+          "title": "Codestrap",
+          "icon": "$(tools)"
+        }
+      ]
+    },
+    "views": {
+      "codestrap": [
+        {
+          "type": "webview",
+          "id": "codestrap.panel",
+          "name": "Codestrap"
+        }
+      ]
+    }
+  }
 }
 PKG
 
-  # --- extension.js (debounced, no startup loop) ---
-  cat >"${EXTDIR}/extension.js" <<'JS'
+  # --- extension.js ---
+  cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
+const cp = require('child_process');
+
+function findCli() {
+  // Prefer the shim we installed; fallbacks if PATH lacks it
+  const candidates = [
+    'codestrap',
+    '/usr/local/bin/codestrap',
+    // final fallback: call the bootstrap script in CLI mode directly
+    '/custom-cont-init.d/10-codestrap.sh'
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.existsSync(c)) return c;
+    } catch {}
+  }
+  return 'codestrap'; // hope it's on PATH
+}
+
+function spawnCli(args, onData, onExit) {
+  const exe = findCli();
+  const realArgs = [];
+
+  if (exe.endsWith('/10-codestrap.sh')) {
+    // Force CLI mode when calling the raw script
+    realArgs.push('cli');
+  }
+  realArgs.push(...args);
+
+  const child = cp.spawn(exe, realArgs, {
+    env: process.env,
+    cwd: process.env.HOME || '/',
+    shell: false
+  });
+
+  child.stdout.on('data', (d) => onData(d.toString()));
+  child.stderr.on('data', (d) => onData(d.toString()));
+  child.on('close', (code) => onExit(code ?? 0));
+
+  return child;
+}
+
+function makeHtml(context, view) {
+  const cspSource = view.webview.cspSource;
+  const nonce = String(Math.random()).slice(2);
+  return `<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource} data:; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'nonce-${nonce}';">
+<meta name="color-scheme" content="dark">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codestrap</title>
+<style>
+  :root{
+    --bg:#0f172a; --panel:#111827; --br:#374151; --txt:#e5e7eb; --muted:#9ca3af; --accent:#3f83f8;
+  }
+  html,body{background:var(--bg); color:var(--txt); margin:0; font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
+  .wrap{padding:12px}
+  .card{background:var(--panel); border:1px solid var(--br); border-radius:12px; padding:12px; box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  h1{font-size:16px; margin:0 0 8px}
+  label{display:block; margin:8px 0 4px; color:var(--muted)}
+  select,input,textarea,button{
+    background:#0b1220; color:var(--txt); border:1px solid #4b5563; border-radius:10px; padding:8px 10px;
+  }
+  select,input,textarea{width:100%;}
+  button{cursor:pointer}
+  .row{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+  .row > *{flex:1 1 auto}
+  .actions{display:flex; gap:8px; margin-top:10px}
+  .btn{background:#1f2937; border:1px solid var(--br)}
+  .btn:hover{background:#111827}
+  .muted{color:var(--muted)}
+  .out{white-space:pre-wrap; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; background:#0b1220; border:1px solid #4b5563; border-radius:10px; padding:10px; height:240px; overflow:auto; margin-top:10px}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .checkrow{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  .checkrow label{margin:0}
+</style>
+<div class="wrap">
+  <div class="card">
+    <h1>Codestrap</h1>
+    <div class="row">
+      <label>
+        Task
+        <select id="task">
+          <option value="passwd">Change password (codestrap passwd)</option>
+          <option value="config-all">Config merge: all (codestrap config)</option>
+          <option value="config-advanced">Config merge: advanced</option>
+          <option value="ext-install-missing">Extensions: install missing</option>
+          <option value="ext-sync">Extensions: sync (uninstall missing + install all)</option>
+          <option value="github-auto">GitHub bootstrap: env/auto</option>
+          <option value="github-custom">GitHub bootstrap: custom</option>
+          <option value="reload">Reload Window</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="config-advanced" style="display:none; margin-top:8px">
+      <div class="checkrow">
+        <label><input type="checkbox" id="cfgSettings" checked> settings.json</label>
+        <label><input type="checkbox" id="cfgKeyb" checked> keybindings.json</label>
+        <label><input type="checkbox" id="cfgTasks" checked> tasks.json</label>
+        <label><input type="checkbox" id="cfgExt" checked> extensions.json</label>
+      </div>
+    </div>
+
+    <div id="github-custom" style="display:none; margin-top:8px">
+      <div class="grid2">
+        <label>Username <input id="ghUser" placeholder="GITHUB_USERNAME"></label>
+        <label>Name <input id="ghName" placeholder="commit display name (optional)"></label>
+        <label>Token <input id="ghToken" placeholder="GITHUB_TOKEN (classic)"></label>
+        <label>Email <input id="ghEmail" placeholder="optional, auto-resolved if blank"></label>
+      </div>
+      <label>Repos (comma-separated: owner/repo[#branch], or URL)
+        <input id="ghRepos" placeholder="org/repo, me/thing#main">
+      </label>
+      <div class="checkrow">
+        <label><input type="checkbox" id="ghPull" checked> Pull existing repos</label>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="run">Run</button>
+      <button class="btn" id="clear">Clear Output</button>
+    </div>
+    <div class="out" id="out"></div>
+    <div class="muted" style="margin-top:6px">
+      Tip: This panel runs the <code>codestrap</code> CLI inside the container and streams output here.
+    </div>
+  </div>
+</div>
+
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+
+const elTask = document.getElementById('task');
+const elOut = document.getElementById('out');
+const elRun = document.getElementById('run');
+const elClear = document.getElementById('clear');
+const secCfg = document.getElementById('config-advanced');
+const secGh  = document.getElementById('github-custom');
+
+function show(id, on){ document.getElementById(id).style.display = on ? '' : 'none'; }
+function append(line){
+  elOut.textContent += line;
+  elOut.scrollTop = elOut.scrollHeight;
+}
+function pick(){
+  const v = elTask.value;
+  show('config-advanced', v==='config-advanced');
+  show('github-custom',  v==='github-custom');
+}
+pick();
+elTask.addEventListener('change', pick);
+
+elRun.addEventListener('click', () => {
+  const task = elTask.value;
+  let payload = { kind: 'run', args: [] };
+
+  if (task === 'reload') {
+    vscode.postMessage({ kind: 'reload' });
+    return;
+  }
+
+  if (task === 'passwd') {
+    payload.args = ['passwd'];
+  } else if (task === 'config-all') {
+    payload.args = ['config']; // interactive defaults → merge all in non-tty env per script logic
+  } else if (task === 'config-advanced') {
+    const s = document.getElementById('cfgSettings').checked ? 'true' : 'false';
+    const k = document.getElementById('cfgKeyb').checked ? 'true' : 'false';
+    const t = document.getElementById('cfgTasks').checked ? 'true' : 'false';
+    const e = document.getElementById('cfgExt').checked ? 'true' : 'false';
+    payload.args = ['config', '--settings', s, '--keybindings', k, '--tasks', t, '--extensions', e];
+  } else if (task === 'ext-install-missing') {
+    payload.args = ['extensions', '--install', 'missing'];
+  } else if (task === 'ext-sync') {
+    payload.args = ['extensions', '--uninstall', 'missing', '--install', 'all'];
+  } else if (task === 'github-auto') {
+    payload.args = ['github', '--auto'];
+  } else if (task === 'github-custom') {
+    const u = document.getElementById('ghUser').value.trim();
+    const n = document.getElementById('ghName').value.trim();
+    const tok = document.getElementById('ghToken').value.trim();
+    const mail = document.getElementById('ghEmail').value.trim();
+    const repos = document.getElementById('ghRepos').value.trim();
+    const pull = document.getElementById('ghPull').checked ? 'true' : 'false';
+    const args = ['github'];
+    if (u)   args.push('-u', u);
+    if (tok) args.push('-t', tok);
+    if (n)   args.push('-n', n);
+    if (mail)args.push('-e', mail);
+    if (repos) args.push('-r', repos);
+    args.push('-p', pull);
+    payload.args = args;
+  }
+
+  elRun.disabled = true;
+  vscode.postMessage(payload);
+});
+
+elClear.addEventListener('click', () => { elOut.textContent = ''; });
+
+window.addEventListener('message', (event) => {
+  const { kind, line, done, code } = event.data || {};
+  if (kind === 'log' && typeof line === 'string') {
+    append(line);
+  }
+  if (done) {
+    append(`\n\n[Codestrap] done (exit ${code})\n`);
+    elRun.disabled = false;
+  }
+});
+</script>`;
+}
+
+class CodestrapViewProvider {
+  constructor(context) { this.context = context; }
+  resolveWebviewView(view) {
+    this.view = view;
+    view.webview.options = { enableScripts: true };
+    view.webview.html = makeHtml(this.context, view);
+    view.webview.onDidReceiveMessage((msg) => {
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.kind === 'reload') {
+        vscode.commands.executeCommand('workbench.action.reloadWindow');
+        return;
+      }
+      if (msg.kind === 'run' && Array.isArray(msg.args)) {
+        const child = spawnCli(msg.args,
+          (s) => this.view?.webview.postMessage({ kind:'log', line: s.toString() }),
+          (code) => this.view?.webview.postMessage({ done:true, code: code|0 })
+        );
+      }
+    });
+  }
+}
 
 function activate(context) {
+  // Reload watcher (same behavior as the old reloader)
   const home = process.env.HOME || process.env.USERPROFILE || '';
   const flag = path.join(home, '.codestrap', 'reload.signal');
-
-  // Ensure the flag exists so we can stat/watch it reliably
-  try { fs.closeSync(fs.openSync(flag, 'a')); } catch (_) {}
-
-  // Initialize lastMtime to the CURRENT mtime so we don't reload right away
+  try { fs.closeSync(fs.openSync(flag, 'a')); } catch {}
   let lastMtime = 0;
-  try {
-    const st = fs.statSync(flag);
-    lastMtime = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
-  } catch (_) {}
-
-  let reloading = false;
-  let lastReloadAt = 0;
-
+  try { const st = fs.statSync(flag); lastMtime = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0; } catch {}
+  let reloading = false, lastReloadAt = 0;
   const maybeReload = () => {
     if (reloading) return;
     const now = Date.now();
-    // Debounce: ignore events that happen within 1.5s of a reload request
     if (now - lastReloadAt < 1500) return;
-    reloading = true;
-    lastReloadAt = now;
-
+    reloading = true; lastReloadAt = now;
     vscode.commands.executeCommand('workbench.action.reloadWindow')
-      .catch(() => {})
       .finally(() => setTimeout(() => { reloading = false; }, 1000));
   };
-
-  // Watcher that verifies mtime actually advanced
   let watcher;
   try {
     watcher = fs.watch(flag, { persistent: false }, () => {
@@ -135,40 +382,46 @@ function activate(context) {
         const st = fs.statSync(flag);
         const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
         if (m > lastMtime) { lastMtime = m; maybeReload(); }
-      } catch (_) {}
+      } catch {}
     });
-  } catch (_) {}
-
-  // Poll fallback (some FS/backends have flaky fs.watch)
+  } catch {}
   const timer = setInterval(() => {
     try {
       const st = fs.statSync(flag);
       const m = st.mtimeMs || (st.mtime && st.mtime.getTime()) || 0;
       if (m > lastMtime) { lastMtime = m; maybeReload(); }
-    } catch (_) {}
+    } catch {}
   }, 2000);
+  context.subscriptions.push({ dispose(){ try{watcher && watcher.close();}catch{} clearInterval(timer);} });
 
-  context.subscriptions.push({
-    dispose() {
-      try { watcher && watcher.close(); } catch (_) {}
-      clearInterval(timer);
-    }
-  });
+  // Commands + side panel
+  const provider = new CodestrapViewProvider(context);
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('codestrap.panel', provider, { webviewOptions: { retainContextWhenHidden: true } })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codestrap.openPanel', () => {
+      vscode.commands.executeCommand('workbench.view.extension.codestrap'); // switch to container
+      // then reveal the webview view
+      try { vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup'); } catch {}
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codestrap.reloadWindow', () => {
+      vscode.commands.executeCommand('workbench.action.reloadWindow');
+    })
+  );
 }
 
 function deactivate() {}
 module.exports = { activate, deactivate };
 JS
 
-  # Optional marker that some loaders look for (harmless if unused)
-  : > "${EXTDIR}/.codestrap-reloader"
-
-  # Permissions (avoid .obsolete EACCES issues)
+  # permissions
   chown -R "${PUID:-1000}:${PGID:-1000}" "$EXTBASE" 2>/dev/null || true
   chmod -R u+rwX,go+rX "$EXTBASE" 2>/dev/null || true
 
-  # Seed the flag file but DO NOT touch its mtime here (avoids immediate reload loop)
-  # If the file didn't exist, we already created it via the extension on first run; ensure here too.
+  # Ensure flag file exists (but don't bump mtime here)
   : > "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
@@ -644,6 +897,22 @@ password_change_interactive(){
   CTX_TAG="$_OLD_CTX_TAG"
   sleep 2
   reload_window
+}
+
+password_set_noninteractive(){
+  # usage: codestrap passwd --set "<password>"
+  PW="$1"
+  command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
+  [ -n "$PW" ] || { CTX_TAG="[Change password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ ${#PW} -ge 8 ] || { CTX_TAG="[Change password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
+  salt="$(head -c16 /dev/urandom | base64)"
+  hash="$(printf '%s' "$PW" | argon2 "$salt" -id -e)"
+  printf '%s' "$hash" > "$PASS_HASH_PATH"; chmod 644 "$PASS_HASH_PATH" || true; chown "${PUID}:${PGID}" "$PASS_HASH_PATH" 2>/dev/null || true
+  log "password updated (non-interactive)"
+  trigger_restart_gate
+  sleep 1
+  reload_window
+  return 0
 }
 
 # ===== github bootstrap internals =====
@@ -2590,6 +2859,16 @@ cli_entry(){
     --auto|-a)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
+      shift || true
+      if [ "${1:-}" = "--set" ]; then
+        shift || true
+        PW="${1:-}"
+        [ -n "$PW" ] || { CTX_TAG="[Change password]"; err "--set requires a password argument"; CTX_TAG=""; exit 2; }
+        CTX_TAG="[Change password]"
+        password_set_noninteractive "$PW" || exit 1
+        CTX_TAG=""
+        exit 0
+      fi
       bootstrap_banner
       CTX_TAG="[Change password]"
       password_change_interactive
@@ -2649,7 +2928,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
-    safe_run "[Codestrap reloader]"      ensure_codestrap_reloader_ext
+    safe_run "[Codestrap Extension]"     ensure_codestrap_extension
     safe_run "[Codestrap UI] Overwrite   login page" write_codestrap_login
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Default password]"        init_default_password
