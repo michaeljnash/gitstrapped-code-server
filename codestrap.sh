@@ -109,7 +109,6 @@ ensure_codestrap_extension(){
     "views": {
       "codestrap": [
         {
-          "type": "webview",
           "id": "codestrap.panel",
           "name": "Codestrap"
         }
