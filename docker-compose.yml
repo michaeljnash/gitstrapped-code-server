@@ -37,7 +37,7 @@ services:
       - traefik.enable=true
       - traefik.docker.network=dokploy-network
 
-      - traefik.http.routers.codeserver.rule=Host(`michaeljnash.dev.meridianlogisticsgroup.com`)
+      - traefik.http.routers.codeserver.rule=Host(`123.michaeljnash.dev.meridianlogisticsgroup.com`)
       - traefik.http.routers.codeserver.entrypoints=web
       - traefik.http.routers.codeserver.tls=true
       - traefik.http.services.codeserver.loadbalancer.server.port=8443
