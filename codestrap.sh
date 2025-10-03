@@ -68,7 +68,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.6"   # bump to force rescan
+  NEW_VER="0.1.7"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -83,7 +83,6 @@ ensure_codestrap_extension(){
     if command -v jq >/dev/null 2>&1; then
       tmp="$(mktemp)"
       if [ -s "$SETTINGS_PATH" ]; then
-        # Try parse; if JSONC, strip comments first
         if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
           jq '. + {
                 "webview.experimental.useIframes": true,
@@ -109,11 +108,9 @@ ensure_codestrap_extension(){
                   "workbench.webview.experimental.useIframes": true,
                   "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
       fi
-      # Write without replacing inode (keeps watchers happy)
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
       rm -f "$tmp" 2>/dev/null || true
     else
-      # No jq — initialize only if empty/missing
       if [ ! -s "$SETTINGS_PATH" ]; then
         printf '{ "webview.experimental.useIframes": true,
                   "workbench.webview.experimental.useIframes": true,
@@ -131,13 +128,13 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json (NOTE: { type: "webview" } is required) ---
+    # --- package.json (includes viewsWelcome so the pane never looks "empty") ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -159,7 +156,14 @@ ensure_codestrap_extension(){
       "codestrap": [
         { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "codestrap.panel",
+        "contents": "Codestrap is loading…\n\nIf this message stays, click **Codestrap: Open Panel** in the Command Palette.",
+        "when": "view == codestrap.panel"
+      }
+    ]
   }
 }
 PKG
@@ -171,29 +175,52 @@ PKG
 </svg>
 SVG
 
-    # --- extension.js (reads ./webview.html via VS Code FS API) ---
+    # --- extension.js: load webview.html and inject a CSP-safe nonce ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 const path = require('path');
 
+function nonce() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let s = ''; for (let i=0;i<32;i++) s += chars.charAt(Math.floor(Math.random()*chars.length));
+  return s;
+}
+
 function activate(context){
+  console.log('[codestrap] activate');
   const provider = {
     async resolveWebviewView(view){
+      console.log('[codestrap] resolveWebviewView');
       const webview = view.webview;
       webview.options = {
         enableScripts: true,
-        // allow loading local resources from the extension folder
         localResourceRoots: [vscode.Uri.file(context.extensionPath)]
       };
-
-      // Read the webview.html file shipped with the extension
-      const htmlUri = vscode.Uri.file(path.join(context.extensionPath, 'webview.html'));
-      const htmlBytes = await vscode.workspace.fs.readFile(htmlUri);
-      let html = Buffer.from(htmlBytes).toString('utf8');
-
-      // (If you later add local assets, convert their src/href using asWebviewUri)
-
-      webview.html = html;
+      const n = nonce();
+      try {
+        const fileUri = vscode.Uri.file(path.join(context.extensionPath, 'webview.html'));
+        const raw = await vscode.workspace.fs.readFile(fileUri);
+        let html = Buffer.from(raw).toString('utf8');
+        // Inject CSP pieces
+        html = html.replace(/{{cspSource}}/g, webview.cspSource).replace(/{{nonce}}/g, n);
+        webview.html = html;
+      } catch (e) {
+        console.error('[codestrap] failed to load webview.html, using fallback:', e);
+        webview.html = `<!doctype html>
+<meta charset="utf-8">
+<title>Codestrap (fallback)</title>
+<style>
+  :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
+  html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
+  .wrap{padding:12px}.card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
+  h2{margin:0 0 6px 0}
+</style>
+<div class="wrap"><div class="card">
+  <h2>Codestrap panel</h2>
+  <p class="muted">Fallback HTML rendered. If you can read this, the provider is registered and the webview is alive.</p>
+  <p>Time: <code>${new Date().toISOString()}</code></p>
+</div></div>`;
+      }
     }
   };
 
@@ -216,14 +243,14 @@ function deactivate(){}
 module.exports = { activate, deactivate };
 JS
 
-    # --- webview.html (simple proof-of-life UI) ---
+    # --- webview.html template (CSP placeholders are replaced at runtime) ---
     cat >"${NEW_DIR}/webview.html" <<'HTML'
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src data: blob: *; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'nonce-boot';">
+        content="default-src 'none'; img-src {{cspSource}} https: data:; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
   <meta name="color-scheme" content="dark">
   <title>Codestrap</title>
   <style>
@@ -239,11 +266,11 @@ JS
   <div class="wrap">
     <div class="card">
       <h2>Codestrap panel</h2>
-      <p class="muted">Loaded from <code>webview.html</code>. If you can see this, webviews are healthy and the view provider is registered.</p>
+      <p class="muted">Loaded from <code>webview.html</code> with a CSP nonce.</p>
       <p>Time: <code id="t"></code></p>
     </div>
   </div>
-  <script nonce="boot">
+  <script nonce="{{nonce}}">
     document.getElementById('t').textContent = new Date().toISOString();
   </script>
 </body>
