@@ -261,8 +261,8 @@ class CodestrapViewProvider{
   }
 }
 function activate(context){
-  const fs=require('fs'), p=require('path');
-  const home=process.env.HOME||process.env.USERPROFILE||'', flag=p.join(home,'.codestrap','reload.signal');
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const flag = path.join(home, '.codestrap', 'reload.signal');
   try{ fs.closeSync(fs.openSync(flag,'a')); }catch{}
   let last=0, reloading=false, lastAt=0;
   const maybeReload=()=>{ if(reloading) return; const now=Date.now(); if(now-lastAt<1500) return; reloading=true; lastAt=now;
