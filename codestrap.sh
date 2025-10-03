@@ -68,7 +68,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.1"   # bump to force rescan
+  NEW_VER="0.1.2"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -81,25 +81,23 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # package.json
+    # --- package.json: minimal + correct wiring ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.1",
-  "description": "Codestrap UI for password, config merge, extensions sync, GitHub bootstrap — plus window reload watcher.",
+  "version": "0.1.2",
+  "description": "Minimal webview view provider for Codestrap.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
-    "onStartupFinished",
-    "onCommand:codestrap.openPanel",
-    "onView:codestrap.panel"
+    "onView:codestrap.panel",
+    "onCommand:codestrap.openPanel"
   ],
   "contributes": {
     "commands": [
-      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" },
-      { "command": "codestrap.reloadWindow", "title": "Codestrap: Reload Window" }
+      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -115,168 +113,78 @@ ensure_codestrap_extension(){
 }
 PKG
 
-    # icon.svg
+    # --- icon.svg (tiny placeholder) ---
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
-  <path d="M21.7 13.35a6.5 6.5 0 01-8.99-8.99l.29-.29a.75.75 0 00-.85-1.21A7.99 7.99 0 1019.64 17.85a.75.75 0 00-1.21-.85l-.29.29z"/>
-  <path d="M14.5 5.5l4 4-7.79 7.79a2 2 0 01-1.41.58H7a1 1 0 01-1-1v-2.3a2 2 0 01.58-1.42L14.5 5.5z"/>
+  <circle cx="12" cy="12" r="9" opacity=".25"/><path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # extension.js (unchanged from your current, works fine)
+    # --- extension.js: super-minimal, robust registration ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
-const fs = require('fs');
-const path = require('path');
-const cp = require('child_process');
 
-function findCli() {
-  const candidates = ['codestrap','/usr/local/bin/codestrap','/custom-cont-init.d/10-codestrap.sh'];
-  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch {} }
-  return 'codestrap';
-}
-function spawnCli(args, onData, onExit) {
-  const exe = findCli(); const realArgs = [];
-  if (exe.endsWith('/10-codestrap.sh')) realArgs.push('cli');
-  realArgs.push(...args);
-  const child = cp.spawn(exe, realArgs, { env: process.env, cwd: process.env.HOME || '/', shell: false });
-  child.stdout.on('data', d => onData(String(d)));
-  child.stderr.on('data', d => onData(String(d)));
-  child.on('close', code => onExit(code ?? 0));
-  return child;
-}
-function html(view) {
-  const csp = view.webview.cspSource; const nonce = String(Math.random()).slice(2);
-  return `<!doctype html>
+function activate(context) {
+  try {
+    const provider = {
+      resolveWebviewView(webviewView/*, ctx, token */) {
+        try {
+          webviewView.webview.options = { enableScripts: true };
+          webviewView.webview.html = `<!doctype html>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${csp} data:; style-src ${csp} 'unsafe-inline'; script-src ${csp} 'nonce-${nonce}';">
-<meta name="color-scheme" content="dark"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Codestrap</title>
 <style>
-  :root{--bg:#0f172a;--panel:#111827;--br:#374151;--txt:#e5e7eb;--muted:#9ca3af}
+  :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
   html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
-  .wrap{padding:12px}.card{background:#111827;border:1px solid var(--br);border-radius:12px;padding:12px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
-  h1{font-size:16px;margin:0 0 8px}label{display:block;margin:8px 0 4px;color:var(--muted)}
-  select,input,textarea,button{background:#0b1220;color:var(--txt);border:1px solid #4b5563;border-radius:10px;padding:8px 10px}
-  select,input,textarea{width:100%}.btn{background:#1f2937;border:1px solid var(--br);cursor:pointer}
-  .btn:hover{background:#111827}.out{white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;background:#0b1220;border:1px solid #4b5563;border-radius:10px;padding:10px;height:240px;overflow:auto;margin-top:10px}
-  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.actions{display:flex;gap:8px;margin-top:10px}
+  .wrap{padding:12px}
+  .card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
 </style>
 <div class="wrap">
   <div class="card">
-    <h1>Codestrap</h1>
-    <div class="row">
-      <label>Task
-        <select id="task">
-          <option value="passwd">Change password</option>
-          <option value="config-all">Config merge: all</option>
-          <option value="config-advanced">Config merge: advanced</option>
-          <option value="ext-install-missing">Extensions: install missing</option>
-          <option value="ext-sync">Extensions: sync</option>
-          <option value="github-auto">GitHub bootstrap: env/auto</option>
-          <option value="github-custom">GitHub bootstrap: custom</option>
-          <option value="reload">Reload Window</option>
-        </select>
-      </label>
-    </div>
-    <div id="config-advanced" style="display:none;margin-top:8px">
-      <label><input type="checkbox" id="cfgSettings" checked> settings.json</label>
-      <label><input type="checkbox" id="cfgKeyb" checked> keybindings.json</label>
-      <label><input type="checkbox" id="cfgTasks" checked> tasks.json</label>
-      <label><input type="checkbox" id="cfgExt" checked> extensions.json</label>
-    </div>
-    <div id="github-custom" style="display:none;margin-top:8px">
-      <label>Username <input id="ghUser"></label>
-      <label>Name <input id="ghName"></label>
-      <label>Token <input id="ghToken"></label>
-      <label>Email <input id="ghEmail"></label>
-      <label>Repos <input id="ghRepos" placeholder="owner/repo, me/app#main"></label>
-      <label><input type="checkbox" id="ghPull" checked> Pull existing repos</label>
-    </div>
-    <div class="actions">
-      <button class="btn" id="run">Run</button>
-      <button class="btn" id="clear">Clear Output</button>
-    </div>
-    <div class="out" id="out"></div>
-    <div style="color:#9ca3af;margin-top:6px">Tip: runs <code>codestrap</code> inside the container.</div>
+    <h2>✅ Codestrap panel loaded</h2>
+    <p>If you can see this, the webview view provider is registered for <code>codestrap.panel</code>.</p>
+    <button id="ping">Ping</button>
+    <pre id="out"></pre>
   </div>
 </div>
-<script nonce="${nonce}">
-const vscode = acquireVsCodeApi();
-const elTask=document.getElementById('task'), elOut=document.getElementById('out');
-const elRun=document.getElementById('run'), elClear=document.getElementById('clear');
-function show(id,on){ document.getElementById(id).style.display = on ? '' : 'none'; }
-function pick(){ const v=elTask.value; show('config-advanced', v==='config-advanced'); show('github-custom', v==='github-custom'); }
-pick(); elTask.addEventListener('change', pick);
-function log(s){ elOut.textContent += s; elOut.scrollTop = elOut.scrollHeight; }
-elRun.addEventListener('click', ()=>{
-  const t=elTask.value; let payload={kind:'run', args:[]};
-  if (t==='reload'){ vscode.postMessage({kind:'reload'}); return; }
-  if (t==='passwd'){ payload.args=['passwd']; }
-  else if (t==='config-all'){ payload.args=['config']; }
-  else if (t==='config-advanced'){
-    const s=document.getElementById('cfgSettings').checked?'true':'false';
-    const k=document.getElementById('cfgKeyb').checked?'true':'false';
-    const ta=document.getElementById('cfgTasks').checked?'true':'false';
-    const e=document.getElementById('cfgExt').checked?'true':'false';
-    payload.args=['config','--settings',s,'--keybindings',k,'--tasks',ta,'--extensions',e];
-  } else if (t==='ext-install-missing'){ payload.args=['extensions','--install','missing']; }
-  else if (t==='ext-sync'){ payload.args=['extensions','--uninstall','missing','--install','all']; }
-  else if (t==='github-auto'){ payload.args=['github','--auto']; }
-  else if (t==='github-custom'){
-    const a=['github'];
-    const v=(id)=>document.getElementById(id).value.trim();
-    if(v('ghUser')) a.push('-u',v('ghUser'));
-    if(v('ghToken')) a.push('-t',v('ghToken'));
-    if(v('ghName')) a.push('-n',v('ghName'));
-    if(v('ghEmail')) a.push('-e',v('ghEmail'));
-    if(v('ghRepos')) a.push('-r',v('ghRepos'));
-    a.push('-p', document.getElementById('ghPull').checked?'true':'false');
-    payload.args=a;
-  }
-  elRun.disabled=true; vscode.postMessage(payload);
-});
-elClear.addEventListener('click',()=>{ elOut.textContent=''; });
-window.addEventListener('message',(m)=>{
-  if (m.data?.kind==='log' && typeof m.data.line==='string') log(m.data.line);
-  if (m.data?.done){ log(`\n\n[Codestrap] done (exit ${m.data.code})\n`); elRun.disabled=false; }
-});
+<script>
+  const vscode = acquireVsCodeApi();
+  const out = document.getElementById('out');
+  document.getElementById('ping').onclick = () => {
+    vscode.postMessage({kind:'ping', when: Date.now()});
+  };
+  window.addEventListener('message', (e)=>{
+    if(e.data && e.data.kind==='pong'){
+      out.textContent += 'PONG: ' + new Date(e.data.when).toISOString() + '\\n';
+    }
+  });
 </script>`;
-}
-class CodestrapViewProvider{
-  constructor(context){ this.context=context; }
-  resolveWebviewView(view){
-    this.view=view; view.webview.options={enableScripts:true};
-    view.webview.html = html(view);
-    view.webview.onDidReceiveMessage((msg)=>{
-      if (!msg || typeof msg !== 'object') return;
-      if (msg.kind==='reload'){ vscode.commands.executeCommand('workbench.action.reloadWindow'); return; }
-      if (msg.kind==='run' && Array.isArray(msg.args)){
-        spawnCli(msg.args,
-          s=>this.view?.webview.postMessage({kind:'log', line:String(s)}),
-          code=>this.view?.webview.postMessage({done:true, code:code|0})
-        );
+        } catch (e) {
+          console.error('[codestrap] error in resolveWebviewView:', e);
+        }
       }
-    });
+    };
+
+    // Register the provider (critical for avoiding "no data provider" error)
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
+        webviewOptions: { retainContextWhenHidden: true }
+      })
+    );
+
+    // Convenience command to reveal the view container
+    context.subscriptions.push(
+      vscode.commands.registerCommand('codestrap.openPanel', () => {
+        vscode.commands.executeCommand('workbench.view.extension.codestrap');
+      })
+    );
+  } catch (e) {
+    console.error('[codestrap] activate() failed:', e);
   }
 }
-function activate(context){
-  const home = process.env.HOME || process.env.USERPROFILE || '';
-  const flag = path.join(home, '.codestrap', 'reload.signal');
-  try{ fs.closeSync(fs.openSync(flag,'a')); }catch{}
-  let last=0, reloading=false, lastAt=0;
-  const maybeReload=()=>{ if(reloading) return; const now=Date.now(); if(now-lastAt<1500) return; reloading=true; lastAt=now;
-    vscode.commands.executeCommand('workbench.action.reloadWindow').finally(()=>setTimeout(()=>{reloading=false;},1000)); };
-  try{ fs.watch(flag,{persistent:false},()=>{ try{ const m=(fs.statSync(flag).mtimeMs)||0; if(m>last){last=m; maybeReload();} }catch{} }); }catch{}
-  const t=setInterval(()=>{ try{ const m=(fs.statSync(flag).mtimeMs)||0; if(m>last){last=m; maybeReload();} }catch{} },2000);
-  context.subscriptions.push({dispose(){ try{}catch{} clearInterval(t); }});
-  const provider=new CodestrapViewProvider(context);
-  context.subscriptions.push(vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {webviewOptions:{retainContextWhenHidden:true}}));
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openPanel', ()=>vscode.commands.executeCommand('workbench.view.extension.codestrap')));
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.reloadWindow', ()=>vscode.commands.executeCommand('workbench.action.reloadWindow')));
-}
-function deactivate(){}
-module.exports={activate,deactivate};
+
+function deactivate() {}
+module.exports = { activate, deactivate };
 JS
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
