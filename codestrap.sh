@@ -68,7 +68,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.7"   # bump to force rescan
+  NEW_VER="0.1.9"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -82,20 +82,19 @@ ensure_codestrap_extension(){
 
     if command -v jq >/dev/null 2>&1; then
       tmp="$(mktemp)"
-      if [ -s "$SETTINGS_PATH" ] && jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-        jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
-          || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
-      else
-        # strip comments if JSONC
-        if [ -s "$SETTINGS_PATH" ] && ! jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+      if [ -s "$SETTINGS_PATH" ]; then
+        if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+          jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
+            || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+        else
           sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" \
             | jq '. + {"webview.experimental.useIframes": true}' >"$tmp" 2>/dev/null \
             || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
-        else
-          printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
         fi
+      else
+        printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
       fi
-      # keep inode for file watchers
+      # preserve inode so file watchers stay happy
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
       rm -f "$tmp" 2>/dev/null || true
     else
@@ -112,13 +111,13 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json (VALID JSON) ---
+    # --- package.json ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -153,11 +152,19 @@ PKG
 </svg>
 SVG
 
-    # --- extension.js (static, CSP-safe HTML; no scripts required) ---
+    # --- extension.js ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
+// Minimal WebviewView provider.
+// NOTE: Runs in code-server's Node extension host, so require('vscode') is OK.
 const vscode = require('vscode');
 
 function activate(context) {
+  try {
+    vscode.window.showInformationMessage('Codestrap extension activated');
+  } catch (_) {
+    // ignore if toast can't show
+  }
+
   const provider = {
     resolveWebviewView(webviewView) {
       webviewView.webview.options = {
@@ -183,6 +190,7 @@ function activate(context) {
 }
 
 function getHtml(){
+  const now = new Date().toISOString();
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -193,17 +201,20 @@ function getHtml(){
   <style>
     :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
     html,body{height:100%;background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
-    .wrap{min-height:100%;display:flex;align-items:flex-start;justify-content:flex-start}
+    .wrap{min-height:100%;display:flex}
     .card{margin:12px;background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px;max-width:560px}
-    h2{margin:0 0 6px 0}
-    p{margin:0}
+    h2{margin:0 0 6px 0;font-size:16px}
+    p{margin:0 0 6px 0}
+    .ts{opacity:.7;font-size:12px}
+    .border{border:2px dashed #3b82f6;border-radius:10px;padding:8px;margin-top:8px}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card" role="region" aria-label="Codestrap panel loaded">
-      <h2>Codestrap panel</h2>
-      <p>If you can read this, the webview is rendering correctly (iframe mode, no service worker).</p>
+      <h2>✅ Codestrap Webview Loaded</h2>
+      <p class="ts">Rendered at: ${now}</p>
+      <div class="border">If you can see this box, the provider ran and HTML is rendering.</div>
     </div>
   </div>
 </body>
@@ -234,7 +245,6 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
-
 
 
 reload_window(){
