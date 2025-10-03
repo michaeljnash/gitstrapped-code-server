@@ -67,7 +67,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.9"   # bump to force rescan
+  NEW_VER="0.1.10"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -129,7 +129,7 @@ ensure_codestrap_extension(){
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -149,7 +149,7 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.panel", "name": "Codestrap" }
+        { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
     },
     "viewsWelcome": [
@@ -169,7 +169,7 @@ PKG
 </svg>
 SVG
 
-    # EXTREMELY SIMPLE provider that paints static HTML (no CSP/scripts)
+    # Minimal static HTML (no scripts) to guarantee paint
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
@@ -179,20 +179,14 @@ function activate(context){
     resolveWebviewView(view){
       console.log('[codestrap] resolveWebviewView');
       const webview = view.webview;
-      // scripts disabled to avoid CSP entirely; this is just to prove paint
       webview.options = { enableScripts: false };
       webview.html = [
         '<!doctype html>',
-        '<html><head><meta charset="utf-8">',
-        // inline style only; no external refs
-        '<title>Codestrap</title></head>',
-        '<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto; background:#0f172a; color:#e5e7eb">',
+        '<html><head><meta charset="utf-8"><title>Codestrap</title></head>',
+        '<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto;background:#0f172a;color:#e5e7eb">',
         '<div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">',
         '<h2 style="margin:0 0 6px 0;font-weight:600">Codestrap panel</h2>',
         '<p style="margin:0;opacity:.85">If you can read this, the webview is rendering.</p>',
-        '<p style="margin:8px 0 0 0"><small>Rendered at ',
-        new Date().toISOString(),
-        '</small></p>',
         '</div></body></html>'
       ].join('');
     }
@@ -215,7 +209,7 @@ function deactivate(){}
 module.exports = { activate, deactivate };
 JS
 
-    # Keep a template for later richer UI (not used by the minimal build above)
+    # Optional template file (not used by the minimal provider)
     cat >"${NEW_DIR}/webview.html" <<'HTML'
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Codestrap</title></head>
