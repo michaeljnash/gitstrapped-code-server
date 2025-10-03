@@ -68,7 +68,7 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.9"   # bump to force rescan
+  NEW_VER="0.2.1"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
@@ -94,7 +94,6 @@ ensure_codestrap_extension(){
       else
         printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
       fi
-      # preserve inode so file watchers stay happy
       if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
       rm -f "$tmp" 2>/dev/null || true
     else
@@ -117,18 +116,20 @@ ensure_codestrap_extension(){
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.9",
+  "version": "0.2.1",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.panel",
-    "onCommand:codestrap.openPanel"
+    "onCommand:codestrap.openPanel",
+    "onCommand:codestrap.debug.showPanel"
   ],
   "contributes": {
     "commands": [
-      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" }
+      { "command": "codestrap.openPanel", "title": "Codestrap: Open Panel" },
+      { "command": "codestrap.debug.showPanel", "title": "Codestrap: Debug Webview Panel" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -139,7 +140,13 @@ ensure_codestrap_extension(){
       "codestrap": [
         { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
       ]
-    }
+    },
+    "viewsWelcome": [
+      {
+        "view": "codestrap.panel",
+        "contents": "### Codestrap\nIf this message is visible, the view is registered but has not rendered HTML yet.\n\n- Try **Open Debug Webview Panel** to verify webview rendering.\n\n[Open Debug Webview Panel](command:codestrap.debug.showPanel)"
+      }
+    ]
   }
 }
 PKG
@@ -154,34 +161,39 @@ SVG
 
     # --- extension.js ---
     cat >"${NEW_DIR}/extension.js" <<'JS'
-// Minimal WebviewView provider.
-// NOTE: Runs in code-server's Node extension host, so require('vscode') is OK.
 const vscode = require('vscode');
 
 function activate(context) {
-  try {
-    vscode.window.showInformationMessage('Codestrap extension activated');
-  } catch (_) {
-    // ignore if toast can't show
-  }
+  try { vscode.window.showInformationMessage('Codestrap extension activated'); } catch (_) {}
 
+  // WebviewView provider (sidebar)
   const provider = {
     resolveWebviewView(webviewView) {
-      webviewView.webview.options = {
-        enableScripts: false,               // static HTML only
-        retainContextWhenHidden: true
-      };
+      webviewView.webview.options = { enableScripts: false, retainContextWhenHidden: true };
       webviewView.title = 'Codestrap';
-      webviewView.webview.html = getHtml();
+      webviewView.webview.html = getHtml('WebviewView');
     }
   };
-
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
       webviewOptions: { retainContextWhenHidden: true }
     })
   );
 
+  // Command to open a regular WebviewPanel tab — for debugging
+  context.subscriptions.push(
+    vscode.commands.registerCommand('codestrap.debug.showPanel', () => {
+      const panel = vscode.window.createWebviewPanel(
+        'codestrap.debug',
+        'Codestrap Debug Webview',
+        vscode.ViewColumn.Active,
+        { enableScripts: false, retainContextWhenHidden: true }
+      );
+      panel.webview.html = getHtml('WebviewPanel');
+    })
+  );
+
+  // Command to focus our view container
   context.subscriptions.push(
     vscode.commands.registerCommand('codestrap.openPanel', () =>
       vscode.commands.executeCommand('workbench.view.extension.codestrap')
@@ -189,7 +201,7 @@ function activate(context) {
   );
 }
 
-function getHtml(){
+function getHtml(kind){
   const now = new Date().toISOString();
   return `<!DOCTYPE html>
 <html lang="en">
@@ -202,7 +214,7 @@ function getHtml(){
     :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
     html,body{height:100%;background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
     .wrap{min-height:100%;display:flex}
-    .card{margin:12px;background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px;max-width:560px}
+    .card{margin:12px;background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px;max-width:580px}
     h2{margin:0 0 6px 0;font-size:16px}
     p{margin:0 0 6px 0}
     .ts{opacity:.7;font-size:12px}
@@ -211,10 +223,10 @@ function getHtml(){
 </head>
 <body>
   <div class="wrap">
-    <div class="card" role="region" aria-label="Codestrap panel loaded">
-      <h2>✅ Codestrap Webview Loaded</h2>
+    <div class="card">
+      <h2>✅ ${kind} Loaded</h2>
       <p class="ts">Rendered at: ${now}</p>
-      <div class="border">If you can see this box, the provider ran and HTML is rendering.</div>
+      <div class="border">If you can see this, HTML painted successfully.</div>
     </div>
   </div>
 </body>
@@ -237,7 +249,6 @@ JS
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Force iframe webviews to avoid service worker auth issues
   _force_iframe_webviews
 
   # Nudge window reload so the extension is re-scanned
@@ -245,6 +256,7 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
+
 
 
 reload_window(){
