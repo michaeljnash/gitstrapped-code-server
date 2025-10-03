@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=12d34dd43r4e4iefrdee47dedeeee3ee33reedde4dddeddsdddrd4ded45489445"
+      - "recreate-tag=12d34dd43r4ee4iefrdee47dedeeee3ee33reedde4dddeddsdddrd4ded45489445"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -25,9 +25,12 @@ services:
       PULL_EXISTING_REPOS: ${PULL_EXISTING_REPOS}
       INSTALL_EXTENSIONS: ${INSTALL_EXTENSIONS}
       UNINSTALL_EXTENSIONS: ${UNINSTALL_EXTENSIONS}
-      WORKSPACE_DIR: ${WORKSPACE_DIR:-/config/workspace}
       REPOS_SUBDIR: ${REPOS_SUBDIR:-/repos}
       GITHUB_KEY_TITLE: ${GITHUB_KEY_TITLE:-codestrap-code-server SSH Key}
+
+      DEFAULT_WORKSPACE: ${DEFAULT_WORKSPACE:-/config/workspace}
+      PWA_APPNAME: ${PWA_APPNAME:-code-server}
+      PROXY_DOMAIN: ${PROXY_DOMAIN}
     
     networks: [appnet]
 
@@ -50,7 +53,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=123456erd4re4d4eed3eee34eee3edddeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=123456erd4re4d4eed3eee3e4eee3edddeedddd7eedfeddd4dsddder37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
