@@ -1,8 +1,6 @@
 services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
-    labels:
-      - "recreate-tag=12d34dd43r4ee4iefrdree47dedeeee3ee33reedde4dddeddsdddrd4ded45489445"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -32,7 +30,23 @@ services:
       PWA_APPNAME: ${PWA_APPNAME:-code-server}
       PROXY_DOMAIN: ${PROXY_DOMAIN}
     
-    networks: [appnet]
+    networks:
+      - dokploy-network
+
+    labels:
+      - traefik.enable=true
+
+      - # Main editor host
+      - traefik.http.routers.codeserver.rule=Host(`michaeljnash.dev.meridianlogisticsgroup.com`)
+      - traefik.http.routers.codeserver.entrypoints=websecure
+      - traefik.http.routers.codeserver.tls=true
+      - traefik.http.services.codeserver.loadbalancer.server.port=8443
+
+      - # Webviews (random subdomains)
+      - traefik.http.routers.codeserver-wv.rule=HostRegexp(`{sub:[a-z0-9-]+}.michaeljnash.dev.meridianlogisticsgroup.com`)
+      - traefik.http.routers.codeserver-wv.entrypoints=websecure
+      - traefik.http.routers.codeserver-wv.tls=true
+      - traefik.http.services.codeserver-wv.loadbalancer.server.port=8443
 
     volumes:
       - config:/config
@@ -60,7 +74,8 @@ services:
       PROXY_PORT: "8080"
       CODE_SERVICE_NAME: "code"
       CODE_EXPOSED_PORT: "8443"
-    networks: [appnet]
+    networks:
+      - dokploy-network
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -71,7 +86,8 @@ services:
     restart: always
 
 networks:
-  appnet: {}
+  dokploy-network:
+    external: true
 
 volumes:
   config:
