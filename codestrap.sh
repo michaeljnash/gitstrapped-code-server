@@ -63,23 +63,20 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_extension(){
-  # Candidate extension roots
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.7"   # bump to force rescan
+  NEW_VER="0.1.9"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
-  # --- helper: force iframe-backed webviews (avoids service worker registration) ---
   _force_iframe_webviews(){
     USER_DIR="$HOME/data/User"
     SETTINGS_PATH="$USER_DIR/settings.json"
     mkdir -p "$USER_DIR" || true
-
     if command -v jq >/dev/null 2>&1; then
       tmp="$(mktemp)"
       if [ -s "$SETTINGS_PATH" ]; then
@@ -117,7 +114,6 @@ ensure_codestrap_extension(){
                   "workbench.experimental.useIframeWebview": true }\n' >"$SETTINGS_PATH"
       fi
     fi
-
     chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
   }
 
@@ -128,13 +124,12 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json (includes viewsWelcome so the pane never looks "empty") ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.7",
+  "version": "0.1.9",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -154,13 +149,13 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.panel", "name": "Codestrap", "type": "webview" }
+        { "id": "codestrap.panel", "name": "Codestrap" }
       ]
     },
     "viewsWelcome": [
       {
         "view": "codestrap.panel",
-        "contents": "Codestrap is loading…\n\nIf this message stays, click **Codestrap: Open Panel** in the Command Palette.",
+        "contents": "Codestrap is loading…\n\nIf this stays, run **Codestrap: Open Panel**.",
         "when": "view == codestrap.panel"
       }
     ]
@@ -168,59 +163,38 @@ ensure_codestrap_extension(){
 }
 PKG
 
-    # icon
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af">
   <circle cx="12" cy="12" r="9" opacity=".25"/><path d="M8 12h8M12 8v8" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
 </svg>
 SVG
 
-    # --- extension.js: load webview.html and inject a CSP-safe nonce ---
+    # EXTREMELY SIMPLE provider that paints static HTML (no CSP/scripts)
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
-const path = require('path');
-
-function nonce() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let s = ''; for (let i=0;i<32;i++) s += chars.charAt(Math.floor(Math.random()*chars.length));
-  return s;
-}
 
 function activate(context){
   console.log('[codestrap] activate');
   const provider = {
-    async resolveWebviewView(view){
+    resolveWebviewView(view){
       console.log('[codestrap] resolveWebviewView');
       const webview = view.webview;
-      webview.options = {
-        enableScripts: true,
-        localResourceRoots: [vscode.Uri.file(context.extensionPath)]
-      };
-      const n = nonce();
-      try {
-        const fileUri = vscode.Uri.file(path.join(context.extensionPath, 'webview.html'));
-        const raw = await vscode.workspace.fs.readFile(fileUri);
-        let html = Buffer.from(raw).toString('utf8');
-        // Inject CSP pieces
-        html = html.replace(/{{cspSource}}/g, webview.cspSource).replace(/{{nonce}}/g, n);
-        webview.html = html;
-      } catch (e) {
-        console.error('[codestrap] failed to load webview.html, using fallback:', e);
-        webview.html = `<!doctype html>
-<meta charset="utf-8">
-<title>Codestrap (fallback)</title>
-<style>
-  :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
-  html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
-  .wrap{padding:12px}.card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
-  h2{margin:0 0 6px 0}
-</style>
-<div class="wrap"><div class="card">
-  <h2>Codestrap panel</h2>
-  <p class="muted">Fallback HTML rendered. If you can read this, the provider is registered and the webview is alive.</p>
-  <p>Time: <code>${new Date().toISOString()}</code></p>
-</div></div>`;
-      }
+      // scripts disabled to avoid CSP entirely; this is just to prove paint
+      webview.options = { enableScripts: false };
+      webview.html = [
+        '<!doctype html>',
+        '<html><head><meta charset="utf-8">',
+        // inline style only; no external refs
+        '<title>Codestrap</title></head>',
+        '<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto; background:#0f172a; color:#e5e7eb">',
+        '<div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">',
+        '<h2 style="margin:0 0 6px 0;font-weight:600">Codestrap panel</h2>',
+        '<p style="margin:0;opacity:.85">If you can read this, the webview is rendering.</p>',
+        '<p style="margin:8px 0 0 0"><small>Rendered at ',
+        new Date().toISOString(),
+        '</small></p>',
+        '</div></body></html>'
+      ].join('');
     }
   };
 
@@ -231,50 +205,26 @@ function activate(context){
       { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
-
   context.subscriptions.push(
     vscode.commands.registerCommand('codestrap.openPanel', () =>
       vscode.commands.executeCommand('workbench.view.extension.codestrap')
     )
   );
 }
-
 function deactivate(){}
 module.exports = { activate, deactivate };
 JS
 
-    # --- webview.html template (CSP placeholders are replaced at runtime) ---
+    # Keep a template for later richer UI (not used by the minimal build above)
     cat >"${NEW_DIR}/webview.html" <<'HTML'
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'none'; img-src {{cspSource}} https: data:; style-src {{cspSource}} 'unsafe-inline'; script-src 'nonce-{{nonce}}';">
-  <meta name="color-scheme" content="dark">
-  <title>Codestrap</title>
-  <style>
-    :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
-    html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
-    .wrap{padding:12px}
-    .card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
-    h2{margin:0 0 6px 0}
-    .muted{color:var(--muted)}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h2>Codestrap panel</h2>
-      <p class="muted">Loaded from <code>webview.html</code> with a CSP nonce.</p>
-      <p>Time: <code id="t"></code></p>
-    </div>
+<html><head><meta charset="utf-8"><title>Codestrap</title></head>
+<body style="margin:0;padding:12px;font:13px system-ui,Segoe UI,Roboto;background:#0f172a;color:#e5e7eb">
+  <div style="border:1px solid #374151;border-radius:12px;padding:12px;background:#111827">
+    <h2 style="margin:0 0 6px 0;font-weight:600">Codestrap (template)</h2>
+    <p style="margin:0;opacity:.85">Static template file.</p>
   </div>
-  <script nonce="{{nonce}}">
-    document.getElementById('t').textContent = new Date().toISOString();
-  </script>
-</body>
-</html>
+</body></html>
 HTML
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
@@ -282,20 +232,18 @@ HTML
     echo "[codestrap] wrote extension → $NEW_DIR"
   }
 
-  # Write to all candidate extension roots
   seen=""
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Force iframe webviews to avoid service worker auth issues
   _force_iframe_webviews
 
-  # Nudge window reload so the extension is re-scanned
   mkdir -p "$FLAGDIR" || true
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
+
 
 
 reload_window(){
