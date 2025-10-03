@@ -40,6 +40,35 @@ function addServiceWorkerHeadersIfNeeded(pathname, res) {
   }
 }
 
+// --- VS Code webview: serve a local no-op Service Worker to avoid 401s upstream ---
+function maybeServeWebviewSW(u, res) {
+  // Matches:
+  // /stable-<hash>/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js
+  // ...with any query string (e.g. ?v=4&vscode-resource-base-authority=...)
+  const swPathRe = /^\/stable-[^/]+\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
+
+  if (!u || !u.pathname || !swPathRe.test(u.pathname)) return false;
+
+  // Serve a harmless, local SW that always installs/activates and does nothing.
+  const body = `
+/* codestrap stub service-worker.js */
+self.addEventListener('install', (e) => { self.skipWaiting(); });
+self.addEventListener('activate', (e) => { self.clients.claim(); });
+self.addEventListener('fetch', (e) => { /* no-op: let network handle it */ });
+  `.trim() + '\n';
+
+  res.statusCode = 200;
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('pragma', 'no-cache');
+  res.setHeader('expires', '0');
+  // Allow it to claim the root if VS Code asks:
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.end(body);
+  return true;
+}
+
+
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
 
@@ -349,6 +378,8 @@ function noStoreHeaders(extra = {}) {
 
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
+
+  if (maybeServeWebviewSW(u, res)) return;
 
   addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
