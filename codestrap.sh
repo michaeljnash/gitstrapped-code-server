@@ -80,28 +80,49 @@ ensure_codestrap_extension(){
     SETTINGS_PATH="$USER_DIR/settings.json"
     mkdir -p "$USER_DIR" || true
 
-    # If jq exists, do a clean JSON merge; else, append/repair minimally.
+    # If jq exists, do a clean JSON merge; else, best-effort initialize
     if command -v jq >/dev/null 2>&1; then
       tmp="$(mktemp)"
       if [ -s "$SETTINGS_PATH" ]; then
         # try parse as JSON; if JSONC, strip comments first
         if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
-          jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+          jq '. + {
+                "webview.experimental.useIframes": true,
+                "workbench.webview.experimental.useIframes": true,
+                "workbench.experimental.useIframeWebview": true
+              }' "$SETTINGS_PATH" >"$tmp" 2>/dev/null \
+          || printf '{ "webview.experimental.useIframes": true,
+                       "workbench.webview.experimental.useIframes": true,
+                       "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
         else
           sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" \
-            | jq '. + {"webview.experimental.useIframes": true}' >"$tmp" 2>/dev/null \
-            || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+            | jq '. + {
+                    "webview.experimental.useIframes": true,
+                    "workbench.webview.experimental.useIframes": true,
+                    "workbench.experimental.useIframeWebview": true
+                  }' >"$tmp" 2>/dev/null \
+          || printf '{ "webview.experimental.useIframes": true,
+                       "workbench.webview.experimental.useIframes": true,
+                       "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
         fi
       else
-        printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+        printf '{ "webview.experimental.useIframes": true,
+                  "workbench.webview.experimental.useIframes": true,
+                  "workbench.experimental.useIframeWebview": true }\n' >"$tmp"
       fi
       # write without replacing inode (keeps watchers happy)
-      if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
+      if [ -f "$SETTINGS_PATH" ]; then
+        cat "$tmp" > "$SETTINGS_PATH"
+      else
+        install -m 644 -D "$tmp" "$SETTINGS_PATH"
+      fi
       rm -f "$tmp" 2>/dev/null || true
     else
-      # No jq — best-effort: create minimal settings with the key if file is empty/missing
+      # No jq — initialize only if empty/missing
       if [ ! -s "$SETTINGS_PATH" ]; then
-        printf '{ "webview.experimental.useIframes": true }\n' >"$SETTINGS_PATH"
+        printf '{ "webview.experimental.useIframes": true,
+                  "workbench.webview.experimental.useIframes": true,
+                  "workbench.experimental.useIframeWebview": true }\n' >"$SETTINGS_PATH"
       fi
     fi
 
@@ -209,7 +230,6 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
-
 
 
 reload_window(){

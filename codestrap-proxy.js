@@ -30,6 +30,17 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
+
+function addServiceWorkerHeadersIfNeeded(pathname, res) {
+  // Allow VS Code webview service worker to claim root scope if registration is attempted
+  // Example path:
+  // /stable-<hash>/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js
+  if (/^\/stable-.*\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js/.test(pathname || "")) {
+    res.setHeader('Service-Worker-Allowed', '/');
+  }
+}
+
+
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
 
 let logBuf = [];
@@ -338,6 +349,8 @@ function noStoreHeaders(extra = {}) {
 
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
+
+  addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
   // Health endpoint
   if (u.pathname === '/__up') {
