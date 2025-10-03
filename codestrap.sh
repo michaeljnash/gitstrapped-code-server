@@ -63,15 +63,50 @@ redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
 ensure_codestrap_extension(){
+  # Candidate extension roots
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.1.3"   # bump to force rescan
+  NEW_VER="0.1.4"   # bump to force rescan
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
+
+  # --- helper: force iframe-backed webviews (avoids service worker registration) ---
+  _force_iframe_webviews(){
+    USER_DIR="$HOME/data/User"
+    SETTINGS_PATH="$USER_DIR/settings.json"
+    mkdir -p "$USER_DIR" || true
+
+    # If jq exists, do a clean JSON merge; else, append/repair minimally.
+    if command -v jq >/dev/null 2>&1; then
+      tmp="$(mktemp)"
+      if [ -s "$SETTINGS_PATH" ]; then
+        # try parse as JSON; if JSONC, strip comments first
+        if jq -e . "$SETTINGS_PATH" >/dev/null 2>&1; then
+          jq '. + {"webview.experimental.useIframes": true}' "$SETTINGS_PATH" >"$tmp" 2>/dev/null || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+        else
+          sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$SETTINGS_PATH" \
+            | jq '. + {"webview.experimental.useIframes": true}' >"$tmp" 2>/dev/null \
+            || printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+        fi
+      else
+        printf '{ "webview.experimental.useIframes": true }\n' >"$tmp"
+      fi
+      # write without replacing inode (keeps watchers happy)
+      if [ -f "$SETTINGS_PATH" ]; then cat "$tmp" > "$SETTINGS_PATH"; else install -m 644 -D "$tmp" "$SETTINGS_PATH"; fi
+      rm -f "$tmp" 2>/dev/null || true
+    else
+      # No jq — best-effort: create minimal settings with the key if file is empty/missing
+      if [ ! -s "$SETTINGS_PATH" ]; then
+        printf '{ "webview.experimental.useIframes": true }\n' >"$SETTINGS_PATH"
+      fi
+    fi
+
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$USER_DIR" 2>/dev/null || true
+  }
 
   write_one(){
     _base="$1"
@@ -80,13 +115,13 @@ ensure_codestrap_extension(){
     NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
     mkdir -p "$NEW_DIR" || true
 
-    # --- package.json: NOTE the "type": "webview" ---
+    # --- package.json (note: type:webview) ---
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Codestrap side panel",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
@@ -120,46 +155,38 @@ PKG
 </svg>
 SVG
 
-    # extension.js
+    # extension.js (simple proof the webview renders)
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
-
-function activate(context) {
+function activate(context){
   const provider = {
-    resolveWebviewView(webviewView) {
-      webviewView.webview.options = { enableScripts: true };
-      webviewView.webview.html = `<!doctype html>
+    resolveWebviewView(view){
+      view.webview.options = { enableScripts: true };
+      view.webview.html = `<!doctype html>
 <meta charset="utf-8">
 <title>Codestrap</title>
 <style>
   :root{--bg:#0f172a;--txt:#e5e7eb;--muted:#9ca3af;--card:#111827;--br:#374151}
   html,body{background:var(--bg);color:var(--txt);margin:0;font:13px/1.4 system-ui,Segoe UI,Roboto,Ubuntu}
   .wrap{padding:12px}.card{background:var(--card);border:1px solid var(--br);border-radius:12px;padding:12px}
+  h2{margin:0 0 6px 0}
 </style>
 <div class="wrap">
   <div class="card">
-    <h2>✅ Codestrap panel loaded</h2>
-    <p>This is a <b>webview view</b>. The "no data provider" error should be gone.</p>
+    <h2>Codestrap panel</h2>
+    <p>If you can read this, iframe webviews are working (no service worker).</p>
   </div>
 </div>`;
     }
   };
-
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('codestrap.panel', provider, {
-      webviewOptions: { retainContextWhenHidden: true }
-    })
+    vscode.window.registerWebviewViewProvider('codestrap.panel', provider, { webviewOptions:{ retainContextWhenHidden:true } })
   );
-
   context.subscriptions.push(
-    vscode.commands.registerCommand('codestrap.openPanel', () => {
-      vscode.commands.executeCommand('workbench.view.extension.codestrap');
-    })
+    vscode.commands.registerCommand('codestrap.openPanel', ()=>vscode.commands.executeCommand('workbench.view.extension.codestrap'))
   );
 }
-
 function deactivate(){}
-
 module.exports = { activate, deactivate };
 JS
 
@@ -168,11 +195,14 @@ JS
     echo "[codestrap] wrote extension → $NEW_DIR"
   }
 
-  # Write to all candidates (dedup)
+  # Write to all candidate extension roots
   seen=""
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
+
+  # Force iframe webviews to avoid service worker auth issues
+  _force_iframe_webviews
 
   # Nudge window reload so the extension is re-scanned
   mkdir -p "$FLAGDIR" || true
