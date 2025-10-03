@@ -35,16 +35,17 @@ services:
 
     labels:
       - traefik.enable=true
+      - traefik.docker.network=dokploy-network
 
       - traefik.http.routers.codeserver.rule=Host(`michaeljnash.dev.meridianlogisticsgroup.com`)
-      - traefik.http.routers.codeserver.entrypoints=websecure
+      - traefik.http.routers.codeserver.entrypoints=web
       - traefik.http.routers.codeserver.tls=true
       - traefik.http.services.codeserver.loadbalancer.server.port=8443
 
-      - traefik.http.routers.codeserver-wv.rule=HostRegexp(`{sub:[a-z0-9-]+}.michaeljnash.dev.meridianlogisticsgroup.com`)
-      - traefik.http.routers.codeserver-wv.entrypoints=websecure
-      - traefik.http.routers.codeserver-wv.tls=true
-      - traefik.http.services.codeserver-wv.loadbalancer.server.port=8443
+      #- traefik.http.routers.codeserver-wv.rule=HostRegexp(`{sub:[a-z0-9-]+}.michaeljnash.dev.meridianlogisticsgroup.com`)
+      #- traefik.http.routers.codeserver-wv.entrypoints=websecure
+      #- traefik.http.routers.codeserver-wv.tls=true
+      #- traefik.http.services.codeserver-wv.loadbalancer.server.port=8443
 
     volumes:
       - config:/config
@@ -59,8 +60,8 @@ services:
       #- "8443:8443"
     expose:
       - "8443"
-    ports:
-      - ":8443"
+    #ports:
+    #  - ":8443"
     restart: always
 
   splash:
