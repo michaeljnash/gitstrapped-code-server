@@ -1,8 +1,9 @@
 services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
+    command: " --extensions-gallery-url 'https://open-vsx.org/vscode/gallery' --extensions-control-url 'https://open-vsx.org/vscode/api'"
     labels:
-      - "recreate-tag=12d34dd43r4e4efrdee4ee deeeee3ee33reedde4dddeddsdddrd4ded45489445"
+      - "recreate-tag=12d34dd43r4e4efrdee47ee deeeee3ee33reedde4dddeddsdddrd4ded45489445"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -48,7 +49,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=123456erd4re4d4eed3eee34eeeed3eddeeddddeedfeddd4dsddder37re89544"
+      - "recreate-tag=123456erd4re4d4eed3eee34eeeed3eddeedddd7eedfeddd4dsddder37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
