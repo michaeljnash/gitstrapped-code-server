@@ -62,6 +62,106 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
+ensure_openvsx_registry(){
+  CTX_TAG="[Marketplace]"
+  # --- where to signal reload in your script ---
+  FLAGDIR="${HOME}/.codestrap"
+  FLAGFILE="${FLAGDIR}/reload.signal"
+  mkdir -p "$FLAGDIR" || true
+
+  is_json(){ python3 - <<'PY' 2>/dev/null || exit 1
+import sys, json; json.load(sys.stdin); print("ok")
+PY
+  }
+
+  patch_code_server_product_json(){
+    # Try common install paths then derive from code-server binary
+    CANDIDATES="
+      /app/code-server/lib/vscode/product.json
+      /app/code-server/lib/vscode/product.json
+      $(dirname "$(readlink -f "$(command -v code-server 2>/dev/null || echo /bin/false)")")/../lib/vscode/product.json
+    "
+    TARGET=""
+    for f in $CANDIDATES; do
+      [ -f "$f" ] && { TARGET="$f"; break; }
+    done
+
+    if [ -z "$TARGET" ]; then
+      warn "could not locate code-server product.json; skipping patch"
+      return 0
+    fi
+
+    log "patching product.json → $TARGET"
+    cp -a "$TARGET" "${TARGET}.bak.$(date +%s)" || true
+
+    tmp="$(mktemp)"
+    python3 - "$TARGET" >"$tmp" <<'PY'
+import json,sys
+p=sys.argv[1]
+with open(p,'r',encoding='utf-8') as f:
+  data=json.load(f)
+eg=data.get("extensionsGallery",{})
+eg.update({
+  "serviceUrl": "https://open-vsx.org/vscode/gallery",
+  "itemUrl": "https://open-vsx.org/vscode/item",
+  "resourceUrlTemplate": "https://open-vsx.org/vscode/{publisher}/{name}/{version}/{path}",
+  "controlUrl": "https://open-vsx.org/vscode/api",
+  "recommendationsUrl": ""
+})
+data["extensionsGallery"]=eg
+print(json.dumps(data,ensure_ascii=False,indent=2))
+PY
+    # Write atomically
+    cat "$tmp" > "$TARGET"
+    rm -f "$tmp" || true
+    log "patched Open VSX endpoints in product.json"
+  }
+
+  wrap_openvscode_server_with_flags(){
+    command -v openvscode-server >/dev/null 2>&1 || return 0
+    WRAP="/usr/local/bin/openvscode-server"
+    # Don’t clobber an existing custom wrapper
+    if [ -f "$WRAP" ] && ! grep -q "open-vsx.org/vscode/gallery" "$WRAP" 2>/dev/null; then
+      warn "openvscode-server wrapper exists; leaving as-is"
+      return 0
+    fi
+    require_root || { warn "need root to install openvscode-server wrapper; skipping"; return 0; }
+    cat >"$WRAP" <<'SH'
+#!/usr/bin/env sh
+exec /usr/bin/openvscode-server \
+  --host 0.0.0.0 \
+  --extensions-gallery-url "https://open-vsx.org/vscode/gallery" \
+  --extensions-control-url "https://open-vsx.org/vscode/api" \
+  "$@"
+SH
+    chmod 755 "$WRAP"
+    log "installed openvscode-server wrapper with Open VSX flags"
+  }
+
+  # Do the right thing for the server we have
+  if command -v code-server >/dev/null 2>&1; then
+    patch_code_server_product_json
+  fi
+  wrap_openvscode_server_with_flags
+
+  # Health check (expect JSON, not HTML)
+  hc_code=000
+  body="$(curl -fsS -m 5 -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"filters":[],"assetTypes":[],"pageNumber":1,"pageSize":1}' \
+    "https://open-vsx.org/vscode/gallery/extensionquery" 2>/dev/null || true)"
+  if printf '%s' "$body" | is_json >/dev/null 2>&1; then
+    log "Open VSX registry reachable ✔"
+  else
+    warn "Open VSX health check did not return JSON (marketplace may be blocked). Webviews may still misbehave."
+  fi
+
+  # Nudge a reload so the extension host re-reads marketplace config
+  touch "$FLAGFILE" 2>/dev/null || true
+  chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
+  CTX_TAG=""
+}
+
 ensure_codestrap_extension(){
   # Where to place the extension (write to a few common roots)
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
@@ -2857,6 +2957,7 @@ case "${1:-init}" in
   init)
     RUN_MODE="init"
     safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[Marketplace]"             ensure_openvsx_registry
     safe_run "[Codestrap Extension]"     ensure_codestrap_extension
     safe_run "[Codestrap UI] Overwrite   login page" write_codestrap_login
     safe_run "[CLI shim]"                install_cli_shim
