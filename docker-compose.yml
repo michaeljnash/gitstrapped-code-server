@@ -36,13 +36,11 @@ services:
     labels:
       - traefik.enable=true
 
-      - # Main editor host
       - traefik.http.routers.codeserver.rule=Host(`michaeljnash.dev.meridianlogisticsgroup.com`)
       - traefik.http.routers.codeserver.entrypoints=websecure
       - traefik.http.routers.codeserver.tls=true
       - traefik.http.services.codeserver.loadbalancer.server.port=8443
 
-      - # Webviews (random subdomains)
       - traefik.http.routers.codeserver-wv.rule=HostRegexp(`{sub:[a-z0-9-]+}.michaeljnash.dev.meridianlogisticsgroup.com`)
       - traefik.http.routers.codeserver-wv.entrypoints=websecure
       - traefik.http.routers.codeserver-wv.tls=true
