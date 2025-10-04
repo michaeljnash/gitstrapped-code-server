@@ -172,25 +172,52 @@ ensure_codestrap_extension(){
     $HOME/.local/share/vscode-oss/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.5.1"   # terminal-logs variant with UI tweaks
+  NEW_VER="0.5.2"   # bump to force rescan
   NEW_FOLDER="${NEW_ID}-${NEW_VER}"
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
+  # --- helper: remove "bad" extensions that break the host
+  scrub_bad_extensions_root(){
+    _root="$1"
+    [ -d "$_root" ] || return 0
+    # 1) hard-kill any known offenders
+    for bad in "$_root"/krishnavamsi.webview-sample-*; do
+      [ -e "$bad" ] && rm -rf "$bad" 2>/dev/null || true
+    done
+    # 2) generic scrub: activationEvents present, but NO main and NO browser → remove
+    find "$_root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read -r extdir; do
+      pkg="$extdir/package.json"
+      [ -f "$pkg" ] || continue
+      # fast grep first (avoid jq requirement)
+      if grep -q '"activationEvents"' "$pkg" 2>/dev/null; then
+        if ! grep -q '"main"' "$pkg" 2>/dev/null && ! grep -q '"browser"' "$pkg" 2>/dev/null; then
+          rm -rf "$extdir" 2>/dev/null || true
+        fi
+      fi
+    done
+    # 3) nuke index/state so code-server rebuilds
+    rm -f "$_root/extensions.json" 2>/dev/null || true
+    rm -f "$_root/.obsolete" "$_root/.obselete" 2>/dev/null || true
+  }
+
   write_one(){
     _base="$1"
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # Remove older versions
+    # scrub anything that can poison the host (incl. the webview sample you saw)
+    scrub_bad_extensions_root "$_base"
+
+    # remove old versions of our extension
     for old in "$_base"/${NEW_ID}-*; do
       [ -e "$old" ] || continue
       case "$old" in *"/${NEW_FOLDER}") : ;; *) rm -rf "$old" 2>/dev/null || true ;; esac
     done
 
-    # Force code-server to rebuild its index/state
+    # force code-server to rebuild extension index/state
     rm -f "$_base/extensions.json" 2>/dev/null || true
     rm -f "$_base/.obsolete" "$_base/.obselete" 2>/dev/null || true
 
@@ -204,8 +231,8 @@ ensure_codestrap_extension(){
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.5.1",
-  "description": "Full GUI for the Codestrap CLI (passwd, config, extensions, github) inside a side panel. Uses terminal for logs.",
+  "version": "0.5.2",
+  "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel. Uses terminal for logs.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
@@ -234,7 +261,7 @@ ensure_codestrap_extension(){
     "viewsWelcome": [
       {
         "view": "codestrap.view",
-        "contents": "Run any Codestrap command from the sections below. Logs open in the integrated Terminal.\\n"
+        "contents": "Run any Codestrap command from the sections below. Logs open in the integrated Terminal.\n"
       }
     ]
   }
@@ -254,7 +281,6 @@ SVG
 const vscode = require('vscode');
 const fs = require('fs');
 
-/** Shared terminal for log output */
 class Term {
   static get(name='Codestrap'){
     if (!this._term || this._termExit) {
@@ -268,42 +294,22 @@ class Term {
   static send(cmd){ const t = this.get(); t.sendText(cmd, true); this.show(); }
 }
 
-/** Find codestrap runner: prefer $CODESTRAP_BIN, else typical bins, else raw script. */
-function resolveCodestrapString(){
-  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) {
-    return shellQ(process.env.CODESTRAP_BIN);
-  }
-  const candidates = [
-    '/usr/local/bin/codestrap',
-    '/usr/bin/codestrap'
-  ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return shellQ(p);
-  }
-  // Fallback to your init script with "cli" sub-runner
-  if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) {
-    return `sh ${shellQ('/custom-cont-init.d/10-codestrap.sh')} cli`;
-  }
-  return null;
-}
-
-/** Minimal shell quoting (single-quote safe) */
 function shellQ(s){
   if (s === undefined || s === null) return "''";
-  s = String(s);
-  if (s === '') return "''";
-  // close ' -> '\'' -> reopen
+  s = String(s); if (s === '') return "''";
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
-
+function resolveCodestrapString(){
+  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) return shellQ(process.env.CODESTRAP_BIN);
+  const cands = ['/usr/local/bin/codestrap','/usr/bin/codestrap'];
+  for (const p of cands) if (fs.existsSync(p)) return shellQ(p);
+  if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) return `sh ${shellQ('/custom-cont-init.d/10-codestrap.sh')} cli`;
+  return null;
+}
 function buildAndRun(args){
   const runner = resolveCodestrapString();
-  if (!runner) {
-    vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).');
-    return;
-  }
-  const line = `${runner} ${args.join(' ')}`;
-  Term.send(line);
+  if (!runner) { vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).'); return; }
+  Term.send(`${runner} ${args.join(' ')}`);
 }
 
 class ViewProvider {
@@ -312,35 +318,34 @@ class ViewProvider {
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
     const src = this.webview.cspSource;
-    this.webview.html = this.renderHtml(nonce, src);
-
+    this.webview.html = this.html(nonce, src);
     this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
         case 'passwd:set': {
           const pw = msg.password || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
-          buildAndRun(['passwd', '--set', shellQ(pw)]);
+          buildAndRun(['passwd','--set',shellQ(pw)]);
           break;
         }
         case 'config:run': {
-          const tf = (b)=> b ? 'true' : 'false';
-          const args = ['config'];
+          const tf=(b)=> b?'true':'false';
+          const args=['config'];
           if ('settings' in msg)   args.push('-s', tf(!!msg.settings));
           if ('keybindings' in msg)args.push('-k', tf(!!msg.keybindings));
           if ('tasks' in msg)      args.push('-t', tf(!!msg.tasks));
           if ('extensions' in msg) args.push('-e', tf(!!msg.extensions));
-          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
+          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
         case 'ext:apply': {
-          const args = ['extensions'];
-          if (msg.uninstall === 'all' || msg.uninstall === 'missing') { args.push('-u', msg.uninstall); }
-          if (msg.install === 'all' || msg.install === 'missing')     { args.push('-i', msg.install); }
-          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
+          const args=['extensions'];
+          if (msg.uninstall==='all' || msg.uninstall==='missing') args.push('-u', msg.uninstall);
+          if (msg.install==='all'   || msg.install==='missing')   args.push('-i', msg.install);
+          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
         case 'github:run': {
-          const args = ['github'];
+          const args=['github'];
           if (msg.auto) {
             args.push('--auto');
           } else {
@@ -351,17 +356,15 @@ class ViewProvider {
             if (msg.repos)    args.push('-r', msg.repos);
             if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
-          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
+          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
-        case 'openTerminal':
-          Term.show();
-          break;
+        case 'openTerminal': Term.show(); break;
       }
     });
   }
 
-  renderHtml(nonce, cspSource){
+  html(nonce, cspSource){
     const csp = [
       "default-src 'none'",
       `img-src ${cspSource} https: data:`,
@@ -377,26 +380,18 @@ class ViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Codestrap</title>
   <style>
-    :root{
-      --bg: var(--vscode-sideBar-background);
-      --fg: var(--vscode-foreground);
-      --muted: var(--vscode-descriptionForeground);
-      --btn: var(--vscode-button-background);
-      --btnText: var(--vscode-button-foreground);
-      --border: var(--vscode-panel-border);
-      --input: var(--vscode-input-background);
-    }
-    body { margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
-    h3 { margin: 12px 0 8px; font-size: 13px; }
-    .section { border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
-    label { font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
-    input[type="text"], input[type="password"], select {
-      width:100%; padding:6px 8px; background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:8px;
-    }
-    .row { display:flex; gap:8px; align-items:center; }
-    .toprow { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-    button { border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
-    .small { font-size:11px; color:var(--muted); }
+    :root{ --bg: var(--vscode-sideBar-background); --fg: var(--vscode-foreground); --muted: var(--vscode-descriptionForeground);
+           --btn: var(--vscode-button-background); --btnText: var(--vscode-button-foreground); --border: var(--vscode-panel-border);
+           --input: var(--vscode-input-background); }
+    body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg);}
+    h3{ margin:12px 0 8px; font-size:13px;}
+    .section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px;}
+    label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted);}
+    input[type="text"],input[type="password"],select{ width:100%; padding:6px 8px; background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:8px;}
+    .row{ display:flex; gap:8px; align-items:center;}
+    .toprow{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
+    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer;}
+    .small{ font-size:11px; color:var(--muted);}
   </style>
 </head>
 <body>
@@ -473,8 +468,7 @@ const $ = (id) => document.getElementById(id);
 $("term").onclick = () => vscode.postMessage({ type:"openTerminal" });
 
 $("pw-run").onclick = () => {
-  const pw = $("pw").value || "";
-  vscode.postMessage({ type:"passwd:set", password: pw });
+  vscode.postMessage({ type:"passwd:set", password: $("pw").value || "" });
 };
 
 $("cfg-run").onclick = () => {
@@ -528,15 +522,13 @@ function activate(context){
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', () => Term.show()));
 }
-
 function deactivate(){}
-
 module.exports = { activate, deactivate };
 JS
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
-    echo "[codestrap] wrote GUI Webview (terminal logs) → $NEW_DIR"
+    echo "[codestrap] wrote GUI Webview (with bad-extension scrub) → $NEW_DIR"
   }
 
   # Write to all candidate roots (dedupe)
@@ -550,6 +542,8 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
+
+
 
 reload_window(){
   # unconditionally ask the running code-server window to reload
