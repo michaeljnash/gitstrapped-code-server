@@ -1,8 +1,7 @@
 // codestrap-proxy.js — Reverse proxy + splash (auto-reload) + optional live code-server logs
 //
-// Adds a Service Worker + boot script to automatically show the splash when
-// upstream (code-server) is down, *and* safely injects the boot script into
-// HTML responses (handles compressed upstream: gzip/br/deflate).
+// This version removes any auto-reload on controllerchange to avoid loops.
+// We only register a Service Worker once; the SW shows the splash on failures.
 
 const http = require('http');
 const net  = require('net');
@@ -18,7 +17,7 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
-// Allow VS Code / code-server webview SW to claim root scope.
+// VS Code webview SW scope header (when those assets pass through us)
 function addServiceWorkerHeadersIfNeeded(pathname, res) {
   const p = pathname || "";
   const reCodeServer = /\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
@@ -67,26 +66,19 @@ function probeAndNote(cb) {
 
 /* --------------------- Docker logs (via socket) ---------------------------- */
 
-const docker = {
-  enabled: false,
-  socketPath: DOCKER_SOCK,
-  containerId: null,
-  wantLogs: false
-};
+const docker = { enabled:false, socketPath: DOCKER_SOCK, containerId:null, wantLogs:false };
 try { fs.accessSync(DOCKER_SOCK); docker.enabled = true; } catch(_) { docker.enabled = false; }
 docker.wantLogs = docker.enabled && !!CODE_SERVICE_NAME;
 
 function dockerRequest(path, method='GET', headers={}, cb) {
   const req = http.request({ socketPath: docker.socketPath, path, method, headers }, res => cb(null, res));
-  req.on('error', err => cb(err));
-  req.end();
+  req.on('error', err => cb(err)); req.end();
 }
 function jsonEncodeFilters(obj){ return encodeURIComponent(JSON.stringify(obj)); }
 
 function resolveContainerId(cb) {
   if (!docker.wantLogs) return cb(new Error('logs disabled'), null);
   if (docker.containerId) return cb(null, docker.containerId);
-
   const filters = { label: [`com.docker.compose.service=${CODE_SERVICE_NAME}`] };
   const path = `/v1.41/containers/json?all=0&filters=${jsonEncodeFilters(filters)}`;
   dockerRequest(path, 'GET', {}, (err, res)=>{
@@ -114,8 +106,7 @@ function resolveContainerId(cb) {
           });
           return;
         }
-        docker.containerId = arr[0].Id;
-        cb(null, docker.containerId);
+        docker.containerId = arr[0].Id; cb(null, docker.containerId);
       } catch(e){ cb(e); }
     });
   });
@@ -123,21 +114,19 @@ function resolveContainerId(cb) {
 
 // Demux Docker multiplexed logs (non-TTY); fallback to raw when needed.
 function createDockerDemux(onLine) {
-  let buf = Buffer.alloc(0);
-  let assumeTTY = false;
-  let badHeaders = 0;
-  function emitText(b) { b.toString('utf8').split(/\r?\n/).forEach(line => { if (line.length) onLine(line); }); }
+  let buf = Buffer.alloc(0), assumeTTY = false, badHeaders = 0;
+  function emitText(b){ b.toString('utf8').split(/\r?\n/).forEach(line=>{ if(line.length) onLine(line); }); }
   return function onChunk(chunk) {
     if (assumeTTY) { emitText(chunk); return; }
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 8) {
       const stream = buf.readUInt8(0);
       const length = buf.readUInt32BE(4);
-      if (length > 10 * 1024 * 1024) { badHeaders++; if (badHeaders >= 2) { assumeTTY = true; emitText(buf); buf = Buffer.alloc(0); } break; }
+      if (length > 10 * 1024 * 1024) { badHeaders++; if (badHeaders >= 2) { assumeTTY=true; emitText(buf); buf=Buffer.alloc(0);} break; }
       if (buf.length < 8 + length) break;
       const payload = buf.subarray(8, 8 + length);
       const prefix = stream === 2 ? '[stderr] ' : '';
-      payload.toString('utf8').split(/\r?\n/).forEach(line=>{ if (line.length) onLine(prefix + line); });
+      payload.toString('utf8').split(/\r?\n/).forEach(line=>{ if(line.length) onLine(prefix+line); });
       buf = buf.subarray(8 + length);
     }
   };
@@ -147,9 +136,8 @@ function fetchDockerLogsTail(containerId, tail, cb) {
   const p = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&tail=${tail||200}`;
   dockerRequest(p, 'GET', {}, (err, res)=>{
     if (err) return cb(err);
-    const chunks = [];
-    const demux = createDockerDemux(line => chunks.push(line));
-    res.on('data', chunk => demux(chunk));
+    const chunks=[]; const demux=createDockerDemux(line=>chunks.push(line));
+    res.on('data', chunk=>demux(chunk));
     res.on('end', ()=> cb(null, chunks.join('\n') + (chunks.length?'\n':'')));
   });
 }
@@ -159,9 +147,9 @@ function streamDockerLogs(containerId, res, sinceSec) {
   const path = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&since=${since}`;
   dockerRequest(path, 'GET', {}, (err, dres)=>{
     if (err || dres.statusCode >= 400) { res.write(`data: [codelogs] error starting stream\n\n`); return; }
-    const demux = createDockerDemux(line=>{ res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`); });
-    dres.on('data', chunk => demux(chunk));
-    dres.on('end',  ()=> { try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
+    const demux=createDockerDemux(line=>{ res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`); });
+    dres.on('data', chunk=>demux(chunk));
+    dres.on('end', ()=>{ try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
   });
 }
 
@@ -224,7 +212,6 @@ details[open] .chev{transform:rotate(90deg)}
 <script>
 (function(){
   let delay = 600, maxDelay = 5000;
-  const original = location.href;
   const tipBaseEl = document.getElementById('tip-base');
   const logEl = document.getElementById('log');
   const statusEl = document.getElementById('log-status');
@@ -247,7 +234,7 @@ details[open] .chev{transform:rotate(90deg)}
   async function ping(){
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
-      if (res.ok) { setTipBase('Ready! Loading…'); location.replace(original); return; }
+      if (res.ok) { setTipBase('Ready! Loading…'); location.reload(); return; }
     }catch(e){}
     const jitter = Math.random() * 150;
     delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
@@ -275,13 +262,12 @@ function noStoreHeaders(extra = {}) {
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
-  // Service Worker
+  // SW that shows splash on upstream failures; no reload logic here.
   if (u.pathname === '/__codestrap/sw.js') {
     const body = `
-// SW: serves splash page when navigations fail with 502–599 or network error.
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-function splashResponse(){
+function splash(){
   return new Response(${JSON.stringify(makeSplashHtml())}, {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
@@ -293,11 +279,10 @@ self.addEventListener('fetch', e => {
     e.respondWith((async () => {
       try {
         const resp = await fetch(r);
-        // Only show splash on upstream failures (bad gateway and server errors)
-        if (resp.status >= 502 && resp.status <= 599) return splashResponse();
+        if (resp.status >= 502 && resp.status <= 599) return splash();
         return resp;
       } catch (_) {
-        return splashResponse();
+        return splash();
       }
     })());
   }
@@ -311,27 +296,16 @@ self.addEventListener('fetch', e => {
     return res.end(body);
   }
 
-  // Boot script — reload ONCE per tab the first time the SW takes control.
+  // Registration script — register once; NEVER reload.
   if (u.pathname === '/__codestrap/boot.js') {
     const body = `
 (function(){
   if (!('serviceWorker' in navigator)) return;
-
-  // Only attach reload-on-controllerchange when page isn't yet controlled.
-  var alreadyControlled = !!navigator.serviceWorker.controller;
-
-  // Idempotent registration.
+  try {
+    if (sessionStorage.getItem('cs_sw_registered') === '1') return;
+    sessionStorage.setItem('cs_sw_registered', '1');
+  } catch(_) {}
   navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' }).catch(function(){});
-
-  if (!alreadyControlled) {
-    navigator.serviceWorker.addEventListener('controllerchange', function(){
-      try {
-        if (sessionStorage.getItem('cs_sw_kicked') === '1') return;
-        sessionStorage.setItem('cs_sw_kicked', '1');
-      } catch(_) {}
-      location.reload();
-    });
-  }
 })();
 `.trim() + '\n';
     res.writeHead(200, {
@@ -350,13 +324,13 @@ self.addEventListener('fetch', e => {
     });
   }
 
-  // Proxy logs
+  // Proxy logs snapshot
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Proxy SSE (self)
+  // Proxy events
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -412,7 +386,7 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Normal proxy flow (+ safe HTML injection)
+  // Normal proxy flow (+ safe HTML injection of the SW registrant)
   probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
@@ -422,10 +396,8 @@ self.addEventListener('fetch', e => {
 
     // strip hop-by-hop
     const headers = { ...req.headers };
-    delete headers.connection;
-    delete headers.upgrade;
-    delete headers['proxy-connection'];
-    delete headers['keep-alive'];
+    delete headers.connection; delete headers.upgrade;
+    delete headers['proxy-connection']; delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
     // forward info
@@ -446,11 +418,9 @@ self.addEventListener('fetch', e => {
     }, pr => {
       const status = pr.statusCode || 502;
       const hdrs = { ...pr.headers };
-
-      // If not HTML or is our own utility path, passthrough without mutation.
       const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
       const isHtml = ct.includes('text/html');
-      const avoid = (u.pathname || '').startsWith('/__');
+      const avoid = (u.pathname || '').startsWith('/__'); // never inject into our own routes
 
       if (!isHtml || avoid) {
         if (status === 503) Object.assign(hdrs, noStoreHeaders());
@@ -460,38 +430,24 @@ self.addEventListener('fetch', e => {
         return;
       }
 
-      // We will mutate HTML → ensure no caches and remove Content-Length + Content-Encoding.
+      // We will mutate HTML → drop content-length/encoding; set no-store.
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-      delete hdrs['content-length'];
-      delete hdrs['Content-Length'];
-
+      delete hdrs['content-length']; delete hdrs['Content-Length'];
       const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
-      delete hdrs['content-encoding'];
-      delete hdrs['Content-Encoding'];
-
+      delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
       if (status === 503) Object.assign(hdrs, noStoreHeaders());
-
       res.writeHead(status, hdrs);
 
-      // Choose decoder if upstream is compressed; else pass raw.
       let sourceStream = pr;
       try {
-        if (enc.includes('br')) {
-          const bro = zlib.createBrotliDecompress();
-          pr.pipe(bro); sourceStream = bro;
-        } else if (enc.includes('gzip') || enc.includes('x-gzip')) {
-          const gun = zlib.createGunzip();
-          pr.pipe(gun); sourceStream = gun;
-        } else if (enc.includes('deflate')) {
-          const inf = zlib.createInflate();
-          pr.pipe(inf); sourceStream = inf;
-        }
+        if (enc.includes('br'))       { const bro = zlib.createBrotliDecompress(); pr.pipe(bro); sourceStream = bro; }
+        else if (enc.includes('gzip') || enc.includes('x-gzip')) { const gun = zlib.createGunzip(); pr.pipe(gun); sourceStream = gun; }
+        else if (enc.includes('deflate')) { const inf = zlib.createInflate(); pr.pipe(inf); sourceStream = inf; }
       } catch (e) {
-        pushLog(`warn: failed to init decoder for enc='${enc}': ${e.message}`);
-        sourceStream = pr;
+        pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
       }
 
-      // Inject boot.js before </head>, else fallback before </body>.
+      // Inject minimal registrant before </head>, else before </body>.
       let injected = false;
       let buffer = '';
       const INJECT_TAG = '<script src="/__codestrap/boot.js"></script>';
@@ -504,14 +460,12 @@ self.addEventListener('fetch', e => {
           if (i !== -1) {
             injected = true;
             const out = buffer.slice(0, i) + INJECT_TAG + buffer.slice(i);
-            res.write(out);
-            buffer = '';
+            res.write(out); buffer = '';
           } else if (buffer.length > 128 * 1024) {
-            res.write(buffer);
-            buffer = '';
+            res.write(buffer); buffer = '';
           }
         } else {
-            res.write(chunk);
+          res.write(chunk);
         }
       });
       sourceStream.on('end', () => {
