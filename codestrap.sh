@@ -2272,7 +2272,7 @@ merge_codestrap_extensions(){
   {
     echo "{"
     echo '  "recommendations": ['
-    #echo '    //codestrap merged extensions:'
+    echo '    //codestrap merged extensions:'
 
     first=1
     # repo items first
@@ -2295,7 +2295,7 @@ merge_codestrap_extensions(){
       fi
     fi
 
-    #echo '    //user defined extensions:'
+    echo '    //user defined extensions:'
 
     # then user extras (own comma handling)
     first_e=1
@@ -3056,7 +3056,7 @@ case "${1:-init}" in
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
-    safe_run "[Bootstrap config]"        merge_codestrap_extensions
+    #safe_run "[Bootstrap config]"        merge_codestrap_extensions
     safe_run "[Bootstrap GitHub]"        autorun_env_if_present
     safe_run "[Extensions env]"          autorun_install_extensions
     log "Codestrap initialized. Use: codestrap -h"
