@@ -1,7 +1,19 @@
-// codestrap-proxy.js — Reverse proxy + splash (auto-reload) + optional live code-server logs
+// codestrap-proxy.js — Reverse proxy + automatic outage reload + optional docker logs
 //
-// This version removes any auto-reload on controllerchange to avoid loops.
-// We only register a Service Worker once; the SW shows the splash on failures.
+// Behavior:
+// - When upstream (code-server) is DOWN → serve splash (503) that auto-polls.
+// - When upstream is UP → proxy through normally, BUT for top-level HTML pages
+//   we inject a single external script tag: <script src="/__watchdog.js" defer></script>
+//   The watchdog polls /__up and reloads the page if upstream goes DOWN, so the
+//   splash appears automatically. No inline JS, no service worker.
+//
+// ENV:
+//   PROXY_PORT         (default 8080)
+//   CODE_SERVICE_NAME  (required; compose service name, e.g. "code")
+//   CODE_EXPOSED_PORT  (default 8443)
+//   UP_TIMEOUT_MS      (default 2500)
+//   LOG_CAP            (default 500)
+//   DOCKER_SOCK        (default "/var/run/docker.sock")
 
 const http = require('http');
 const net  = require('net');
@@ -17,46 +29,32 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
-// VS Code webview SW scope header (when those assets pass through us)
-function addServiceWorkerHeadersIfNeeded(pathname, res) {
-  const p = pathname || "";
-  const reCodeServer = /\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
-  const reUpstream  = /^\/vscode-webview\/service-worker\.js$/i;
-  const reAlias = /^\/_vscode\/webview\/service-worker\.js$/i;
-  if (reCodeServer.test(p) || reUpstream.test(p) || reAlias.test(p)) {
-    res.setHeader('Service-Worker-Allowed', '/');
-    res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
-  }
-}
+function ts(){ return new Date().toISOString().replace('T',' ').replace('Z','Z'); }
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
-
 let logBuf = [];
 let sseClients = new Set();
-
-function ts() { return new Date().toISOString().replace('T',' ').replace('Z','Z'); }
-function pushLog(line) {
+function pushLog(line){
   const msg = `[proxy ${ts()}] ${line}`;
   logBuf.push(msg);
   if (logBuf.length > LOG_CAP) logBuf = logBuf.slice(-LOG_CAP);
   const payload = `data: ${msg.replace(/\r?\n/g,' ')}\n\n`;
-  for (const res of sseClients) { try { res.write(payload); } catch(_){} }
+  for (const res of sseClients) { try{res.write(payload);}catch(_){} }
 }
-function getLogsText() { return logBuf.join('\n') + (logBuf.length ? '\n' : ''); }
+function getLogsText(){ return logBuf.join('\n') + (logBuf.length?'\n':''); }
 
 /* --------------------- upstream health check --------------------- */
-
+let lastUp = null;
 function upstreamAlive(cb){
   const s = net.connect({ host: CODE_SERVICE_NAME || '127.0.0.1', port: CODE_EXPOSED_PORT });
   let done = false;
   const finish = ok => { if (done) return; done = true; try{s.destroy();}catch(_){ } cb(ok); };
   s.once('connect', ()=>finish(true));
   s.once('error',  ()=>finish(false));
-  s.setTimeout(UPSTREAM_CONNECT_TIMEOUT_MS,()=>finish(false));
+  s.setTimeout(UPSTREAM_CONNECT_TIMEOUT_MS, ()=>finish(false));
 }
-let lastUp = null;
-function probeAndNote(cb) {
-  upstreamAlive(ok => {
+function probeAndNote(cb){
+  upstreamAlive(ok=>{
     if (lastUp === null) pushLog(`upstream initial state: ${ok ? 'UP' : 'DOWN'} (${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT})`);
     else if (ok !== lastUp) pushLog(`upstream state change: ${ok ? 'UP' : 'DOWN'}`);
     lastUp = ok;
@@ -65,18 +63,17 @@ function probeAndNote(cb) {
 }
 
 /* --------------------- Docker logs (via socket) ---------------------------- */
-
 const docker = { enabled:false, socketPath: DOCKER_SOCK, containerId:null, wantLogs:false };
-try { fs.accessSync(DOCKER_SOCK); docker.enabled = true; } catch(_) { docker.enabled = false; }
+try { fs.accessSync(DOCKER_SOCK); docker.enabled=true; } catch(_) { docker.enabled=false; }
 docker.wantLogs = docker.enabled && !!CODE_SERVICE_NAME;
 
-function dockerRequest(path, method='GET', headers={}, cb) {
-  const req = http.request({ socketPath: docker.socketPath, path, method, headers }, res => cb(null, res));
-  req.on('error', err => cb(err)); req.end();
+function dockerRequest(path, method='GET', headers={}, cb){
+  const req = http.request({ socketPath: docker.socketPath, path, method, headers }, res=>cb(null,res));
+  req.on('error', err=>cb(err)); req.end();
 }
 function jsonEncodeFilters(obj){ return encodeURIComponent(JSON.stringify(obj)); }
 
-function resolveContainerId(cb) {
+function resolveContainerId(cb){
   if (!docker.wantLogs) return cb(new Error('logs disabled'), null);
   if (docker.containerId) return cb(null, docker.containerId);
   const filters = { label: [`com.docker.compose.service=${CODE_SERVICE_NAME}`] };
@@ -86,53 +83,51 @@ function resolveContainerId(cb) {
     let body=''; res.setEncoding('utf8');
     res.on('data', c=>body+=c);
     res.on('end', ()=>{
-      try {
+      try{
         let arr = JSON.parse(body);
-        if (!Array.isArray(arr) || arr.length === 0) {
+        if (!Array.isArray(arr) || arr.length===0) {
           dockerRequest(`/v1.41/containers/json?all=0`, 'GET', {}, (e2, r2)=>{
             if (e2) return cb(e2);
             let b2=''; r2.setEncoding('utf8'); r2.on('data',c=>b2+=c);
             r2.on('end', ()=>{
-              try {
+              try{
                 const all = JSON.parse(b2);
                 const hit = all.find(c =>
                   (c.Labels && c.Labels['com.docker.compose.service'] === CODE_SERVICE_NAME) ||
-                  (Array.isArray(c.Names) && c.Names.some(n => n.includes(`/${CODE_SERVICE_NAME}`)))
+                  (Array.isArray(c.Names) && c.Names.some(n=>n.includes(`/${CODE_SERVICE_NAME}`)))
                 );
-                if (hit) { docker.containerId = hit.Id; cb(null, docker.containerId); }
+                if (hit){ docker.containerId = hit.Id; cb(null, docker.containerId); }
                 else cb(new Error('no container matched service'), null);
-              } catch(e){ cb(e); }
+              }catch(e){ cb(e); }
             });
           });
           return;
         }
         docker.containerId = arr[0].Id; cb(null, docker.containerId);
-      } catch(e){ cb(e); }
+      }catch(e){ cb(e); }
     });
   });
 }
 
-// Demux Docker multiplexed logs (non-TTY); fallback to raw when needed.
-function createDockerDemux(onLine) {
-  let buf = Buffer.alloc(0), assumeTTY = false, badHeaders = 0;
-  function emitText(b){ b.toString('utf8').split(/\r?\n/).forEach(line=>{ if(line.length) onLine(line); }); }
-  return function onChunk(chunk) {
-    if (assumeTTY) { emitText(chunk); return; }
+function createDockerDemux(onLine){
+  let buf = Buffer.alloc(0), assumeTTY=false, badHeaders=0;
+  function emitText(b){ b.toString('utf8').split(/\r?\n/).forEach(l=>{ if(l.length) onLine(l); }); }
+  return function onChunk(chunk){
+    if (assumeTTY){ emitText(chunk); return; }
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 8) {
       const stream = buf.readUInt8(0);
       const length = buf.readUInt32BE(4);
-      if (length > 10 * 1024 * 1024) { badHeaders++; if (badHeaders >= 2) { assumeTTY=true; emitText(buf); buf=Buffer.alloc(0);} break; }
+      if (length > 10*1024*1024){ badHeaders++; if (badHeaders>=2){ assumeTTY=true; emitText(buf); buf=Buffer.alloc(0);} break; }
       if (buf.length < 8 + length) break;
-      const payload = buf.subarray(8, 8 + length);
-      const prefix = stream === 2 ? '[stderr] ' : '';
-      payload.toString('utf8').split(/\r?\n/).forEach(line=>{ if(line.length) onLine(prefix+line); });
-      buf = buf.subarray(8 + length);
+      const payload = buf.subarray(8, 8+length);
+      const prefix = stream===2 ? '[stderr] ' : '';
+      payload.toString('utf8').split(/\r?\n/).forEach(l=>{ if(l.length) onLine(prefix+l); });
+      buf = buf.subarray(8+length);
     }
   };
 }
-
-function fetchDockerLogsTail(containerId, tail, cb) {
+function fetchDockerLogsTail(containerId, tail, cb){
   const p = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&tail=${tail||200}`;
   dockerRequest(p, 'GET', {}, (err, res)=>{
     if (err) return cb(err);
@@ -141,21 +136,19 @@ function fetchDockerLogsTail(containerId, tail, cb) {
     res.on('end', ()=> cb(null, chunks.join('\n') + (chunks.length?'\n':'')));
   });
 }
-
-function streamDockerLogs(containerId, res, sinceSec) {
+function streamDockerLogs(containerId, res, sinceSec){
   const since = Math.max(0, sinceSec|0);
   const path = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&since=${since}`;
   dockerRequest(path, 'GET', {}, (err, dres)=>{
     if (err || dres.statusCode >= 400) { res.write(`data: [codelogs] error starting stream\n\n`); return; }
     const demux=createDockerDemux(line=>{ res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`); });
     dres.on('data', chunk=>demux(chunk));
-    dres.on('end', ()=>{ try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
+    dres.on('end',  ()=>{ try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
   });
 }
 
-/* --------------------- splash HTML --------------------- */
-
-function makeSplashHtml() {
+/* --------------------- splash (503) --------------------- */
+function makeSplashHtml(){
   return `<!doctype html><meta charset="utf-8">
 <title>Codestrap — connecting…</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -174,34 +167,27 @@ summary::-webkit-details-marker{display:none}
 summary{display:flex;align-items:center;gap:.5rem}
 .badge{font-size:11px;opacity:.8;border:1px solid #374151;border-radius:999px;padding:2px 8px}
 pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;overflow:auto;font-size:12px;line-height:1.35;background:#0b1220}
-kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,Menlo,monospace}
 .chev{display:inline-block;transition:transform .15s ease}
 details[open] .chev{transform:rotate(90deg)}
 .tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
 .dots{display:inline-grid;grid-auto-flow:column;grid-template-columns:repeat(3,1ch);width:3ch}
 .dots span{display:inline-block;width:1ch;text-align:left;opacity:0;animation: steps(1,end) 1.2s infinite dotReset}
-.dots span:nth-child(1){ animation-name: dot1 }
-.dots span:nth-child(2){ animation-name: dot2 }
-.dots span:nth-child(3){ animation-name: dot3 }
-@keyframes dot1 { 0%,100% { opacity:1 } }
-@keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
-@keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
-@keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
+.dots span:nth-child(1){animation-name: dot1}
+.dots span:nth-child(2){animation-name: dot2}
+.dots span:nth-child(3){animation-name: dot3}
+@keyframes dot1{0%,100%{opacity:1}}
+@keyframes dot2{0%,33%{opacity:0}34%,100%{opacity:1}}
+@keyframes dot3{0%,66%{opacity:0}67%,100%{opacity:1}}
+@keyframes dotReset{0%{opacity:0}100%{opacity:0}}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-  <div class="small tip-line" id="tip">
-    <span id="tip-base">Starting services</span>
-    <span class="dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
-  </div>
   <div class="container">
     <details class="card" id="logsbox">
-      <summary class="head">
-        <span><span class="chev">▶</span> Show live logs</span>
-        <span class="badge" id="log-status">hidden</span>
-      </summary>
+      <summary class="head"><span><span class="chev">▶</span> Show live logs</span><span class="badge" id="log-status">hidden</span></summary>
       <pre id="log"></pre>
     </details>
     <div class="small" style="opacity:.65;margin-top:10px">
@@ -209,45 +195,11 @@ details[open] .chev{transform:rotate(90deg)}
     </div>
   </div>
 </div>
-<script>
-(function(){
-  let delay = 600, maxDelay = 5000;
-  const tipBaseEl = document.getElementById('tip-base');
-  const logEl = document.getElementById('log');
-  const statusEl = document.getElementById('log-status');
-  const logsBox = document.getElementById('logsbox');
-  function setTipBase(t){ if(tipBaseEl) tipBaseEl.textContent = t; }
-  function setStatus(t){ if(statusEl) statusEl.textContent=t; }
-  function addLines(t){ if (!logEl || !t) return; logEl.textContent += t.replace(/\\r?\\n/g,'\\n'); logEl.scrollTop = logEl.scrollHeight; }
-  let logsInit = false;
-  logsBox?.addEventListener('toggle', ()=>{
-    if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
-    logsInit = true; setStatus('initializing…');
-    fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>r.ok?r.text():Promise.reject()).then(t=>{ if (t) addLines(t); setStatus('live'); }).catch(()=>{ setStatus('unavailable'); });
-    try {
-      const es = new EventSource('/__code_events');
-      es.addEventListener('message', ev => { addLines(ev.data + "\\n"); });
-      es.onopen = ()=> setStatus('live');
-      es.onerror = ()=> setStatus('disconnected (retrying…)');
-    } catch (_) { setStatus('unavailable'); }
-  });
-  async function ping(){
-    try{
-      const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
-      if (res.ok) { setTipBase('Ready! Loading…'); location.reload(); return; }
-    }catch(e){}
-    const jitter = Math.random() * 150;
-    delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
-    setTimeout(ping, delay);
-  }
-  setTimeout(ping, delay);
-})();
-</script>`;
+<script>(function(){let delay=600,maxDelay=5000;const logEl=document.getElementById('log');const statusEl=document.getElementById('log-status');const logsBox=document.getElementById('logsbox');function setStatus(t){if(statusEl)statusEl.textContent=t}function addLines(t){if(!logEl||!t)return;logEl.textContent+=t.replace(/\\r?\\n/g,'\\n');logEl.scrollTop=logEl.scrollHeight}let logsInit=false;logsBox?.addEventListener('toggle',()=>{if(!logsBox.open||logsInit){setStatus(logsBox.open?'opening…':'hidden');return}logsInit=true;setStatus('initializing…');fetch('/__code_logs?ts='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.text():Promise.reject()).then(t=>{if(t)addLines(t);setStatus('live')}).catch(()=>{setStatus('unavailable')});try{const es=new EventSource('/__code_events');es.addEventListener('message',ev=>{addLines(ev.data+"\\n")});es.onopen=()=>setStatus('live');es.onerror=()=>setStatus('disconnected (retrying…)')}catch(_){setStatus('unavailable')}});async function ping(){try{const res=await fetch('/__up?ts='+Date.now(),{cache:'no-store'});if(res.ok){location.reload();return}}catch(e){}const jitter=Math.random()*150;delay=Math.min(maxDelay,Math.round(delay*1.6)+jitter);setTimeout(ping,delay)}setTimeout(ping,delay)})();</script>`;
 }
 
 /* --------------------- helpers --------------------- */
-
-function noStoreHeaders(extra = {}) {
+function noStoreHeaders(extra = {}){
   return Object.assign({
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
@@ -258,64 +210,8 @@ function noStoreHeaders(extra = {}) {
 }
 
 /* --------------------- HTTP server --------------------- */
-
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
-
-  // SW that shows splash on upstream failures; no reload logic here.
-  if (u.pathname === '/__codestrap/sw.js') {
-    const body = `
-self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-function splash(){
-  return new Response(${JSON.stringify(makeSplashHtml())}, {
-    status: 200,
-    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
-  });
-}
-self.addEventListener('fetch', e => {
-  const r = e.request;
-  if (r.mode === 'navigate' && !r.url.includes('/__codestrap/')) {
-    e.respondWith((async () => {
-      try {
-        const resp = await fetch(r);
-        if (resp.status >= 502 && resp.status <= 599) return splash();
-        return resp;
-      } catch (_) {
-        return splash();
-      }
-    })());
-  }
-});
-`.trim() + '\n';
-    res.writeHead(200, {
-      'content-type': 'application/javascript; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-      'Service-Worker-Allowed': '/'
-    });
-    return res.end(body);
-  }
-
-  // Registration script — register once; NEVER reload.
-  if (u.pathname === '/__codestrap/boot.js') {
-    const body = `
-(function(){
-  if (!('serviceWorker' in navigator)) return;
-  try {
-    if (sessionStorage.getItem('cs_sw_registered') === '1') return;
-    sessionStorage.setItem('cs_sw_registered', '1');
-  } catch(_) {}
-  navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' }).catch(function(){});
-})();
-`.trim() + '\n';
-    res.writeHead(200, {
-      'content-type': 'application/javascript; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
-    });
-    return res.end(body);
-  }
-
-  addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
   // Health
   if (u.pathname === '/__up') {
@@ -324,13 +220,34 @@ self.addEventListener('fetch', e => {
     });
   }
 
-  // Proxy logs snapshot
+  // Watchdog script (served from our origin; allowed by typical CSP 'self')
+  if (u.pathname === '/__watchdog.js') {
+    res.writeHead(200, {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    // Exponential backoff while UP; immediate reload on failure/5xx.
+    return res.end(`(function(){
+      var d=1500, max=6000, started=Date.now();
+      function next(){ d=Math.min(max, Math.round(d*1.4)); setTimeout(ping,d); }
+      async function ping(){
+        try{
+          var r = await fetch('/__up?ts='+Date.now(), {cache:'no-store', credentials:'same-origin'});
+          if (r.status >= 500) { location.reload(); return; }
+        }catch(e){ location.reload(); return; }
+        next();
+      }
+      setTimeout(ping,d);
+    })();`);
+  }
+
+  // Proxy logs (ring buffer) snapshot
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Proxy events
+  // Proxy events (debug)
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -386,7 +303,7 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Normal proxy flow (+ safe HTML injection of the SW registrant)
+  // ---------- Normal proxy flow ----------
   probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
@@ -418,71 +335,70 @@ self.addEventListener('fetch', e => {
     }, pr => {
       const status = pr.statusCode || 502;
       const hdrs = { ...pr.headers };
+
       const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
       const isHtml = ct.includes('text/html');
-      const avoid = (u.pathname || '').startsWith('/__'); // never inject into our own routes
+      const isDocReq = (req.headers['sec-fetch-dest'] || '').toLowerCase() === 'document';
 
-      if (!isHtml || avoid) {
-        if (status === 503) Object.assign(hdrs, noStoreHeaders());
+      // Only inject on top-level HTML documents (avoid scripts/css, iframes/webviews content)
+      if (!(isHtml && isDocReq)) {
+        if (status === 503) {
+          hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+          hdrs['pragma'] = 'no-cache'; hdrs['expires'] = '0';
+        }
         res.writeHead(status, hdrs);
         pr.pipe(res);
         pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
         return;
       }
 
-      // We will mutate HTML → drop content-length/encoding; set no-store.
+      // We mutate HTML → decode if compressed; drop length/encoding and set no-store.
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       delete hdrs['content-length']; delete hdrs['Content-Length'];
       const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
       delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
-      if (status === 503) Object.assign(hdrs, noStoreHeaders());
       res.writeHead(status, hdrs);
 
       let sourceStream = pr;
       try {
-        if (enc.includes('br'))       { const bro = zlib.createBrotliDecompress(); pr.pipe(bro); sourceStream = bro; }
+        if (enc.includes('br')) { const bro = zlib.createBrotliDecompress(); pr.pipe(bro); sourceStream = bro; }
         else if (enc.includes('gzip') || enc.includes('x-gzip')) { const gun = zlib.createGunzip(); pr.pipe(gun); sourceStream = gun; }
         else if (enc.includes('deflate')) { const inf = zlib.createInflate(); pr.pipe(inf); sourceStream = inf; }
       } catch (e) {
         pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
       }
 
-      // Inject minimal registrant before </head>, else before </body>.
+      const TAG = `<script src="/__watchdog.js" defer></script>`;
       let injected = false;
       let buffer = '';
-      const INJECT_TAG = '<script src="/__codestrap/boot.js"></script>';
       sourceStream.setEncoding('utf8');
 
-      sourceStream.on('data', chunk => {
+      sourceStream.on('data', chunk=>{
         buffer += chunk;
         if (!injected) {
           const i = buffer.toLowerCase().indexOf('</head>');
           if (i !== -1) {
             injected = true;
-            const out = buffer.slice(0, i) + INJECT_TAG + buffer.slice(i);
+            const out = buffer.slice(0, i) + TAG + buffer.slice(i);
             res.write(out); buffer = '';
           } else if (buffer.length > 128 * 1024) {
-            res.write(buffer); buffer = '';
+            // fall back to stream early to avoid buffering huge pages
+            res.write(buffer); buffer='';
           }
         } else {
           res.write(chunk);
         }
       });
-      sourceStream.on('end', () => {
+      sourceStream.on('end', ()=>{
         if (!injected) {
           const j = buffer.toLowerCase().lastIndexOf('</body>');
-          if (j !== -1) res.write(buffer.slice(0, j) + INJECT_TAG + buffer.slice(j));
+          if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
           else res.write(buffer);
-        } else if (buffer) {
-          res.write(buffer);
-        }
+        } else if (buffer) res.write(buffer);
         res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [inject=${injected?'head':'fallback/none'} enc=${enc||'identity'}]`);
+        pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc||'identity'}]`);
       });
-      sourceStream.on('error', (e) => {
-        pushLog(`error in injection stream: ${e.message}`);
-        try { res.end(); } catch(_) {}
-      });
+      sourceStream.on('error', e=>{ pushLog(`error in injection stream: ${e.message}`); try{res.end();}catch(_){} });
     });
 
     p.on('error', (e)=>{
@@ -496,16 +412,15 @@ self.addEventListener('fetch', e => {
 });
 
 /* --------------------- WebSocket proxy --------------------- */
-
 server.on('upgrade', (req, client, head)=>{
   probeAndNote(ok=>{
     if (!ok) { try{client.destroy();}catch(_){ } return; }
     const upstream = net.connect(CODE_EXPOSED_PORT, CODE_SERVICE_NAME || '127.0.0.1');
-    upstream.on('connect', () => {
-      const lines = [];
+    upstream.on('connect', ()=>{
+      const lines=[];
       lines.push(`${req.method} ${req.url} HTTP/${req.httpVersion}`);
       for (const [k,v] of Object.entries(req.headers)) lines.push(`${k}: ${v}`);
-      lines.push('', '');
+      lines.push('','');
       upstream.write(lines.join('\r\n'));
       if (head?.length) upstream.write(head);
       upstream.pipe(client); client.pipe(upstream);
@@ -516,17 +431,10 @@ server.on('upgrade', (req, client, head)=>{
 });
 
 /* --------------------- boot --------------------- */
-
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
   pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT}`);
-  if (!CODE_SERVICE_NAME) {
-    pushLog(`WARNING: CODE_SERVICE_NAME is not set — upstream+logs may not work as expected`);
-  }
-  if (docker.wantLogs) {
-    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE_NAME}`);
-  } else if (docker.enabled) {
-    pushLog(`docker socket present, but CODE_SERVICE_NAME not set → logs disabled`);
-  } else {
-    pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
-  }
+  if (!CODE_SERVICE_NAME) pushLog(`WARNING: CODE_SERVICE_NAME not set — upstream+logs may not work`);
+  if (docker.wantLogs) pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE_NAME}`);
+  else if (docker.enabled) pushLog(`docker socket present, but CODE_SERVICE_NAME not set → logs disabled`);
+  else pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
 });
