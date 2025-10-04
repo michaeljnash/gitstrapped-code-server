@@ -1,52 +1,37 @@
 // codestrap-proxy.js — Reverse proxy + splash (auto-reload) + optional live code-server logs
 //
-// Proxy: HTTP+WS → code-server. Shows a splash while upstream is DOWN and
-// auto-polls to reload when it's UP. Splash has a collapsible "Live logs"
-// section that streams logs from the code container via the Docker socket.
-// Now also registers a Service Worker to automatically show the splash on
-// any top-level navigation while upstream is down — no manual reload needed.
+// Adds a Service Worker + boot script to automatically show the splash when
+// upstream (code-server) is down, *and* safely injects the boot script into
+// HTML responses (handles compressed upstream: gzip/br/deflate).
 //
-// ENV (set these in compose):
-//   PROXY_PORT         : public port to listen on (default 8080)
-//   CODE_SERVICE_NAME  : REQUIRED (compose service name of code-server, e.g. "code")
-//   CODE_EXPOSED_PORT  : upstream port exposed by that service (default 8443)
-//   UP_TIMEOUT_MS      : TCP connect timeout to upstream (default 2500)
-//   LOG_CAP            : proxy ring-buffer size for internal msgs (default 500)
-//   DOCKER_SOCK        : path to Docker socket (default "/var/run/docker.sock")
-//
-// Notes:
-//   - Mount /var/run/docker.sock:ro into this container to enable live logs.
-//   - If CODE_SERVICE_NAME is unset or the socket is missing, the logs panel
-//     will show "unavailable" when opened.
+// ENV:
+//   PROXY_PORT, CODE_SERVICE_NAME, CODE_EXPOSED_PORT, UP_TIMEOUT_MS, LOG_CAP, DOCKER_SOCK
 
 const http = require('http');
 const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
+const zlib = require('zlib');
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
-const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || ''; // required by you; no default
+const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
 const CODE_EXPOSED_PORT = +(process.env.CODE_EXPOSED_PORT || 8443);
 const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
-
 // Allow VS Code / code-server webview SW to claim root scope.
-// Matches both code-server and newer upstream paths.
 function addServiceWorkerHeadersIfNeeded(pathname, res) {
   const p = pathname || "";
   const reCodeServer = /\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
-  const reUpstream  = /^\/vscode-webview\/service-worker\.js$/i; // newer path in some builds
+  const reUpstream  = /^\/vscode-webview\/service-worker\.js$/i;
   const reAlias = /^\/_vscode\/webview\/service-worker\.js$/i;
   if (reCodeServer.test(p) || reUpstream.test(p) || reAlias.test(p)) {
     res.setHeader('Service-Worker-Allowed', '/');
-    // Avoid caching the SW through intermediate proxies/CDNs
     res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
   }
 }
-
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
 
@@ -91,7 +76,6 @@ const docker = {
   containerId: null,
   wantLogs: false
 };
-
 try { fs.accessSync(DOCKER_SOCK); docker.enabled = true; } catch(_) { docker.enabled = false; }
 docker.wantLogs = docker.enabled && !!CODE_SERVICE_NAME;
 
@@ -100,16 +84,12 @@ function dockerRequest(path, method='GET', headers={}, cb) {
   req.on('error', err => cb(err));
   req.end();
 }
-
-function jsonEncodeFilters(obj){
-  return encodeURIComponent(JSON.stringify(obj));
-}
+function jsonEncodeFilters(obj){ return encodeURIComponent(JSON.stringify(obj)); }
 
 function resolveContainerId(cb) {
   if (!docker.wantLogs) return cb(new Error('logs disabled'), null);
   if (docker.containerId) return cb(null, docker.containerId);
 
-  // Resolve by compose label (preferred) or name contains
   const filters = { label: [`com.docker.compose.service=${CODE_SERVICE_NAME}`] };
   const path = `/v1.41/containers/json?all=0&filters=${jsonEncodeFilters(filters)}`;
   dockerRequest(path, 'GET', {}, (err, res)=>{
@@ -120,7 +100,6 @@ function resolveContainerId(cb) {
       try {
         let arr = JSON.parse(body);
         if (!Array.isArray(arr) || arr.length === 0) {
-          // fallback: list all and try name contains /CODE_SERVICE_NAME
           dockerRequest(`/v1.41/containers/json?all=0`, 'GET', {}, (e2, r2)=>{
             if (e2) return cb(e2);
             let b2=''; r2.setEncoding('utf8'); r2.on('data',c=>b2+=c);
@@ -150,29 +129,18 @@ function createDockerDemux(onLine) {
   let buf = Buffer.alloc(0);
   let assumeTTY = false;
   let badHeaders = 0;
-
-  function emitText(b) {
-    const s = b.toString('utf8');
-    s.split(/\r?\n/).forEach(line => { if (line.length) onLine(line); });
-  }
-
+  function emitText(b) { b.toString('utf8').split(/\r?\n/).forEach(line => { if (line.length) onLine(line); }); }
   return function onChunk(chunk) {
     if (assumeTTY) { emitText(chunk); return; }
     buf = Buffer.concat([buf, chunk]);
     while (buf.length >= 8) {
       const stream = buf.readUInt8(0);
       const length = buf.readUInt32BE(4);
-      if (length > 10 * 1024 * 1024) {
-        badHeaders++;
-        if (badHeaders >= 2) { assumeTTY = true; emitText(buf); buf = Buffer.alloc(0); }
-        break;
-      }
+      if (length > 10 * 1024 * 1024) { badHeaders++; if (badHeaders >= 2) { assumeTTY = true; emitText(buf); buf = Buffer.alloc(0); } break; }
       if (buf.length < 8 + length) break;
       const payload = buf.subarray(8, 8 + length);
       const prefix = stream === 2 ? '[stderr] ' : '';
-      payload.toString('utf8').split(/\r?\n/).forEach(line=>{
-        if (line.length) onLine(prefix + line);
-      });
+      payload.toString('utf8').split(/\r?\n/).forEach(line=>{ if (line.length) onLine(prefix + line); });
       buf = buf.subarray(8 + length);
     }
   };
@@ -193,19 +161,14 @@ function streamDockerLogs(containerId, res, sinceSec) {
   const since = Math.max(0, sinceSec|0);
   const path = `/v1.41/containers/${encodeURIComponent(containerId)}/logs?stdout=1&stderr=1&follow=1&since=${since}`;
   dockerRequest(path, 'GET', {}, (err, dres)=>{
-    if (err || dres.statusCode >= 400) {
-      res.write(`data: [codelogs] error starting stream\n\n`);
-      return;
-    }
-    const demux = createDockerDemux(line=>{
-      res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`);
-    });
+    if (err || dres.statusCode >= 400) { res.write(`data: [codelogs] error starting stream\n\n`); return; }
+    const demux = createDockerDemux(line=>{ res.write(`data: ${line.replace(/\r?\n/g,' ')}\n\n`); });
     dres.on('data', chunk => demux(chunk));
     dres.on('end',  ()=> { try{res.write(`data: [codelogs] ended\n\n`);}catch(_){ } });
   });
 }
 
-/* --------------------- splash HTML (dots animate 1→2→3) -------------------- */
+/* --------------------- splash HTML --------------------- */
 
 function makeSplashHtml() {
   return `<!doctype html><meta charset="utf-8">
@@ -263,35 +226,20 @@ details[open] .chev{transform:rotate(90deg)}
 </div>
 <script>
 (function(){
-  let delay = 600, maxDelay = 5000, tries = 0;
+  let delay = 600, maxDelay = 5000;
   const original = location.href;
   const tipBaseEl = document.getElementById('tip-base');
   const logEl = document.getElementById('log');
   const statusEl = document.getElementById('log-status');
   const logsBox = document.getElementById('logsbox');
-
   function setTipBase(t){ if(tipBaseEl) tipBaseEl.textContent = t; }
   function setStatus(t){ if(statusEl) statusEl.textContent=t; }
-  function addLines(t){
-    if (!logEl || !t) return;
-    logEl.textContent += t.replace(/\\r?\\n/g,'\\n');
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  // Live logs: initialize only when opened
+  function addLines(t){ if (!logEl || !t) return; logEl.textContent += t.replace(/\\r?\\n/g,'\\n'); logEl.scrollTop = logEl.scrollHeight; }
   let logsInit = false;
   logsBox?.addEventListener('toggle', ()=>{
     if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
-    logsInit = true;
-    setStatus('initializing…');
-    fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>{
-      if (r.ok) return r.text();
-      throw new Error('snapshot unavailable');
-    }).then(t=>{
-      if (t) addLines(t);
-      setStatus('live');
-    }).catch(()=>{ setStatus('unavailable'); });
-
+    logsInit = true; setStatus('initializing…');
+    fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>r.ok?r.text():Promise.reject()).then(t=>{ if (t) addLines(t); setStatus('live'); }).catch(()=>{ setStatus('unavailable'); });
     try {
       const es = new EventSource('/__code_events');
       es.addEventListener('message', ev => { addLines(ev.data + "\\n"); });
@@ -299,17 +247,10 @@ details[open] .chev{transform:rotate(90deg)}
       es.onerror = ()=> setStatus('disconnected (retrying…)');
     } catch (_) { setStatus('unavailable'); }
   });
-
-  // Start polling immediately (dots are CSS-driven and already running)
   async function ping(){
-    tries++;
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
-      if (res.ok) {
-        setTipBase('Ready! Loading…');
-        location.replace(original);
-        return;
-      }
+      if (res.ok) { setTipBase('Ready! Loading…'); location.replace(original); return; }
     }catch(e){}
     const jitter = Math.random() * 150;
     delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
@@ -319,7 +260,6 @@ details[open] .chev{transform:rotate(90deg)}
 })();
 </script>`;
 }
-
 
 /* --------------------- helpers --------------------- */
 
@@ -338,25 +278,19 @@ function noStoreHeaders(extra = {}) {
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
-  // Serve our Service Worker (handles navigations → splash when upstream is down)
+  // Service Worker
   if (u.pathname === '/__codestrap/sw.js') {
     const body = `
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
-
 function splashResponse(){
   return new Response(${JSON.stringify(makeSplashHtml())}, {
     status: 200,
-    headers: {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store'
-    }
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }
   });
 }
-
 self.addEventListener('fetch', e => {
   const r = e.request;
-  // Only top-level navigations; ignore our own utility paths.
   if (r.mode === 'navigate' && !r.url.includes('/__codestrap/')) {
     e.respondWith((async () => {
       try {
@@ -370,7 +304,6 @@ self.addEventListener('fetch', e => {
   }
 });
 `.trim() + '\n';
-
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
@@ -379,20 +312,17 @@ self.addEventListener('fetch', e => {
     return res.end(body);
   }
 
-  // Serve the boot script that registers the SW and refreshes on controllerchange.
+  // Boot script
   if (u.pathname === '/__codestrap/boot.js') {
     const body = `
 (function(){
   if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' })
-    .catch(function(){});
-  // If SW takes control after a crash, refresh once to re-hydrate the app shell.
+  navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' }).catch(function(){});
   navigator.serviceWorker.addEventListener('controllerchange', function(){
     if (!window.__cs_sw_kick) { window.__cs_sw_kick = 1; location.reload(); }
   });
 })();
 `.trim() + '\n';
-
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
@@ -402,20 +332,20 @@ self.addEventListener('fetch', e => {
 
   addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
-  // Health endpoint
+  // Health
   if (u.pathname === '/__up') {
     return probeAndNote(ok=>{
       res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
     });
   }
 
-  // Proxy logs (ring buffer) snapshot
+  // Proxy logs
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Internal SSE for proxy messages (handy for debugging)
+  // Proxy SSE (self)
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -471,7 +401,7 @@ self.addEventListener('fetch', e => {
     return;
   }
 
-  // Normal proxy flow (+ HTML injector for boot.js)
+  // Normal proxy flow (+ safe HTML injection)
   probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
@@ -503,33 +433,61 @@ self.addEventListener('fetch', e => {
       method: req.method,
       headers
     }, pr => {
+      const status = pr.statusCode || 502;
+      const hdrs = { ...pr.headers };
 
-      // Should we inject the boot script? (HTML pages only; skip utility endpoints)
-      const ct = (pr.headers['content-type'] || pr.headers['Content-Type'] || '').toLowerCase();
+      // If not HTML or is our own utility path, passthrough without mutation.
+      const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
       const isHtml = ct.includes('text/html');
       const avoid = (u.pathname || '').startsWith('/__');
-      const shouldInject = isHtml && !avoid;
 
-      if (!shouldInject) {
-        if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
-        res.writeHead(pr.statusCode || 502, pr.headers);
+      if (!isHtml || avoid) {
+        if (status === 503) Object.assign(hdrs, noStoreHeaders());
+        res.writeHead(status, hdrs);
         pr.pipe(res);
-        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${pr.statusCode||0}`));
+        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
         return;
       }
 
-      // Injection path: insert <script src="/__codestrap/boot.js"> before </head>
-      // Set no-store so mutated HTML isn't cached upstream of us.
-      pr.headers['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-      if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
-      res.writeHead(pr.statusCode || 200, pr.headers);
+      // We will mutate HTML → ensure no caches and remove Content-Length + Content-Encoding.
+      hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+      delete hdrs['content-length'];
+      delete hdrs['Content-Length'];
 
+      const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
+      delete hdrs['content-encoding'];
+      delete hdrs['Content-Encoding'];
+
+      if (status === 503) Object.assign(hdrs, noStoreHeaders());
+
+      res.writeHead(status, hdrs);
+
+      // Choose decoder if upstream is compressed; else pass raw.
+      let sourceStream = pr;
+      try {
+        if (enc.includes('br')) {
+          const bro = zlib.createBrotliDecompress();
+          pr.pipe(bro); sourceStream = bro;
+        } else if (enc.includes('gzip') || enc.includes('x-gzip')) {
+          const gun = zlib.createGunzip();
+          pr.pipe(gun); sourceStream = gun;
+        } else if (enc.includes('deflate')) {
+          const inf = zlib.createInflate();
+          pr.pipe(inf); sourceStream = inf;
+        }
+      } catch (e) {
+        // If decoder setup fails, fall back to passthrough (still stripped encoding → safe but may look wrong).
+        pushLog(`warn: failed to init decoder for enc='${enc}': ${e.message}`);
+        sourceStream = pr;
+      }
+
+      // Inject <script src="/__codestrap/boot.js"></script> before </head>, else stream unchanged.
       let seenHead = false;
       let buffer = '';
       const INJECT_TAG = '<script src="/__codestrap/boot.js"></script>';
+      sourceStream.setEncoding('utf8');
 
-      pr.setEncoding('utf8');
-      pr.on('data', chunk => {
+      sourceStream.on('data', chunk => {
         buffer += chunk;
         if (!seenHead) {
           const i = buffer.toLowerCase().indexOf('</head>');
@@ -539,8 +497,8 @@ self.addEventListener('fetch', e => {
             res.write(out);
             buffer = '';
           } else {
-            // To avoid unbounded buffering, flush in chunks if head never appears.
             if (buffer.length > 128 * 1024) {
+              // If no </head> appears (non-standard HTML), flush progressively to avoid buffering too much.
               res.write(buffer);
               buffer = '';
             }
@@ -549,10 +507,25 @@ self.addEventListener('fetch', e => {
           res.write(chunk);
         }
       });
-      pr.on('end', () => {
-        if (buffer) res.write(buffer);
+      sourceStream.on('end', () => {
+        if (!seenHead) {
+          // As a fallback, try to inject before </body>; else just flush remaining.
+          const j = buffer.toLowerCase().lastIndexOf('</body>');
+          if (j !== -1) {
+            const out2 = buffer.slice(0, j) + INJECT_TAG + buffer.slice(j);
+            res.write(out2);
+          } else {
+            res.write(buffer);
+          }
+        } else if (buffer) {
+          res.write(buffer);
+        }
         res.end();
-        pushLog(`${req.method} ${req.url} → ${pr.statusCode||0} [inject=${seenHead?'y':'n'}]`);
+        pushLog(`${req.method} ${req.url} → ${status} [inject=${seenHead?'head':'fallback/none'} enc=${enc||'identity'}]`);
+      });
+      sourceStream.on('error', (e) => {
+        pushLog(`error in injection stream: ${e.message}`);
+        try { res.end(); } catch(_) {}
       });
     });
 
