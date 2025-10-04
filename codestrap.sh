@@ -163,7 +163,6 @@ SH
 }
 
 ensure_codestrap_extension(){
-  # Extension install roots
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT \
     /config/extensions \
@@ -173,7 +172,7 @@ ensure_codestrap_extension(){
     $HOME/.local/share/vscode-oss/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.5.0"   # GUI for all CLI subcommands
+  NEW_VER="0.5.1"   # terminal-logs variant with UI tweaks
   NEW_FOLDER="${NEW_ID}-${NEW_VER}"
 
   FLAGDIR="${HOME}/.codestrap"
@@ -185,13 +184,13 @@ ensure_codestrap_extension(){
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # --- CLEANUP: remove any old versions
+    # Remove older versions
     for old in "$_base"/${NEW_ID}-*; do
       [ -e "$old" ] || continue
       case "$old" in *"/${NEW_FOLDER}") : ;; *) rm -rf "$old" 2>/dev/null || true ;; esac
     done
 
-    # --- CLEANUP: force index/state rebuild
+    # Force code-server to rebuild its index/state
     rm -f "$_base/extensions.json" 2>/dev/null || true
     rm -f "$_base/.obsolete" "$_base/.obselete" 2>/dev/null || true
 
@@ -205,14 +204,15 @@ ensure_codestrap_extension(){
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.5.0",
-  "description": "Full GUI for the Codestrap CLI (passwd, config, extensions, github) inside a side panel.",
+  "version": "0.5.1",
+  "description": "Full GUI for the Codestrap CLI (passwd, config, extensions, github) inside a side panel. Uses terminal for logs.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.view",
     "onCommand:codestrap.open",
+    "onCommand:codestrap.openTerminal",
     "onCommand:codestrap.refresh"
   ],
   "contributes": {
@@ -228,12 +228,13 @@ ensure_codestrap_extension(){
     },
     "commands": [
       { "command": "codestrap.open", "title": "Codestrap: Open Sidebar" },
+      { "command": "codestrap.openTerminal", "title": "Codestrap: Show Terminal" },
       { "command": "codestrap.refresh", "title": "Codestrap: Refresh Panel" }
     ],
     "viewsWelcome": [
       {
         "view": "codestrap.view",
-        "contents": "Use the **sections** below to run any Codestrap command without the terminal.\\n"
+        "contents": "Run any Codestrap command from the sections below. Logs open in the integrated Terminal.\\n"
       }
     ]
   }
@@ -250,177 +251,114 @@ SVG
 
     # ---------- extension.js ----------
     cat >"${NEW_DIR}/extension.js" <<'JS'
-/* Codestrap full-GUI extension */
 const vscode = require('vscode');
-const { spawn } = require('child_process');
-const os = require('os');
 const fs = require('fs');
 
-function resolveCodestrap(){
-  // Allow override
-  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) {
-    return { cmd: process.env.CODESTRAP_BIN, argsPrefix: [] };
+/** Shared terminal for log output */
+class Term {
+  static get(name='Codestrap'){
+    if (!this._term || this._termExit) {
+      this._term = vscode.window.createTerminal({ name });
+      this._termExit = false;
+      vscode.window.onDidCloseTerminal(t => { if (t === this._term) this._termExit = true; });
+    }
+    return this._term;
   }
-  // Typical installs
+  static show(){ this.get().show(true); }
+  static send(cmd){ const t = this.get(); t.sendText(cmd, true); this.show(); }
+}
+
+/** Find codestrap runner: prefer $CODESTRAP_BIN, else typical bins, else raw script. */
+function resolveCodestrapString(){
+  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) {
+    return shellQ(process.env.CODESTRAP_BIN);
+  }
   const candidates = [
     '/usr/local/bin/codestrap',
-    '/usr/bin/codestrap',
-    // Fallback to raw script (call with "cli" sub-runner):
-    '/custom-cont-init.d/10-codestrap.sh'
+    '/usr/bin/codestrap'
   ];
   for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      if (p.endsWith('/10-codestrap.sh')) return { cmd: 'sh', argsPrefix: [p, 'cli'] };
-      return { cmd: p, argsPrefix: [] };
-    }
+    if (fs.existsSync(p)) return shellQ(p);
+  }
+  // Fallback to your init script with "cli" sub-runner
+  if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) {
+    return `sh ${shellQ('/custom-cont-init.d/10-codestrap.sh')} cli`;
   }
   return null;
 }
 
-function redactArgs(args){
-  // hide secrets in log stream
-  const redacted = [];
-  let hideNext = false;
-  for (const a of args) {
-    if (hideNext) { redacted.push('***'); hideNext = false; continue; }
-    if (['--set','-t','--token','--password'].includes(a)) { redacted.push(a); hideNext = true; continue; }
-    if (a.toLowerCase().startsWith('ghp_') || a.toLowerCase().startsWith('github_pat_')) { redacted.push('***'); continue; }
-    redacted.push(a);
-  }
-  return redacted;
+/** Minimal shell quoting (single-quote safe) */
+function shellQ(s){
+  if (s === undefined || s === null) return "''";
+  s = String(s);
+  if (s === '') return "''";
+  // close ' -> '\'' -> reopen
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-function runCodestrap(arglist, opts = {}){
-  return new Promise((resolve) => {
-    const resolved = resolveCodestrap();
-    if (!resolved) {
-      resolve({ code: 127, stdout: '', stderr: 'codestrap not found on PATH or /custom-cont-init.d/10-codestrap.sh' });
-      return;
-    }
-    const { cmd, argsPrefix } = resolved;
-    const args = [...argsPrefix, ...arglist];
-    const child = spawn(cmd, args, {
-      env: { ...process.env, ...(opts.env || {}) },
-      cwd: opts.cwd || undefined,
-      shell: false
-    });
-    let stdout = '', stderr = '';
-
-    const mask = redactArgs(args).join(' ');
-    vscode.window.showInformationMessage(`[codestrap] ${cmd} ${mask}`);
-
-    child.stdout.on('data', (d) => {
-      const s = d.toString();
-      stdout += s;
-      opts.onStdout && opts.onStdout(s);
-    });
-    child.stderr.on('data', (d) => {
-      const s = d.toString();
-      stderr += s;
-      opts.onStderr && opts.onStderr(s);
-    });
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
-  });
+function buildAndRun(args){
+  const runner = resolveCodestrapString();
+  if (!runner) {
+    vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).');
+    return;
+  }
+  const line = `${runner} ${args.join(' ')}`;
+  Term.send(line);
 }
 
 class ViewProvider {
-  constructor(ctx){ this.ctx = ctx; }
   resolveWebviewView(webviewView){
     this.webview = webviewView.webview;
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
-    const cspSource = this.webview.cspSource;
-    this.webview.html = this.renderHtml(nonce, cspSource);
+    const src = this.webview.cspSource;
+    this.webview.html = this.renderHtml(nonce, src);
 
-    this.webview.onDidReceiveMessage(async (msg) => {
+    this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
-        case 'ping': {
-          const ok = !!resolveCodestrap();
-          this.post({ type:'pong', ok });
-          break;
-        }
-
         case 'passwd:set': {
-          // codestrap passwd --set "<password>"
           const pw = msg.password || '';
-          if (!pw || pw.length < 8) { this.post({ type:'task:end', ok:false, section:'passwd', out:'Minimum length 8' }); break; }
-          await this.runSection('passwd', ['passwd', '--set', pw]);
+          if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
+          buildAndRun(['passwd', '--set', shellQ(pw)]);
           break;
         }
-
         case 'config:run': {
-          // codestrap config -s t/f -k t/f -t t/f -e t/f (only set those toggled)
+          const tf = (b)=> b ? 'true' : 'false';
           const args = ['config'];
-          const tf = (b) => (b ? 'true' : 'false');
-          if ('settings'   in msg) args.push('-s', tf(!!msg.settings));
-          if ('keybindings' in msg) args.push('-k', tf(!!msg.keybindings));
-          if ('tasks'       in msg) args.push('-t', tf(!!msg.tasks));
-          if ('extensions'  in msg) args.push('-e', tf(!!msg.extensions));
-          await this.runSection('config', args);
+          if ('settings' in msg)   args.push('-s', tf(!!msg.settings));
+          if ('keybindings' in msg)args.push('-k', tf(!!msg.keybindings));
+          if ('tasks' in msg)      args.push('-t', tf(!!msg.tasks));
+          if ('extensions' in msg) args.push('-e', tf(!!msg.extensions));
+          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
           break;
         }
-
         case 'ext:apply': {
-          // optional uninstall then install
-          // uninstall scope: all|missing|"" ; install scope: all|missing|""
           const args = ['extensions'];
-          if (msg.uninstall && (msg.uninstall === 'all' || msg.uninstall === 'missing')) {
-            args.push('-u', msg.uninstall);
-          }
-          if (msg.install && (msg.install === 'all' || msg.install === 'missing')) {
-            args.push('-i', msg.install);
-          }
-          await this.runSection('extensions', args);
+          if (msg.uninstall === 'all' || msg.uninstall === 'missing') { args.push('-u', msg.uninstall); }
+          if (msg.install === 'all' || msg.install === 'missing')     { args.push('-i', msg.install); }
+          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
           break;
         }
-
         case 'github:run': {
-          // Build: codestrap github [--auto] flags...
           const args = ['github'];
           if (msg.auto) {
             args.push('--auto');
           } else {
-            // Only pass flags we have; CLI allows all
             if (msg.username) args.push('-u', msg.username);
             if (msg.token)    args.push('-t', msg.token);
             if (msg.name)     args.push('-n', msg.name);
             if (msg.email)    args.push('-e', msg.email);
             if (msg.repos)    args.push('-r', msg.repos);
-            if ('pull' in msg) args.push('-p', String(!!msg.pull));
+            if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
-          await this.runSection('github', args);
+          buildAndRun(args.map(a => (a.startsWith('-') ? a : shellQ(a))));
           break;
         }
-
-        case 'refresh':
-          this.post({ type:'log:clear' });
+        case 'openTerminal':
+          Term.show();
           break;
       }
     });
-  }
-
-  post(m){ this.webview?.postMessage(m); }
-
-  async runSection(section, args){
-    this.post({ type:'task:start', section, args: redactArgs(args) });
-    const outLines = [];
-    const onStdout = (s)=> {
-      outLines.push(s);
-      this.post({ type:'log:append', section, chunk:s });
-    };
-    const onStderr = (s)=> {
-      outLines.push(s);
-      this.post({ type:'log:append', section, chunk:s });
-    };
-
-    const { code } = await runCodestrap(args, { onStdout, onStderr });
-    const ok = (code === 0);
-    this.post({ type:'task:end', section, ok, out: outLines.join('') });
-    if (!ok) {
-      vscode.window.showErrorMessage(`[codestrap] ${section} failed (exit ${code})`);
-    } else {
-      vscode.window.showInformationMessage(`[codestrap] ${section} completed`);
-    }
   }
 
   renderHtml(nonce, cspSource){
@@ -434,38 +372,37 @@ class ViewProvider {
     return `<!doctype html>
 <html>
 <head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Codestrap</title>
-<style>
-:root{
-  --bg: var(--vscode-sideBar-background);
-  --fg: var(--vscode-foreground);
-  --muted: var(--vscode-descriptionForeground);
-  --btn: var(--vscode-button-background);
-  --btnText: var(--vscode-button-foreground);
-  --border: var(--vscode-panel-border);
-  --input: var(--vscode-input-background);
-}
-body { margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
-h3 { margin: 12px 0 8px; font-size: 13px; }
-.section { border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
-label { font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
-input[type="text"], input[type="password"] { width:100%; padding:6px 8px; background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:8px; }
-.row { display:flex; gap:8px; align-items:center; }
-button { border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
-.small { font-size:11px; color:var(--muted); }
-.grid-2 { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
-.log { white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11px; background:var(--input); border:1px solid var(--border); border-radius:8px; padding:8px; max-height:160px; overflow:auto; }
-.badge { padding:2px 6px; border-radius:999px; font-size:10px; border:1px solid var(--border); color:var(--muted); }
-.toprow { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-</style>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codestrap</title>
+  <style>
+    :root{
+      --bg: var(--vscode-sideBar-background);
+      --fg: var(--vscode-foreground);
+      --muted: var(--vscode-descriptionForeground);
+      --btn: var(--vscode-button-background);
+      --btnText: var(--vscode-button-foreground);
+      --border: var(--vscode-panel-border);
+      --input: var(--vscode-input-background);
+    }
+    body { margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
+    h3 { margin: 12px 0 8px; font-size: 13px; }
+    .section { border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
+    label { font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
+    input[type="text"], input[type="password"], select {
+      width:100%; padding:6px 8px; background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:8px;
+    }
+    .row { display:flex; gap:8px; align-items:center; }
+    .toprow { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+    button { border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
+    .small { font-size:11px; color:var(--muted); }
+  </style>
 </head>
 <body>
   <div class="toprow">
-    <div class="badge" id="probe">probing codestrap…</div>
-    <button id="refresh">Clear logs</button>
+    <div style="font-size:11px; color:var(--muted)">Logs will appear in the integrated Terminal.</div>
+    <button id="term">Terminal</button>
   </div>
 
   <div class="section" id="sec-passwd">
@@ -473,50 +410,39 @@ button { border:0; border-radius:8px; background:var(--btn); color:var(--btnText
     <label>New password</label>
     <input id="pw" type="password" placeholder="at least 8 characters" />
     <div class="row" style="margin-top:8px;">
-      <button id="pw-run">Change Password</button>
-      <span class="small">Runs <code>codestrap passwd --set &lt;password&gt;</code></span>
+      <button id="pw-run">Change</button>
     </div>
-    <div class="log" id="log-passwd"></div>
   </div>
 
   <div class="section" id="sec-config">
     <h3>Bootstrap config (codestrap <code>config</code>)</h3>
-    <div class="grid-2">
-      <label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label>
-      <label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label>
-      <label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label>
-      <label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label>
-    </div>
+    <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
+    <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
+    <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
+    <div class="row"><label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label></div>
     <div class="row" style="margin-top:8px;">
-      <button id="cfg-run">Run Config Merge</button>
-      <span class="small">Non-interactive run with only the toggled flags</span>
+      <button id="cfg-run">Merge</button>
+      <span class="small">Merge codestrap config files into user config files</span>
     </div>
-    <div class="log" id="log-config"></div>
   </div>
 
   <div class="section" id="sec-ext">
     <h3>Manage extensions (codestrap <code>extensions</code>)</h3>
-    <div class="grid-2">
-      <label>Uninstall scope
-        <select id="ext-un">
-          <option value="">(none)</option>
-          <option value="missing">missing (cleanup)</option>
-          <option value="all">all (remove everything)</option>
-        </select>
-      </label>
-      <label>Install scope
-        <select id="ext-in">
-          <option value="">(none)</option>
-          <option value="missing">missing</option>
-          <option value="all">all (update to latest)</option>
-        </select>
-      </label>
-    </div>
+    <label>Uninstall scope</label>
+    <select id="ext-un">
+      <option value="">(none)</option>
+      <option value="missing">missing (cleanup)</option>
+      <option value="all">all (remove everything)</option>
+    </select>
+    <label style="margin-top:6px;">Install scope</label>
+    <select id="ext-in">
+      <option value="">(none)</option>
+      <option value="missing">missing</option>
+      <option value="all">all (update to latest)</option>
+    </select>
     <div class="row" style="margin-top:8px;">
       <button id="ext-run">Apply</button>
-      <span class="small">Runs in order: uninstall → install (if both chosen)</span>
     </div>
-    <div class="log" id="log-extensions"></div>
   </div>
 
   <div class="section" id="sec-github">
@@ -536,29 +462,22 @@ button { border:0; border-radius:8px; background:var(--btn); color:var(--btnText
       <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
     </div>
     <div class="row" style="margin-top:8px;">
-      <button id="gh-run">Run GitHub Bootstrap</button>
-      <span class="small">Sets identity, ensures SSH key, clones/pulls, etc.</span>
+      <button id="gh-run">Run</button>
     </div>
-    <div class="log" id="log-github"></div>
   </div>
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-
 const $ = (id) => document.getElementById(id);
-function log(sec, s){ const el = $("log-"+sec); el.textContent += s; el.scrollTop = el.scrollHeight; }
-function clearLogs(){ ["passwd","config","extensions","github"].forEach(k => $("log-"+k).textContent=""); }
 
-$("refresh").onclick = () => { clearLogs(); vscode.postMessage({ type:"refresh" }); };
+$("term").onclick = () => vscode.postMessage({ type:"openTerminal" });
 
 $("pw-run").onclick = () => {
   const pw = $("pw").value || "";
-  $("log-passwd").textContent = "";
   vscode.postMessage({ type:"passwd:set", password: pw });
 };
 
 $("cfg-run").onclick = () => {
-  $("log-config").textContent = "";
   vscode.postMessage({
     type:"config:run",
     settings: $("cfg-settings").checked,
@@ -569,7 +488,6 @@ $("cfg-run").onclick = () => {
 };
 
 $("ext-run").onclick = () => {
-  $("log-extensions").textContent = "";
   vscode.postMessage({
     type:"ext:apply",
     uninstall: $("ext-un").value || "",
@@ -578,11 +496,9 @@ $("ext-run").onclick = () => {
 };
 
 $("gh-auto").onchange = () => {
-  const d = $("gh-fields").style;
-  d.display = $("gh-auto").checked ? "none" : "block";
+  $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";
 };
 $("gh-run").onclick = () => {
-  $("log-github").textContent = "";
   const auto = $("gh-auto").checked;
   vscode.postMessage({
     type: "github:run",
@@ -595,21 +511,6 @@ $("gh-run").onclick = () => {
     pull:     auto ? undefined : $("gh-pull").checked
   });
 };
-
-window.addEventListener('message', ev => {
-  const m = ev.data;
-  if (m.type === "log:append") log(m.section, m.chunk);
-  if (m.type === "task:start") log(m.section, ">> " + (m.args||[]).join(" ") + "\\n");
-  if (m.type === "task:end")   log(m.section, "\\n== " + (m.ok ? "OK" : "FAILED") + " ==\\n");
-  if (m.type === "log:clear")  clearLogs();
-  if (m.type === "pong") {
-    $("probe").textContent = m.ok ? "codestrap detected" : "codestrap NOT found";
-    $("probe").style.color = m.ok ? "" : "#ef4444";
-    $("probe").style.borderColor = m.ok ? "" : "#ef4444";
-  }
-});
-
-vscode.postMessage({ type:"ping" });
 </script>
 </body>
 </html>`;
@@ -617,25 +518,25 @@ vscode.postMessage({ type:"ping" });
 }
 
 function activate(context){
-  const provider = new ViewProvider(context);
+  const provider = new ViewProvider();
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('codestrap.view', provider, { webviewOptions: { retainContextWhenHidden: true } })
   );
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.open', () =>
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () =>
-    provider.post({ type:'log:clear' })
-  ));
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', () => Term.show()));
 }
 
 function deactivate(){}
+
 module.exports = { activate, deactivate };
 JS
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
-    echo "[codestrap] wrote full-GUI Webview extension → $NEW_DIR"
+    echo "[codestrap] wrote GUI Webview (terminal logs) → $NEW_DIR"
   }
 
   # Write to all candidate roots (dedupe)
@@ -649,8 +550,6 @@ JS
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
-
-
 
 reload_window(){
   # unconditionally ask the running code-server window to reload
