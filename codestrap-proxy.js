@@ -1,15 +1,17 @@
-// codestrap-proxy.js — Reverse proxy + automatic outage reload + optional docker logs
+// codestrap-proxy.js — Reverse proxy + always-on outage reload + optional docker logs
 //
 // Behavior:
-// - When upstream (code-server) is DOWN → serve splash (503) that auto-polls.
-// - When upstream is UP → proxy through normally, BUT for top-level HTML pages
-//   we inject a single external script tag: <script src="/__watchdog.js" defer></script>
-//   The watchdog polls /__up and reloads the page if upstream goes DOWN, so the
-//   splash appears automatically. No inline JS, no service worker.
+// - If upstream (code-server) is DOWN: serve splash (503) that auto-polls to return.
+// - If upstream is UP: proxy normally, BUT for ANY upstream response with
+//   Content-Type: text/html, inject a single tag:
+//     <script src="/__watchdog.js" defer></script>
+//   The watchdog polls /__up; if status != 200 OR request fails → location.reload().
+//   This guarantees that if code-server on PORT goes away after you loaded the page,
+//   the browser reloads and your splash appears automatically.
 //
 // ENV:
 //   PROXY_PORT         (default 8080)
-//   CODE_SERVICE_NAME  (required; compose service name, e.g. "code")
+//   CODE_SERVICE_NAME  (compose service name, e.g. "code")
 //   CODE_EXPOSED_PORT  (default 8443)
 //   UP_TIMEOUT_MS      (default 2500)
 //   LOG_CAP            (default 500)
@@ -108,7 +110,6 @@ function resolveContainerId(cb){
     });
   });
 }
-
 function createDockerDemux(onLine){
   let buf = Buffer.alloc(0), assumeTTY=false, badHeaders=0;
   function emitText(b){ b.toString('utf8').split(/\r?\n/).forEach(l=>{ if(l.length) onLine(l); }); }
@@ -185,17 +186,11 @@ details[open] .chev{transform:rotate(90deg)}
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-  <div class="container">
-    <details class="card" id="logsbox">
-      <summary class="head"><span><span class="chev">▶</span> Show live logs</span><span class="badge" id="log-status">hidden</span></summary>
-      <pre id="log"></pre>
-    </details>
-    <div class="small" style="opacity:.65;margin-top:10px">
-      This page auto-reloads when code-server is ready. You can also press <kbd>⌘/Ctrl</kbd>+<kbd>R</kbd>.
-    </div>
+  <div class="small" style="opacity:.65;margin-top:10px">
+    This page auto-reloads when code-server is ready. You can also press <kbd>⌘/Ctrl</kbd>+<kbd>R</kbd>.
   </div>
 </div>
-<script>(function(){let delay=600,maxDelay=5000;const logEl=document.getElementById('log');const statusEl=document.getElementById('log-status');const logsBox=document.getElementById('logsbox');function setStatus(t){if(statusEl)statusEl.textContent=t}function addLines(t){if(!logEl||!t)return;logEl.textContent+=t.replace(/\\r?\\n/g,'\\n');logEl.scrollTop=logEl.scrollHeight}let logsInit=false;logsBox?.addEventListener('toggle',()=>{if(!logsBox.open||logsInit){setStatus(logsBox.open?'opening…':'hidden');return}logsInit=true;setStatus('initializing…');fetch('/__code_logs?ts='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.text():Promise.reject()).then(t=>{if(t)addLines(t);setStatus('live')}).catch(()=>{setStatus('unavailable')});try{const es=new EventSource('/__code_events');es.addEventListener('message',ev=>{addLines(ev.data+"\\n")});es.onopen=()=>setStatus('live');es.onerror=()=>setStatus('disconnected (retrying…)')}catch(_){setStatus('unavailable')}});async function ping(){try{const res=await fetch('/__up?ts='+Date.now(),{cache:'no-store'});if(res.ok){location.reload();return}}catch(e){}const jitter=Math.random()*150;delay=Math.min(maxDelay,Math.round(delay*1.6)+jitter);setTimeout(ping,delay)}setTimeout(ping,delay)})();</script>`;
+<script>(function(){let d=600,max=5000;async function ping(){try{var r=await fetch('/__up?ts='+Date.now(),{cache:'no-store'});if(r.ok){location.reload();return}}catch(e){}d=Math.min(max,Math.round(d*1.6)+Math.random()*120);setTimeout(ping,d)}setTimeout(ping,d)})();</script>`;
 }
 
 /* --------------------- helpers --------------------- */
@@ -220,28 +215,28 @@ const server = http.createServer((req,res)=>{
     });
   }
 
-  // Watchdog script (served from our origin; allowed by typical CSP 'self')
+  // Watchdog (external script so CSP 'self' is enough)
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
-    // Exponential backoff while UP; immediate reload on failure/5xx.
+    // Reload on ANY non-200 OR network failure.
     return res.end(`(function(){
-      var d=1500, max=6000, started=Date.now();
-      function next(){ d=Math.min(max, Math.round(d*1.4)); setTimeout(ping,d); }
+      var delay=1500, max=6000;
+      function step(){ delay=Math.min(max, Math.round(delay*1.4)); setTimeout(ping, delay); }
       async function ping(){
         try{
           var r = await fetch('/__up?ts='+Date.now(), {cache:'no-store', credentials:'same-origin'});
-          if (r.status >= 500) { location.reload(); return; }
+          if (r.status !== 200) { location.reload(); return; }
         }catch(e){ location.reload(); return; }
-        next();
+        step();
       }
-      setTimeout(ping,d);
+      setTimeout(ping, delay);
     })();`);
   }
 
-  // Proxy logs (ring buffer) snapshot
+  // Proxy logs (snapshot)
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
@@ -338,10 +333,10 @@ const server = http.createServer((req,res)=>{
 
       const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
       const isHtml = ct.includes('text/html');
-      const isDocReq = (req.headers['sec-fetch-dest'] || '').toLowerCase() === 'document';
+      const isOurPath = (req.url || '').startsWith('/__');
 
-      // Only inject on top-level HTML documents (avoid scripts/css, iframes/webviews content)
-      if (!(isHtml && isDocReq)) {
+      // If not HTML or is our own utility path → no injection, just relay.
+      if (!(isHtml && !isOurPath)) {
         if (status === 503) {
           hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
           hdrs['pragma'] = 'no-cache'; hdrs['expires'] = '0';
@@ -382,7 +377,6 @@ const server = http.createServer((req,res)=>{
             const out = buffer.slice(0, i) + TAG + buffer.slice(i);
             res.write(out); buffer = '';
           } else if (buffer.length > 128 * 1024) {
-            // fall back to stream early to avoid buffering huge pages
             res.write(buffer); buffer='';
           }
         } else {
