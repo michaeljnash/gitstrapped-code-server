@@ -31,21 +31,7 @@ services:
       PROXY_DOMAIN: ${PROXY_DOMAIN}
     
     networks:
-      - dokploy-network
-
-    labels:
-      - traefik.enable=true
-      - traefik.docker.network=dokploy-network
-
-      - traefik.http.routers.codeserver.rule=Host(`test.michaeljnash.dev.meridianlogisticsgroup.com`)
-      - traefik.http.routers.codeserver.entrypoints=web
-      - traefik.http.routers.codeserver.tls=true
-      - traefik.http.services.codeserver.loadbalancer.server.port=8443
-
-      - traefik.http.routers.codeserver-wv.rule=HostRegexp(`{sub:[a-z0-9-]+}.test.michaeljnash.dev.meridianlogisticsgroup.com`)
-      - traefik.http.routers.codeserver-wv.entrypoints=websecure
-      - traefik.http.routers.codeserver-wv.tls=true
-      - traefik.http.services.codeserver-wv.loadbalancer.server.port=8443
+      - codestrap-network
 
     volumes:
       - config:/config
@@ -74,7 +60,7 @@ services:
       CODE_SERVICE_NAME: "code"
       CODE_EXPOSED_PORT: "8443"
     networks:
-      - dokploy-network
+      - codestrap-network
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -85,8 +71,7 @@ services:
     restart: always
 
 networks:
-  dokploy-network:
-    external: true
+  codestrap-network:
 
 volumes:
   config:
