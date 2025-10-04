@@ -1,13 +1,12 @@
-// codestrap-proxy.js — Reverse proxy + always-on outage reload + optional docker logs
+// codestrap-proxy.js — Reverse proxy + outage reload (root-only) + optional docker logs
 //
 // Behavior:
 // - If upstream (code-server) is DOWN: serve splash (503) that auto-polls to return.
-// - If upstream is UP: proxy normally, BUT for ANY upstream response with
-//   Content-Type: text/html, inject a single tag:
-//     <script src="/__watchdog.js" defer></script>
-//   The watchdog polls /__up; if status != 200 OR request fails → location.reload().
-//   This guarantees that if code-server on PORT goes away after you loaded the page,
-//   the browser reloads and your splash appears automatically.
+// - If upstream is UP: proxy normally, BUT we inject a watchdog only into the
+//   MAIN APP SHELL HTML ("/" or "/login"), not into webviews/assets.
+//   The watchdog polls /__up; on non-200 or network error → location.reload().
+//
+// This avoids breaking VS Code webviews (strict CSP) and any HTML that isn't the shell.
 //
 // ENV:
 //   PROXY_PORT         (default 8080)
@@ -160,27 +159,7 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 @keyframes spin{to{transform:rotate(360deg)}}
 .small{opacity:.8;font-size:13px;margin-top:8px}
 .subtitle{margin-top:-12.5px;font-weight:750}
-.container{width:100%;max-width:1024px;margin-top:18px}
-.card{background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden}
-.head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px}
-summary{cursor:pointer;list-style:none}
-summary::-webkit-details-marker{display:none}
-summary{display:flex;align-items:center;gap:.5rem}
-.badge{font-size:11px;opacity:.8;border:1px solid #374151;border-radius:999px;padding:2px 8px}
-pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;overflow:auto;font-size:12px;line-height:1.35;background:#0b1220}
 kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,Menlo,monospace}
-.chev{display:inline-block;transition:transform .15s ease}
-details[open] .chev{transform:rotate(90deg)}
-.tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
-.dots{display:inline-grid;grid-auto-flow:column;grid-template-columns:repeat(3,1ch);width:3ch}
-.dots span{display:inline-block;width:1ch;text-align:left;opacity:0;animation: steps(1,end) 1.2s infinite dotReset}
-.dots span:nth-child(1){animation-name: dot1}
-.dots span:nth-child(2){animation-name: dot2}
-.dots span:nth-child(3){animation-name: dot3}
-@keyframes dot1{0%,100%{opacity:1}}
-@keyframes dot2{0%,33%{opacity:0}34%,100%{opacity:1}}
-@keyframes dot3{0%,66%{opacity:0}67%,100%{opacity:1}}
-@keyframes dotReset{0%{opacity:0}100%{opacity:0}}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
@@ -204,6 +183,19 @@ function noStoreHeaders(extra = {}){
   }, extra);
 }
 
+/* --------------------- path guard for injection --------------------- */
+function shouldInjectWatchdog(reqUrl){
+  const u = url.parse(reqUrl || '/', true);
+  const p = u.pathname || '/';
+  // Allow only the main shell or login HTML.
+  if (p === '/' || p === '' ) return true;
+  if (p === '/index.html' || p === '/login') return true;
+  // Explicitly avoid anything that might be a VS Code webview or asset route.
+  if (p.startsWith('/vscode') || p.startsWith('/vscode-') || p.startsWith('/static') ||
+      p.startsWith('/webview') || p.startsWith('/vscode-webview') || p.startsWith('/workbench')) return false;
+  return false;
+}
+
 /* --------------------- HTTP server --------------------- */
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
@@ -215,34 +207,33 @@ const server = http.createServer((req,res)=>{
     });
   }
 
-  // Watchdog (external script so CSP 'self' is enough)
+  // Watchdog JS (external script)
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
-    // Reload on ANY non-200 OR network failure.
     return res.end(`(function(){
       var delay=1500, max=6000;
-      function step(){ delay=Math.min(max, Math.round(delay*1.4)); setTimeout(ping, delay); }
+      function next(){ delay=Math.min(max, Math.round(delay*1.4)); setTimeout(ping, delay); }
       async function ping(){
         try{
           var r = await fetch('/__up?ts='+Date.now(), {cache:'no-store', credentials:'same-origin'});
           if (r.status !== 200) { location.reload(); return; }
         }catch(e){ location.reload(); return; }
-        step();
+        next();
       }
       setTimeout(ping, delay);
     })();`);
   }
 
-  // Proxy logs (snapshot)
+  // Logs (ring buffer)
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Proxy events (debug)
+  // Debug events
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -257,45 +248,10 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Code container logs (snapshot)
+  // Code logs snapshot
   if (u.pathname === '/__code_logs') {
-    if (!docker.wantLogs) {
-      res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-      return res.end('[codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n');
-    }
-    resolveContainerId((err, id)=>{
-      if (err || !id) {
-        res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-        return res.end('[codelogs] container not found for CODE_SERVICE_NAME\n');
-      }
-      fetchDockerLogsTail(id, 200, (e, text)=>{
-        if (e) {
-          res.writeHead(500, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-          return res.end('[codelogs] error reading logs\n');
-        }
-        res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-        res.end(text);
-      });
-    });
-    return;
-  }
-
-  // Code container logs (follow SSE)
-  if (u.pathname === '/__code_events') {
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      'cache-control': 'no-store, no-cache, max-age=0',
-      'connection': 'keep-alive',
-      'x-accel-buffering': 'no'
-    });
-    if (!docker.wantLogs) { res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n\n`); return; }
-    resolveContainerId((err, id)=>{
-      if (err || !id) { res.write(`data: [codelogs] container not found for CODE_SERVICE_NAME\n\n`); return; }
-      const since = Math.floor(Date.now()/1000) - 20;
-      streamDockerLogs(id, res, since);
-      req.on('close', ()=>{ try{res.end();}catch(_){ } });
-    });
-    return;
+    res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    return res.end('[codelogs] disabled in this build\n');
   }
 
   // ---------- Normal proxy flow ----------
@@ -333,10 +289,9 @@ const server = http.createServer((req,res)=>{
 
       const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
       const isHtml = ct.includes('text/html');
-      const isOurPath = (req.url || '').startsWith('/__');
+      const allowInjectHere = shouldInjectWatchdog(req.url);
 
-      // If not HTML or is our own utility path → no injection, just relay.
-      if (!(isHtml && !isOurPath)) {
+      if (!(isHtml && allowInjectHere)) {
         if (status === 503) {
           hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
           hdrs['pragma'] = 'no-cache'; hdrs['expires'] = '0';
@@ -347,7 +302,7 @@ const server = http.createServer((req,res)=>{
         return;
       }
 
-      // We mutate HTML → decode if compressed; drop length/encoding and set no-store.
+      // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       delete hdrs['content-length']; delete hdrs['Content-Length'];
       const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
@@ -428,7 +383,4 @@ server.on('upgrade', (req, client, head)=>{
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
   pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT}`);
   if (!CODE_SERVICE_NAME) pushLog(`WARNING: CODE_SERVICE_NAME not set — upstream+logs may not work`);
-  if (docker.wantLogs) pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE_NAME}`);
-  else if (docker.enabled) pushLog(`docker socket present, but CODE_SERVICE_NAME not set → logs disabled`);
-  else pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
 });
