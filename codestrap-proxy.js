@@ -3,6 +3,8 @@
 // Proxy: HTTP+WS → code-server. Shows a splash while upstream is DOWN and
 // auto-polls to reload when it's UP. Splash has a collapsible "Live logs"
 // section that streams logs from the code container via the Docker socket.
+// Now also registers a Service Worker to automatically show the splash on
+// any top-level navigation while upstream is down — no manual reload needed.
 //
 // ENV (set these in compose):
 //   PROXY_PORT         : public port to listen on (default 8080)
@@ -37,7 +39,8 @@ function addServiceWorkerHeadersIfNeeded(pathname, res) {
   const p = pathname || "";
   const reCodeServer = /\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
   const reUpstream  = /^\/vscode-webview\/service-worker\.js$/i; // newer path in some builds
-  if (reCodeServer.test(p) || reUpstream.test(p)) {
+  const reAlias = /^\/_vscode\/webview\/service-worker\.js$/i;
+  if (reCodeServer.test(p) || reUpstream.test(p) || reAlias.test(p)) {
     res.setHeader('Service-Worker-Allowed', '/');
     // Avoid caching the SW through intermediate proxies/CDNs
     res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
@@ -226,44 +229,25 @@ pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;ove
 kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .chev{display:inline-block;transition:transform .15s ease}
 details[open] .chev{transform:rotate(90deg)}
-
-/* --- dot animation that does NOT reflow --- */
 .tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
-.dots{
-  display:inline-grid;
-  grid-auto-flow:column;
-  grid-template-columns:repeat(3,1ch);
-  width:3ch;               /* fixed width so the line never shifts */
-}
-.dots span{
-  display:inline-block;
-  width:1ch; text-align:left;
-  opacity:0;
-  animation: steps(1,end) 1.2s infinite dotReset;
-}
-/* 1st dot visible the whole cycle */
-.dots span:nth-child(1){ animation-name: dot1; }
-/* 2nd dot becomes visible after 1/3 */
-.dots span:nth-child(2){ animation-name: dot2; }
-/* 3rd dot becomes visible after 2/3 */
-.dots span:nth-child(3){ animation-name: dot3; }
-
+.dots{display:inline-grid;grid-auto-flow:column;grid-template-columns:repeat(3,1ch);width:3ch}
+.dots span{display:inline-block;width:1ch;text-align:left;opacity:0;animation: steps(1,end) 1.2s infinite dotReset}
+.dots span:nth-child(1){ animation-name: dot1 }
+.dots span:nth-child(2){ animation-name: dot2 }
+.dots span:nth-child(3){ animation-name: dot3 }
 @keyframes dot1 { 0%,100% { opacity:1 } }
 @keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
 @keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
-/* Just a placeholder so we can set defaults above; not used directly */
 @keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-
   <div class="small tip-line" id="tip">
     <span id="tip-base">Starting services</span>
     <span class="dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
   </div>
-
   <div class="container">
     <details class="card" id="logsbox">
       <summary class="head">
@@ -354,6 +338,68 @@ function noStoreHeaders(extra = {}) {
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
+  // Serve our Service Worker (handles navigations → splash when upstream is down)
+  if (u.pathname === '/__codestrap/sw.js') {
+    const body = `
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+
+function splashResponse(){
+  return new Response(${JSON.stringify(makeSplashHtml())}, {
+    status: 200,
+    headers: {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store'
+    }
+  });
+}
+
+self.addEventListener('fetch', e => {
+  const r = e.request;
+  // Only top-level navigations; ignore our own utility paths.
+  if (r.mode === 'navigate' && !r.url.includes('/__codestrap/')) {
+    e.respondWith((async () => {
+      try {
+        const resp = await fetch(r);
+        if (resp.status >= 500 || resp.status === 0) return splashResponse();
+        return resp;
+      } catch (_) {
+        return splashResponse();
+      }
+    })());
+  }
+});
+`.trim() + '\n';
+
+    res.writeHead(200, {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Service-Worker-Allowed': '/'
+    });
+    return res.end(body);
+  }
+
+  // Serve the boot script that registers the SW and refreshes on controllerchange.
+  if (u.pathname === '/__codestrap/boot.js') {
+    const body = `
+(function(){
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' })
+    .catch(function(){});
+  // If SW takes control after a crash, refresh once to re-hydrate the app shell.
+  navigator.serviceWorker.addEventListener('controllerchange', function(){
+    if (!window.__cs_sw_kick) { window.__cs_sw_kick = 1; location.reload(); }
+  });
+})();
+`.trim() + '\n';
+
+    res.writeHead(200, {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    return res.end(body);
+  }
+
   addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
   // Health endpoint
@@ -425,7 +471,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Normal proxy flow
+  // Normal proxy flow (+ HTML injector for boot.js)
   probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
@@ -457,10 +503,57 @@ const server = http.createServer((req,res)=>{
       method: req.method,
       headers
     }, pr => {
+
+      // Should we inject the boot script? (HTML pages only; skip utility endpoints)
+      const ct = (pr.headers['content-type'] || pr.headers['Content-Type'] || '').toLowerCase();
+      const isHtml = ct.includes('text/html');
+      const avoid = (u.pathname || '').startsWith('/__');
+      const shouldInject = isHtml && !avoid;
+
+      if (!shouldInject) {
+        if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
+        res.writeHead(pr.statusCode || 502, pr.headers);
+        pr.pipe(res);
+        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${pr.statusCode||0}`));
+        return;
+      }
+
+      // Injection path: insert <script src="/__codestrap/boot.js"> before </head>
+      // Set no-store so mutated HTML isn't cached upstream of us.
+      pr.headers['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
-      res.writeHead(pr.statusCode || 502, pr.headers);
-      pr.pipe(res);
-      pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${pr.statusCode||0}`));
+      res.writeHead(pr.statusCode || 200, pr.headers);
+
+      let seenHead = false;
+      let buffer = '';
+      const INJECT_TAG = '<script src="/__codestrap/boot.js"></script>';
+
+      pr.setEncoding('utf8');
+      pr.on('data', chunk => {
+        buffer += chunk;
+        if (!seenHead) {
+          const i = buffer.toLowerCase().indexOf('</head>');
+          if (i !== -1) {
+            seenHead = true;
+            const out = buffer.slice(0, i) + INJECT_TAG + buffer.slice(i);
+            res.write(out);
+            buffer = '';
+          } else {
+            // To avoid unbounded buffering, flush in chunks if head never appears.
+            if (buffer.length > 128 * 1024) {
+              res.write(buffer);
+              buffer = '';
+            }
+          }
+        } else {
+          res.write(chunk);
+        }
+      });
+      pr.on('end', () => {
+        if (buffer) res.write(buffer);
+        res.end();
+        pushLog(`${req.method} ${req.url} → ${pr.statusCode||0} [inject=${seenHead?'y':'n'}]`);
+      });
     });
 
     p.on('error', (e)=>{
