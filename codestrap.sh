@@ -168,41 +168,52 @@ ensure_codestrap_extension(){
   CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.3.0"   # bump to force rescan
+  NEW_VER="0.4.0"   # bump to force rescan (webview UI)
+  NEW_FOLDER="${NEW_ID}-${NEW_VER}"
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
+  # write one root & clean old versions
   write_one(){
     _base="$1"
     [ -z "$_base" ] && return 0
     mkdir -p "$_base" || true
-    NEW_DIR="${_base}/${NEW_ID}-${NEW_VER}"
+
+    # --- CLEANUP: remove old versions of this extension
+    for old in "$_base"/${NEW_ID}-*; do
+      [ -e "$old" ] || continue
+      case "$old" in
+        *"/${NEW_FOLDER}") : ;; # keep the one we're about to write
+        *) rm -rf "$old" 2>/dev/null || true ;;
+      esac
+    done
+
+    # --- CLEANUP: nuke index/state files so code-server rebuilds properly
+    rm -f "$_base/extensions.json" 2>/dev/null || true
+    rm -f "$_base/.obsolete" "$_base/.obselete" 2>/dev/null || true  # handle common misspelling too
+
+    NEW_DIR="${_base}/${NEW_FOLDER}"
     mkdir -p "$NEW_DIR" || true
 
-    # ---------- package.json (TreeView-only UI) ----------
+    # ---------- package.json (Webview-sidepanel UI) ----------
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.3.0",
-  "description": "Codestrap sidebar: TreeView-only UI with buttons and inputs that drive your CLI in a terminal.",
+  "version": "0.4.0",
+  "description": "Codestrap Sidebar: Webview UI for running and managing Codestrap CLI commands.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
-    "onView:codestrap.tree",
+    "onView:codestrap.view",
     "onCommand:codestrap.openContainer",
-    "onCommand:codestrap.addItem",
-    "onCommand:codestrap.runItem",
-    "onCommand:codestrap.editItem",
-    "onCommand:codestrap.deleteItem",
     "onCommand:codestrap.refresh",
-    "onCommand:codestrap.runQuickPick",
-    "onCommand:codestrap.runAdhoc",
-    "onCommand:codestrap.openTerminal"
+    "onCommand:codestrap.openTerminal",
+    "onCommand:codestrap.runAdhoc"
   ],
   "contributes": {
     "viewsContainers": {
@@ -212,38 +223,19 @@ ensure_codestrap_extension(){
     },
     "views": {
       "codestrap": [
-        { "id": "codestrap.tree", "name": "Codestrap Items" }
+        { "type": "webview", "id": "codestrap.view", "name": "Codestrap" }
       ]
     },
     "commands": [
       { "command": "codestrap.openContainer", "title": "Codestrap: Open Sidebar" },
-      { "command": "codestrap.addItem", "title": "Codestrap: Add Item" },
-      { "command": "codestrap.runItem", "title": "Codestrap: Run Item" },
-      { "command": "codestrap.editItem", "title": "Codestrap: Edit Item" },
-      { "command": "codestrap.deleteItem", "title": "Codestrap: Delete Item" },
-      { "command": "codestrap.refresh", "title": "Codestrap: Refresh Items" },
-      { "command": "codestrap.runQuickPick", "title": "Codestrap: Run… (Quick Pick)" },
-      { "command": "codestrap.runAdhoc", "title": "Codestrap: Run Ad-hoc Command" },
-      { "command": "codestrap.openTerminal", "title": "Codestrap: Show Terminal" }
+      { "command": "codestrap.refresh", "title": "Codestrap: Refresh" },
+      { "command": "codestrap.openTerminal", "title": "Codestrap: Show Terminal" },
+      { "command": "codestrap.runAdhoc", "title": "Codestrap: Run Ad-hoc Command" }
     ],
-    "menus": {
-      "view/title": [
-        { "command": "codestrap.addItem",     "when": "view == codestrap.tree", "group": "navigation@1" },
-        { "command": "codestrap.runQuickPick","when": "view == codestrap.tree", "group": "navigation@2" },
-        { "command": "codestrap.runAdhoc",    "when": "view == codestrap.tree", "group": "navigation@3" },
-        { "command": "codestrap.openTerminal","when": "view == codestrap.tree", "group": "navigation@4" },
-        { "command": "codestrap.refresh",     "when": "view == codestrap.tree", "group": "navigation@9" }
-      ],
-      "view/item/context": [
-        { "command": "codestrap.runItem",   "when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@1" },
-        { "command": "codestrap.editItem",  "when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@2" },
-        { "command": "codestrap.deleteItem","when": "viewItem == codestrap.item && view == codestrap.tree", "group": "inline@3" }
-      ]
-    },
     "viewsWelcome": [
       {
-        "view": "codestrap.tree",
-        "contents": "Add items with the **Add** button. Hover an item to **Run / Edit / Delete**. Use **Run…** to pick and run quickly, or **Run Ad-hoc** to execute any command.\n"
+        "view": "codestrap.view",
+        "contents": "Welcome to **Codestrap**.\nUse the **+ Add** button to create actions that run your CLI in a terminal.\n"
       }
     ]
   }
@@ -262,57 +254,28 @@ SVG
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
-/** simple persisted store (globalState) */
 class Store {
   constructor(ctx) {
     this.ctx = ctx;
     this.key = 'codestrap.items.v1';
     if (!this.ctx.globalState.get(this.key)) {
-      // Seed with a few examples – replace with your CLI commands
       this.ctx.globalState.update(this.key, [
-        { label: 'Status',   detail: 'Show status',   cmd: 'codestrap status' },
-        { label: 'Up',       detail: 'Start services',cmd: 'codestrap up' },
-        { label: 'Down',     detail: 'Stop services', cmd: 'codestrap down' }
+        { label: 'Status', detail: 'Show status', cmd: 'codestrap status' },
+        { label: 'Up',     detail: 'Start services', cmd: 'codestrap up' },
+        { label: 'Down',   detail: 'Stop services', cmd: 'codestrap down' }
       ]);
     }
   }
-  get items() { return this.ctx.globalState.get(this.key) || []; }
-  set items(v) { return this.ctx.globalState.update(this.key, v); }
+  get items(){ return this.ctx.globalState.get(this.key) || []; }
+  async setItems(v){ await this.ctx.globalState.update(this.key, v); }
 }
 
-/** Tree items */
-class CodestrapItem extends vscode.TreeItem {
-  constructor(model) {
-    super(model.label, vscode.TreeItemCollapsibleState.None);
-    this.model = model;
-    this.description = model.detail || model.cmd;
-    this.tooltip = `Command: ${model.cmd}`;
-    this.contextValue = 'codestrap.item';
-    this.iconPath = new vscode.ThemeIcon('terminal');
-    this.command = { command: 'codestrap.runItem', title: 'Run', arguments: [this] };
-  }
-}
-
-class TreeProvider {
-  constructor(store) {
-    this.store = store;
-    this._emitter = new vscode.EventEmitter();
-    this.onDidChangeTreeData = this._emitter.event;
-  }
-  getTreeItem(el) { return el; }
-  getChildren() { return this.store.items.map(i => new CodestrapItem(i)); }
-  refresh(){ this._emitter.fire(); }
-}
-
-/** One shared terminal that we reuse so commands run in a stable shell */
 class Term {
   static get(name='Codestrap'){
     if (!this._term || this._termExit) {
       this._term = vscode.window.createTerminal({ name });
       this._termExit = false;
-      vscode.window.onDidCloseTerminal(t => {
-        if (t === this._term) this._termExit = true;
-      });
+      vscode.window.onDidCloseTerminal(t => { if (t === this._term) this._termExit = true; });
     }
     return this._term;
   }
@@ -325,7 +288,6 @@ class Term {
   }
 }
 
-/** helpers */
 async function pickWorkspaceCwd(){
   const folders = vscode.workspace.workspaceFolders || [];
   if (folders.length <= 1) return folders[0]?.uri.fsPath;
@@ -336,99 +298,207 @@ async function pickWorkspaceCwd(){
   return pick?.fsPath;
 }
 
-function activate(context){
-  console.log('[codestrap] TreeView UI activated');
-  const store = new Store(context);
-  const provider = new TreeProvider(store);
-  context.subscriptions.push(vscode.window.registerTreeDataProvider('codestrap.tree', provider));
+class CodestrapViewProvider {
+  constructor(ctx, store){
+    this.ctx = ctx;
+    this.store = store;
+  }
 
-  // open container (activity bar)
+  resolveWebviewView(webviewView){
+    this.webview = webviewView.webview;
+    this.webview.options = { enableScripts: true };
+    const nonce = String(Math.random()).slice(2);
+    this.webview.html = this.renderHtml(nonce);
+
+    this.webview.onDidReceiveMessage(async msg => {
+      const items = this.store.items.slice();
+      switch (msg.type) {
+        case 'ready':
+          this.post({ type:'state', items });
+          break;
+        case 'add': {
+          const label = await vscode.window.showInputBox({ prompt:'Label', validateInput:v=>!v?.trim()?'Required':'' });
+          if (!label) return;
+          const cmd = await vscode.window.showInputBox({ prompt:'Command', value:'codestrap ' });
+          if (!cmd) return;
+          const detail = await vscode.window.showInputBox({ prompt:'Description (optional)' }) || '';
+          const cwd = await pickWorkspaceCwd();
+          items.push({ label, detail, cmd, cwd });
+          await this.store.setItems(items);
+          this.post({ type:'state', items });
+          break;
+        }
+        case 'edit': {
+          const idx = items.findIndex(i => i.label === msg.label && i.cmd === msg.cmd);
+          if (idx < 0) return;
+          const cur = items[idx];
+          const label = await vscode.window.showInputBox({ prompt:'Edit label', value:cur.label }) || cur.label;
+          const cmd   = await vscode.window.showInputBox({ prompt:'Edit command', value:cur.cmd }) || cur.cmd;
+          const detail= await vscode.window.showInputBox({ prompt:'Edit description', value:cur.detail || '' }) || '';
+          const cwdPick = await vscode.window.showQuickPick(
+            [{label:'Keep current', description: cur.cwd || '(none)', val: cur.cwd},
+             {label:'Choose workspace folder…', description:'Pick a folder', val:'__pick__'},
+             {label:'Unset working directory', description:'Run in default shell CWD', val:''}],
+            { placeHolder: 'Working directory' }
+          );
+          let cwd = cur.cwd;
+          if (cwdPick) cwd = (cwdPick.val === '__pick__') ? await pickWorkspaceCwd() : cwdPick.val;
+          items[idx] = { label, cmd, detail, cwd };
+          await this.store.setItems(items);
+          this.post({ type:'state', items });
+          break;
+        }
+        case 'delete': {
+          const accept = await vscode.window.showWarningMessage(`Delete "${msg.label}"?`, { modal:true }, 'Delete');
+          if (accept !== 'Delete') return;
+          const next = items.filter(i => !(i.label === msg.label && i.cmd === msg.cmd));
+          await this.store.setItems(next);
+          this.post({ type:'state', items: next });
+          break;
+        }
+        case 'run': {
+          const m = items.find(i => i.label === msg.label && i.cmd === msg.cmd);
+          if (!m) return;
+          vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title:`Running: ${m.label}` }, async () => {
+            Term.send(m.cmd, m.cwd);
+          });
+          break;
+        }
+        case 'runAdhoc': {
+          const cmd = await vscode.window.showInputBox({ prompt:'Enter a shell command', value:'codestrap ' });
+          if (!cmd) return;
+          const cwd = await pickWorkspaceCwd();
+          Term.send(cmd, cwd);
+          break;
+        }
+        case 'openTerminal':
+          Term.show();
+          break;
+        case 'refresh':
+          this.post({ type:'state', items: this.store.items });
+          break;
+      }
+    });
+  }
+
+  post(msg){ this.webview?.postMessage(msg); }
+
+  renderHtml(nonce){
+    const csp = [
+      "default-src 'none'",
+      "img-src data: https:",
+      "font-src data:",
+      "style-src 'unsafe-inline'",
+      "script-src 'nonce-" + nonce + "'",
+      "connect-src 'self' https: data: blob: ws: wss:"
+    ].join('; ');
+    return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Codestrap</title>
+  <style>
+    :root { --bg: var(--vscode-sideBar-background); --fg: var(--vscode-foreground);
+      --muted: var(--vscode-descriptionForeground); --btn: var(--vscode-button-background);
+      --btnText: var(--vscode-button-foreground); --border: var(--vscode-panel-border); }
+    body { margin: 0; padding: 12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg);}
+    .row { display:flex; gap:8px; align-items:center; }
+    .topbar { justify-content: space-between; margin-bottom: 10px; }
+    button { border: 0; padding: 6px 10px; border-radius: 8px; background: var(--btn); color: var(--btnText); cursor: pointer; }
+    .list { display:flex; flex-direction:column; gap:8px; }
+    .card { border:1px solid var(--border); border-radius:12px; padding:10px; }
+    .card h4 { margin:0 0 4px 0; font-size: 13px; }
+    .card p { margin:0; color: var(--muted); font-size:12px; }
+    .actions { margin-top:8px; display:flex; gap:6px; }
+    .muted { color: var(--muted); }
+    input, .cwd { font-size:12px; }
+    .empty { padding:24px; text-align:center; color: var(--muted); border:1px dashed var(--border); border-radius:12px; }
+  </style>
+</head>
+<body>
+  <div class="row topbar">
+    <div class="row" style="gap:6px">
+      <button id="add">+ Add</button>
+      <button id="adhoc">Run Ad-hoc</button>
+      <button id="term">Terminal</button>
+    </div>
+    <button id="refresh">Refresh</button>
+  </div>
+
+  <div id="list" class="list"></div>
+  <div id="empty" class="empty" style="display:none;">No items yet. Click <b>+ Add</b> to create one.</div>
+
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+
+function post(type, data={}){ vscode.postMessage({ type, ...data }); }
+
+document.getElementById('add').onclick     = () => post('add');
+document.getElementById('adhoc').onclick   = () => post('runAdhoc');
+document.getElementById('term').onclick    = () => post('openTerminal');
+document.getElementById('refresh').onclick = () => post('refresh');
+
+function render(items){
+  const list = document.getElementById('list');
+  const empty = document.getElementById('empty');
+  list.innerHTML = '';
+  empty.style.display = items.length ? 'none' : 'block';
+
+  items.forEach(it => {
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = \`
+      <h4>\${it.label}</h4>
+      <p>\${it.detail ? it.detail : it.cmd}</p>
+      <p class="cwd">\${it.cwd ? 'cwd: ' + it.cwd : ''}</p>
+      <div class="actions">
+        <button data-act="run">Run</button>
+        <button data-act="edit">Edit</button>
+        <button data-act="delete">Delete</button>
+      </div>\`;
+    el.querySelectorAll('button').forEach(b=>{
+      b.addEventListener('click', ()=>{
+        const act = b.getAttribute('data-act');
+        if (act === 'run')    post('run',    it);
+        if (act === 'edit')   post('edit',   it);
+        if (act === 'delete') post('delete', it);
+      });
+    });
+    list.appendChild(el);
+  });
+}
+
+window.addEventListener('message', ev => {
+  const msg = ev.data;
+  if (msg.type === 'state') render(msg.items || []);
+});
+
+// tell extension we’re ready
+post('ready');
+</script>
+</body>
+</html>`;
+  }
+}
+
+function activate(context){
+  const store = new Store(context);
+  const view = new CodestrapViewProvider(context, store);
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider('codestrap.view', view, { webviewOptions:{ retainContextWhenHidden: true }}));
+
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.openContainer', () =>
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
-
-  // refresh
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => provider.refresh()));
-
-  // add item
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.addItem', async () => {
-    const label = await vscode.window.showInputBox({ prompt: 'Label for this action', validateInput:v=>!v.trim()?'Required':'' });
-    if (!label) return;
-    const cmd = await vscode.window.showInputBox({ prompt: 'Shell command to run (will be sent to a terminal)', value: 'codestrap ' });
-    if (!cmd) return;
-    const detail = await vscode.window.showInputBox({ prompt: 'Optional description', value: '' }) || '';
-    const cwd = await pickWorkspaceCwd();
-    const items = store.items;
-    items.push({ label, detail, cmd, cwd });
-    await store.items = items;
-    provider.refresh();
-  }));
-
-  // run item
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.runItem', async (item) => {
-    const m = item?.model || item; // tolerate being passed the raw model
-    if (!m || !m.cmd) return;
-    vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Running: ${m.label}`, cancellable: false }, async () => {
-      Term.send(m.cmd, m.cwd);
-    });
-  }));
-
-  // edit item
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.editItem', async (item) => {
-    const items = store.items.slice();
-    const idx = items.findIndex(x => x.label === item.model.label && x.cmd === item.model.cmd);
-    if (idx < 0) return;
-    const label = await vscode.window.showInputBox({ prompt: 'Edit label', value: items[idx].label }) || items[idx].label;
-    const cmd   = await vscode.window.showInputBox({ prompt: 'Edit command', value: items[idx].cmd }) || items[idx].cmd;
-    const detail= await vscode.window.showInputBox({ prompt: 'Edit description', value: items[idx].detail || '' }) || '';
-    const cwdPick = await vscode.window.showQuickPick(
-      [{label:'Keep current', description: items[idx].cwd || '(none)', val: items[idx].cwd},
-       {label:'Choose workspace folder…', description:'Pick a folder to run in', val:'__pick__'},
-       {label:'Unset working directory', description:'Run in default shell CWD', val:''}],
-      { placeHolder: 'Working directory' }
-    );
-    let cwd = items[idx].cwd;
-    if (cwdPick) {
-      if (cwdPick.val === '__pick__') cwd = await pickWorkspaceCwd();
-      else cwd = cwdPick.val;
-    }
-    items[idx] = { label, cmd, detail, cwd };
-    await store.items = items;
-    provider.refresh();
-  }));
-
-  // delete item
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.deleteItem', async (item) => {
-    const accept = await vscode.window.showWarningMessage(`Delete "${item.model.label}"?`, { modal:true }, 'Delete');
-    if (accept !== 'Delete') return;
-    const items = store.items.filter(x => !(x.label === item.model.label && x.cmd === item.model.cmd));
-    await store.items = items;
-    provider.refresh();
-  }));
-
-  // run quick pick
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.runQuickPick', async ()=>{
-    const items = store.items;
-    if (!items.length) { vscode.window.showInformationMessage('No Codestrap items yet. Use Add.'); return; }
-    const pick = await vscode.window.showQuickPick(items.map(i => ({
-      label: i.label,
-      description: i.detail || i.cmd,
-      detail: i.cwd ? `cwd: ${i.cwd}` : '',
-      model: i
-    })), { placeHolder: 'Select an action to run' });
-    if (pick) Term.send(pick.model.cmd, pick.model.cwd);
-  }));
-
-  // run arbitrary ad-hoc
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => view.post({ type:'state', items: store.items })));
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', () => Term.show()));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.runAdhoc', async ()=>{
-    const cmd = await vscode.window.showInputBox({ prompt:'Enter a shell command to run', value:'codestrap ' });
+    const cmd = await vscode.window.showInputBox({ prompt:'Enter a shell command', value:'codestrap ' });
     if (!cmd) return;
     const cwd = await pickWorkspaceCwd();
     Term.send(cmd, cwd);
   }));
-
-  // show terminal
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', ()=>Term.show()));
 }
 
 function deactivate(){}
@@ -438,10 +508,10 @@ JS
 
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
-    echo "[codestrap] wrote TreeView-only extension → $NEW_DIR"
+    echo "[codestrap] wrote Webview extension → $NEW_DIR"
   }
 
-  # Write to all candidate extension roots
+  # Write to all candidate extension roots (dedupe)
   seen=""
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac

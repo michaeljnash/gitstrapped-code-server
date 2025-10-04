@@ -1,6 +1,8 @@
 services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
+    labels:
+      - "recreate-tag=123456erd4re4d4eed3eee3er4eee3edddeeedddd7eedfeddd4dsddder37re89544"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -41,18 +43,13 @@ services:
       - ./extensions.json:/config/codestrap/extensions.json:ro
       - ./tasks.json:/config/codestrap/tasks.json:ro
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
-    #ports:
-      #- ":8080"
-      #- "8443:8443"
     expose:
       - "8443"
-    #ports:
-    #  - ":8443"
     restart: always
 
   splash:
     labels:
-      - "recreate-tag=123456erd4re4d4eed3eee3er4eee3edddeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=123456erd4re4ed4eed3eee3er4eee3edddeedddd7eedfeddd4dsddder37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
@@ -64,8 +61,8 @@ services:
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    ports:
-      - ":8080"
+    expose:
+      - "8080"
     depends_on:
       - code
     restart: always
