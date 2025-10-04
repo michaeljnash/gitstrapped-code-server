@@ -163,41 +163,47 @@ SH
 }
 
 ensure_codestrap_extension(){
-  # Where to place the extension (write to a few common roots)
+  # Candidate extension roots (add a few more common ones)
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
-  CANDIDATES="$EXTBASE_DEFAULT /config/extensions $HOME/.local/share/code-server/extensions $HOME/.vscode/extensions"
+  CANDIDATES="$EXTBASE_DEFAULT \
+    /config/extensions \
+    $HOME/.local/share/code-server/extensions \
+    $HOME/.vscode/extensions \
+    $HOME/.openvscode-server/extensions \
+    $HOME/.local/share/vscode-oss/extensions"
 
   NEW_ID="codestrap.codestrap"
-  NEW_VER="0.4.0"   # bump to force rescan (webview UI)
+  NEW_VER="0.4.0"
   NEW_FOLDER="${NEW_ID}-${NEW_VER}"
 
   FLAGDIR="${HOME}/.codestrap"
   FLAGFILE="${FLAGDIR}/reload.signal"
   mkdir -p "$FLAGDIR" || true
 
-  # write one root & clean old versions
   write_one(){
     _base="$1"
-    [ -z "$_base" ] && return 0
+    [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # --- CLEANUP: remove old versions of this extension
+    # 1) Remove any previous versions of this extension
     for old in "$_base"/${NEW_ID}-*; do
       [ -e "$old" ] || continue
       case "$old" in
-        *"/${NEW_FOLDER}") : ;; # keep the one we're about to write
+        *"/${NEW_FOLDER}") : ;;  # keep the target version
         *) rm -rf "$old" 2>/dev/null || true ;;
       esac
     done
 
-    # --- CLEANUP: nuke index/state files so code-server rebuilds properly
+    # 2) Force code-server to rebuild extension index/state
     rm -f "$_base/extensions.json" 2>/dev/null || true
-    rm -f "$_base/.obsolete" "$_base/.obselete" 2>/dev/null || true  # handle common misspelling too
+    rm -f "$_base/.obsolete" "$_base/.obselete" 2>/dev/null || true
 
+    # 3) (Re)write the new version
     NEW_DIR="${_base}/${NEW_FOLDER}"
+    rm -rf "$NEW_DIR" 2>/dev/null || true
     mkdir -p "$NEW_DIR" || true
 
-    # ---------- package.json (Webview-sidepanel UI) ----------
+    # ---------- package.json ----------
     cat >"${NEW_DIR}/package.json" <<'PKG'
 {
   "name": "codestrap",
@@ -235,7 +241,7 @@ ensure_codestrap_extension(){
     "viewsWelcome": [
       {
         "view": "codestrap.view",
-        "contents": "Welcome to **Codestrap**.\nUse the **+ Add** button to create actions that run your CLI in a terminal.\n"
+        "contents": "Welcome to **Codestrap**.\\nUse the **+ Add** button to create actions that run your CLI in a terminal.\\n"
       }
     ]
   }
@@ -250,7 +256,7 @@ PKG
 </svg>
 SVG
 
-    # ---------- extension.js ----------
+    # ---------- extension.js (with safer CSP) ----------
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 
@@ -308,7 +314,8 @@ class CodestrapViewProvider {
     this.webview = webviewView.webview;
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
-    this.webview.html = this.renderHtml(nonce);
+    const cspSource = this.webview.cspSource;
+    this.webview.html = this.renderHtml(nonce, cspSource);
 
     this.webview.onDidReceiveMessage(async msg => {
       const items = this.store.items.slice();
@@ -383,13 +390,13 @@ class CodestrapViewProvider {
 
   post(msg){ this.webview?.postMessage(msg); }
 
-  renderHtml(nonce){
+  renderHtml(nonce, cspSource){
     const csp = [
       "default-src 'none'",
-      "img-src data: https:",
-      "font-src data:",
-      "style-src 'unsafe-inline'",
-      "script-src 'nonce-" + nonce + "'",
+      `img-src ${cspSource} https: data:`,
+      `font-src ${cspSource} data:`,
+      `style-src ${cspSource} 'unsafe-inline'`,
+      `script-src 'nonce-${nonce}'`,
       "connect-src 'self' https: data: blob: ws: wss:"
     ].join('; ');
     return `<!doctype html>
@@ -432,9 +439,7 @@ class CodestrapViewProvider {
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-
 function post(type, data={}){ vscode.postMessage({ type, ...data }); }
-
 document.getElementById('add').onclick     = () => post('add');
 document.getElementById('adhoc').onclick   = () => post('runAdhoc');
 document.getElementById('term').onclick    = () => post('openTerminal');
@@ -445,7 +450,6 @@ function render(items){
   const empty = document.getElementById('empty');
   list.innerHTML = '';
   empty.style.display = items.length ? 'none' : 'block';
-
   items.forEach(it => {
     const el = document.createElement('div');
     el.className = 'card';
@@ -469,13 +473,10 @@ function render(items){
     list.appendChild(el);
   });
 }
-
 window.addEventListener('message', ev => {
   const msg = ev.data;
   if (msg.type === 'state') render(msg.items || []);
 });
-
-// tell extension we’re ready
 post('ready');
 </script>
 </body>
@@ -486,12 +487,17 @@ post('ready');
 function activate(context){
   const store = new Store(context);
   const view = new CodestrapViewProvider(context, store);
-  context.subscriptions.push(vscode.window.registerWebviewViewProvider('codestrap.view', view, { webviewOptions:{ retainContextWhenHidden: true }}));
-
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('codestrap.view', view, {
+      webviewOptions:{ retainContextWhenHidden: true }
+    })
+  );
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.openContainer', () =>
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => view.post({ type:'state', items: store.items })));
+  context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () =>
+    view.post({ type:'state', items: store.items })
+  ));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', () => Term.show()));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.runAdhoc', async ()=>{
     const cmd = await vscode.window.showInputBox({ prompt:'Enter a shell command', value:'codestrap ' });
@@ -500,9 +506,7 @@ function activate(context){
     Term.send(cmd, cwd);
   }));
 }
-
 function deactivate(){}
-
 module.exports = { activate, deactivate };
 JS
 
@@ -511,19 +515,17 @@ JS
     echo "[codestrap] wrote Webview extension → $NEW_DIR"
   }
 
-  # Write to all candidate extension roots (dedupe)
+  # Write to all candidate roots, avoiding duplicates
   seen=""
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Signal the outer app to reload/scan extensions
+  # Ask the outer app to rescan
   mkdir -p "$FLAGDIR" || true
   touch "$FLAGFILE" 2>/dev/null || true
   chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
 }
-
-
 
 reload_window(){
   # unconditionally ask the running code-server window to reload
