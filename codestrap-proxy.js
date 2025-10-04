@@ -3,9 +3,6 @@
 // Adds a Service Worker + boot script to automatically show the splash when
 // upstream (code-server) is down, *and* safely injects the boot script into
 // HTML responses (handles compressed upstream: gzip/br/deflate).
-//
-// ENV:
-//   PROXY_PORT, CODE_SERVICE_NAME, CODE_EXPOSED_PORT, UP_TIMEOUT_MS, LOG_CAP, DOCKER_SOCK
 
 const http = require('http');
 const net  = require('net');
@@ -281,6 +278,7 @@ const server = http.createServer((req,res)=>{
   // Service Worker
   if (u.pathname === '/__codestrap/sw.js') {
     const body = `
+// SW: serves splash page when navigations fail with 502–599 or network error.
 self.addEventListener('install', e => self.skipWaiting());
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 function splashResponse(){
@@ -295,7 +293,8 @@ self.addEventListener('fetch', e => {
     e.respondWith((async () => {
       try {
         const resp = await fetch(r);
-        if (resp.status >= 500 || resp.status === 0) return splashResponse();
+        // Only show splash on upstream failures (bad gateway and server errors)
+        if (resp.status >= 502 && resp.status <= 599) return splashResponse();
         return resp;
       } catch (_) {
         return splashResponse();
@@ -312,15 +311,27 @@ self.addEventListener('fetch', e => {
     return res.end(body);
   }
 
-  // Boot script
+  // Boot script — reload ONCE per tab the first time the SW takes control.
   if (u.pathname === '/__codestrap/boot.js') {
     const body = `
 (function(){
   if (!('serviceWorker' in navigator)) return;
+
+  // Only attach reload-on-controllerchange when page isn't yet controlled.
+  var alreadyControlled = !!navigator.serviceWorker.controller;
+
+  // Idempotent registration.
   navigator.serviceWorker.register('/__codestrap/sw.js', { scope: '/' }).catch(function(){});
-  navigator.serviceWorker.addEventListener('controllerchange', function(){
-    if (!window.__cs_sw_kick) { window.__cs_sw_kick = 1; location.reload(); }
-  });
+
+  if (!alreadyControlled) {
+    navigator.serviceWorker.addEventListener('controllerchange', function(){
+      try {
+        if (sessionStorage.getItem('cs_sw_kicked') === '1') return;
+        sessionStorage.setItem('cs_sw_kicked', '1');
+      } catch(_) {}
+      location.reload();
+    });
+  }
 })();
 `.trim() + '\n';
     res.writeHead(200, {
@@ -476,52 +487,43 @@ self.addEventListener('fetch', e => {
           pr.pipe(inf); sourceStream = inf;
         }
       } catch (e) {
-        // If decoder setup fails, fall back to passthrough (still stripped encoding → safe but may look wrong).
         pushLog(`warn: failed to init decoder for enc='${enc}': ${e.message}`);
         sourceStream = pr;
       }
 
-      // Inject <script src="/__codestrap/boot.js"></script> before </head>, else stream unchanged.
-      let seenHead = false;
+      // Inject boot.js before </head>, else fallback before </body>.
+      let injected = false;
       let buffer = '';
       const INJECT_TAG = '<script src="/__codestrap/boot.js"></script>';
       sourceStream.setEncoding('utf8');
 
       sourceStream.on('data', chunk => {
         buffer += chunk;
-        if (!seenHead) {
+        if (!injected) {
           const i = buffer.toLowerCase().indexOf('</head>');
           if (i !== -1) {
-            seenHead = true;
+            injected = true;
             const out = buffer.slice(0, i) + INJECT_TAG + buffer.slice(i);
             res.write(out);
             buffer = '';
-          } else {
-            if (buffer.length > 128 * 1024) {
-              // If no </head> appears (non-standard HTML), flush progressively to avoid buffering too much.
-              res.write(buffer);
-              buffer = '';
-            }
+          } else if (buffer.length > 128 * 1024) {
+            res.write(buffer);
+            buffer = '';
           }
         } else {
-          res.write(chunk);
+            res.write(chunk);
         }
       });
       sourceStream.on('end', () => {
-        if (!seenHead) {
-          // As a fallback, try to inject before </body>; else just flush remaining.
+        if (!injected) {
           const j = buffer.toLowerCase().lastIndexOf('</body>');
-          if (j !== -1) {
-            const out2 = buffer.slice(0, j) + INJECT_TAG + buffer.slice(j);
-            res.write(out2);
-          } else {
-            res.write(buffer);
-          }
+          if (j !== -1) res.write(buffer.slice(0, j) + INJECT_TAG + buffer.slice(j));
+          else res.write(buffer);
         } else if (buffer) {
           res.write(buffer);
         }
         res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [inject=${seenHead?'head':'fallback/none'} enc=${enc||'identity'}]`);
+        pushLog(`${req.method} ${req.url} → ${status} [inject=${injected?'head':'fallback/none'} enc=${enc||'identity'}]`);
       });
       sourceStream.on('error', (e) => {
         pushLog(`error in injection stream: ${e.message}`);
