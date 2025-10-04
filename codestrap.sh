@@ -719,8 +719,8 @@ Flags for 'codestrap github' (hyphenated only; envs shown at right):
   -a, --auto                     Use environment variables only (no prompts)
 
 Env-only (no flags):
-  DEFAULT_WORKSPACE (default: /config/workspace)
-  REPOS_SUBDIR  (default: repos; RELATIVE to DEFAULT_WORKSPACE)
+  WORKSPACE_DIR (default: /config/workspace)
+  REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
 
 Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
   -s, --settings <true|false>    Merge strapped settings.json into user settings.json
@@ -768,17 +768,17 @@ PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
 # Workspace + repos path joining (REPOS_SUBDIR always relative)
-DEFAULT_WORKSPACE="${DEFAULT_WORKSPACE:-$HOME/workspace}"
-DEFAULT_WORKSPACE="$(printf '%s' "$DEFAULT_WORKSPACE" | sed 's:/*$::')"
-ensure_dir "$DEFAULT_WORKSPACE"
+WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
+ensure_dir "$WORKSPACE_DIR"
 
 REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
 REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
 
 if [ -n "$REPOS_SUBDIR" ]; then
-  BASE="${DEFAULT_WORKSPACE}/${REPOS_SUBDIR}"
+  BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
 else
-  BASE="${DEFAULT_WORKSPACE}"
+  BASE="${WORKSPACE_DIR}"
 fi
 ensure_dir "$BASE"
 
@@ -2645,15 +2645,15 @@ bootstrap_env_only(){
 }
 
 recompute_base(){
-  DEFAULT_WORKSPACE="${DEFAULT_WORKSPACE:-$HOME/workspace}"
-  DEFAULT_WORKSPACE="$(printf '%s' "$DEFAULT_WORKSPACE" | sed 's:/*$::')"
-  ensure_dir "$DEFAULT_WORKSPACE"
+  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+  WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
+  ensure_dir "$WORKSPACE_DIR"
   REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
   REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
   if [ -n "$REPOS_SUBDIR" ]; then
-    BASE="${DEFAULT_WORKSPACE}/${REPOS_SUBDIR}"
+    BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
   else
-    BASE="${DEFAULT_WORKSPACE}"
+    BASE="${WORKSPACE_DIR}"
   fi
   ensure_dir "$BASE"
 }
@@ -2813,7 +2813,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
   [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (flag/env/prompt)." >&2; exit 2; }
 
   CTX_TAG="[Bootstrap GitHub]"
-  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL BASE DEFAULT_WORKSPACE REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run
   log "bootstrap complete"
   CTX_TAG=""
