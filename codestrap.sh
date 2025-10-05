@@ -182,17 +182,14 @@ PKG
 
     # ---------- icon ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
-     viewBox="0 0 24 24" fill="none" stroke="currentColor"
-     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
-     aria-hidden="true" role="img">
-  <!-- C (open on the right for a modern feel) -->
-  <path d="M16 6
-           A7 7 0 1 0 16 18" />
-  <!-- S (balanced, compact S-curve) -->
-  <path d="M12 8
-           C 9 8, 9 12, 12 12
-           C 15 12, 15 16, 12 16" />
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512">
+	<style>
+		.s0 { fill: none;stroke: #000000;stroke-linecap: round;stroke-linejoin: round;stroke-width: 3 } 
+	</style>
+	<g id="Layer 1">
+		<path class="s0" d="m18.61 3.05c-3.23-1.94-7.25-1.99-10.52-0.14-3.28 1.85-5.3 5.33-5.3 9.09 0 3.76 2.02 7.24 5.3 9.09 3.27 1.85 7.29 1.8 10.52-0.14"/>
+		<path class="s0" d="m12.64 6.03c-4.48 0-4.48 5.97 0 5.97 4.48 0 4.48 5.97 0 5.97"/>
+	</g>
 </svg>
 SVG
 
