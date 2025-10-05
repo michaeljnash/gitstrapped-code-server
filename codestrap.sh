@@ -349,6 +349,7 @@ class ViewProvider {
       --btnText: var(--vscode-button-foreground);
       --border: var(--vscode-panel-border);
       --input: var(--vscode-input-background);
+      --eyeGrey: #8a8a8a;
     }
     *, *::before, *::after { box-sizing: border-box; }
     body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
@@ -361,16 +362,39 @@ class ViewProvider {
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .toprow{
-      display:flex; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;
+      display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;
     }
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; min-width:92px; }
+    .toprow button{
+      flex: 1 1 120px;              /* responsive: wrap when too narrow */
+      max-width: 220px;
+    }
+    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 12px; cursor:pointer; min-width:92px; position:relative; }
+    /* Spinner on button when .loading is set */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading{ pointer-events:none; }
+    .loading::before{
+      content:"";
+      position:absolute; left:10px; top:50%; transform:translateY(-50%);
+      width:14px; height:14px; border-radius:50%;
+      border:2px solid rgba(255,255,255,0.35);
+      border-top-color: rgba(255,255,255,0.95);
+      animation: spin 0.8s linear infinite;
+    }
+    .loading{ padding-left:32px; } /* room for spinner so text doesn't shift */
+
+    /* Eye icon controls */
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
-      background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:var(--muted);
+      background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px;
+      color: var(--eyeGrey) !important; -webkit-tap-highlight-color: transparent; outline: none;
     }
-    .pad-right-eye{ padding-right:30px; }
+    .pad-right-eye{ padding-right:40px; } /* ensure room on the right so icon doesn't overlap text */
+
     .small{ font-size:11px; color: var(--muted); }
+
+    /* Center action buttons inside sections */
+    .center-row{ justify-content:center; }
   </style>
 </head>
 <body>
@@ -395,7 +419,7 @@ class ViewProvider {
       <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide">👁</button>
     </div>
 
-    <div class="row" style="margin-top:8px;">
+    <div class="row center-row" style="margin-top:8px;">
       <button id="pw-run">Change</button>
     </div>
   </div>
@@ -406,7 +430,7 @@ class ViewProvider {
     <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
     <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
     <div class="row"><label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label></div>
-    <div class="row" style="margin-top:8px;">
+    <div class="row center-row" style="margin-top:8px;">
       <button id="cfg-run">Merge</button>
       <span class="small">Merge codestrap config files into user config files</span>
     </div>
@@ -426,7 +450,7 @@ class ViewProvider {
       <option value="missing">missing</option>
       <option value="all">all (update to latest)</option>
     </select>
-    <div class="row" style="margin-top:8px;">
+    <div class="row center-row" style="margin-top:8px;">
       <button id="ext-run">Apply</button>
     </div>
   </div>
@@ -450,7 +474,7 @@ class ViewProvider {
       <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
       <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
     </div>
-    <div class="row" style="margin-top:8px;">
+    <div class="row center-row" style="margin-top:8px;">
       <button id="gh-run">Run</button>
     </div>
   </div>
@@ -467,30 +491,15 @@ const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'p
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
 
-// Reboot with animated dots: "Rebooting.", "..", "..."
+// Reboot with spinner on the button (no text shifting)
 (function setupReboot(){
   const btn = $("reboot");
-  let timer = null;
-  let i = 0;
-
-  function startDots(){
-    stopDots();
-    btn.disabled = true;
-    btn.dataset.original = btn.textContent;
-    btn.textContent = "Rebooting.";
-    timer = setInterval(() => {
-      i = (i % 3) + 1; // 1..3
-      btn.textContent = "Rebooting" + ".".repeat(i);
-    }, 500);
-  }
-  function stopDots(){
-    if (timer) { clearInterval(timer); timer = null; }
-  }
-
   btn.onclick = () => {
-    startDots();
+    btn.classList.add("loading");
+    btn.disabled = true;
+    btn.textContent = "Rebooting…";
     vscode.postMessage({ type:"reboot" });
-    // do not stop the dots; the process should restart and tear down the webview
+    // Webview should be torn down by restart; if not, button remains in loading state.
   };
 })();
 
