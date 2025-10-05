@@ -105,7 +105,6 @@ install_codestrap_extension(){
     find "$_root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read -r extdir; do
       pkg="$extdir/package.json"
       [ -f "$pkg" ] || continue
-      # fast grep first (avoid jq requirement)
       if grep -q '"activationEvents"' "$pkg" 2>/dev/null; then
         if ! grep -q '"main"' "$pkg" 2>/dev/null && ! grep -q '"browser"' "$pkg" 2>/dev/null; then
           rm -rf "$extdir" 2>/dev/null || true
@@ -122,7 +121,6 @@ install_codestrap_extension(){
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # scrub anything that can poison the host (incl. the webview sample you saw)
     scrub_bad_extensions_root "$_base"
 
     # remove old versions of our extension
@@ -181,7 +179,7 @@ install_codestrap_extension(){
 }
 PKG
 
-    # ---------- icon for activity bar (monochrome, inherits theme via currentColor) ----------
+    # ---------- icon for activity bar (monochrome; inherits theme via currentColor) ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512" aria-hidden="true" role="img">
   <style>
@@ -213,6 +211,9 @@ const vscode = require('vscode');
 const fs = require('fs');
 const http = require('http');
 
+let cliTerminal = null;
+let cliPrimed = false;
+
 function shellQ(s){
   if (s === undefined || s === null) return "''";
   s = String(s); if (s === '') return "''";
@@ -233,10 +234,15 @@ function buildAndRun(args){
   t.show(true);
 }
 
-function openCLI(){ // open terminal with "codestrap" pre-typed (not executed)
-  const t = vscode.window.createTerminal({ name: 'Codestrap' });
-  t.sendText('codestrap', false);
-  t.show(true);
+function openCLI(){ // reuse one terminal if already open
+  if (!cliTerminal || cliTerminal.exitStatus) {
+    cliTerminal = vscode.window.createTerminal({ name: 'Codestrap' });
+    cliPrimed = false;
+    // if just created, pre-type once
+    cliTerminal.sendText('codestrap', false);
+    cliPrimed = true;
+  }
+  cliTerminal.show(true);
 }
 
 function openDocs(){
@@ -260,24 +266,30 @@ const INITIALS = {
   GITHUB_PULL:     (process.env.GITHUB_PULL || '').toString()
 };
 
+function registerTerminalWatcher(context){
+  context.subscriptions.push(
+    vscode.window.onDidCloseTerminal((term) => {
+      if (cliTerminal && term === cliTerminal) {
+        cliTerminal = null;
+        cliPrimed = false;
+      }
+    })
+  );
+}
+
 class ViewProvider {
   resolveWebviewView(webviewView){
     this.webview = webviewView.webview;
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
     const src = this.webview.cspSource;
-
     const initialJSON = JSON.stringify(INITIALS).replace(/</g, '\\u003c');
 
     this.webview.html = this.html(nonce, src, initialJSON);
     this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
-        case 'open:docs':
-          openDocs();
-          break;
-        case 'open:cli':
-          openCLI();
-          break;
+        case 'open:docs': openDocs(); break;
+        case 'open:cli':  openCLI();  break;
         case 'passwd:set': {
           const pw = msg.password || '';
           const cf = msg.confirm  || '';
@@ -318,9 +330,7 @@ class ViewProvider {
           buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
-        case 'reboot':
-          callRestartGate();
-          break;
+        case 'reboot': callRestartGate(); break;
       }
     });
   }
@@ -352,7 +362,11 @@ class ViewProvider {
       --eyeGrey: #8a8a8a;
     }
     *, *::before, *::after { box-sizing: border-box; }
-    body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
+    html, body { height: 100%; }
+    /* eliminate double scrollbars: let only #app scroll */
+    body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
+    #app{ height:100vh; overflow:auto; padding:12px; }
+
     h3{ margin:12px 0 8px; font-size:13px; }
     .section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
     label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
@@ -361,123 +375,135 @@ class ViewProvider {
       border:1px solid var(--border); border-radius:8px;
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    /* Top buttons: either all inline OR all stacked (never 2/1 wrap) */
     .toprow{
-      display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;
+      display:flex; gap:8px; margin-bottom:8px; justify-content:center;
+      flex-direction: row;
     }
-    .toprow button{
-      flex: 1 1 120px;              /* responsive: wrap when too narrow */
-      max-width: 220px;
+    .toprow button{ min-width:120px; }
+    @media (max-width: 520px){
+      .toprow{ flex-direction: column; }
+      .toprow button{ width:100%; }
     }
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 12px; cursor:pointer; min-width:92px; position:relative; }
-    /* Spinner on button when .loading is set */
+
+    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 12px; cursor:pointer; position:relative; }
+    /* Spinner-only style on button when .loading is set */
     @keyframes spin { to { transform: rotate(360deg); } }
-    .loading{ pointer-events:none; }
+    .loading{ color: transparent !important; }
     .loading::before{
       content:"";
-      position:absolute; left:10px; top:50%; transform:translateY(-50%);
-      width:14px; height:14px; border-radius:50%;
-      border:2px solid rgba(255,255,255,0.35);
+      position:absolute; left:50%; top:50%; transform: translate(-50%,-50%);
+      width:16px; height:16px; border-radius:50%;
+      border:2px solid rgba(255,255,255,0.25);
       border-top-color: rgba(255,255,255,0.95);
       animation: spin 0.8s linear infinite;
     }
-    .loading{ padding-left:32px; } /* room for spinner so text doesn't shift */
 
-    /* Eye icon controls */
+    /* Eye icon controls (SVG; fixed right alignment and color) */
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
-      background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px;
-      color: var(--eyeGrey) !important; -webkit-tap-highlight-color: transparent; outline: none;
+      display:inline-flex; align-items:center; justify-content:center;
+      width:22px; height:22px; background:transparent; border:0; cursor:pointer; padding:0; margin:0;
+      color: var(--eyeGrey) !important; -webkit-text-fill-color: var(--eyeGrey); outline: none;
     }
-    .pad-right-eye{ padding-right:40px; } /* ensure room on the right so icon doesn't overlap text */
+    .eye-btn svg { width:16px; height:16px; stroke: currentColor; fill: none; }
+    .pad-right-eye{ padding-right:42px; }
 
     .small{ font-size:11px; color: var(--muted); }
-
     /* Center action buttons inside sections */
     .center-row{ justify-content:center; }
   </style>
 </head>
 <body>
-  <div class="toprow">
-    <button id="btn-docs">Docs</button>
-    <button id="btn-cli">CLI</button>
-    <button id="reboot">Reboot</button>
-  </div>
-
-  <div class="section" id="sec-passwd">
-    <h3>Change password (codestrap <code>passwd</code>)</h3>
-
-    <label>New password</label>
-    <div class="input-with-eye">
-      <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
-      <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide">👁</button>
+  <div id="app">
+    <div class="toprow">
+      <button id="btn-docs">Docs</button>
+      <button id="btn-cli">CLI</button>
+      <button id="reboot">Reboot</button>
     </div>
 
-    <label style="margin-top:6px;">Confirm password</label>
-    <div class="input-with-eye">
-      <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
-      <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide">👁</button>
-    </div>
+    <div class="section" id="sec-passwd">
+      <h3>Change password (codestrap <code>passwd</code>)</h3>
 
-    <div class="row center-row" style="margin-top:8px;">
-      <button id="pw-run">Change</button>
-    </div>
-  </div>
-
-  <div class="section" id="sec-config">
-    <h3>Bootstrap config (codestrap <code>config</code>)</h3>
-    <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
-    <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
-    <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
-    <div class="row"><label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label></div>
-    <div class="row center-row" style="margin-top:8px;">
-      <button id="cfg-run">Merge</button>
-      <span class="small">Merge codestrap config files into user config files</span>
-    </div>
-  </div>
-
-  <div class="section" id="sec-ext">
-    <h3>Manage extensions (codestrap <code>extensions</code>)</h3>
-    <label>Uninstall scope</label>
-    <select id="ext-un">
-      <option value="">(none)</option>
-      <option value="missing">missing (cleanup)</option>
-      <option value="all">all (remove everything)</option>
-    </select>
-    <label style="margin-top:6px;">Install scope</label>
-    <select id="ext-in">
-      <option value="">(none)</option>
-      <option value="missing">missing</option>
-      <option value="all">all (update to latest)</option>
-    </select>
-    <div class="row center-row" style="margin-top:8px;">
-      <button id="ext-run">Apply</button>
-    </div>
-  </div>
-
-  <div class="section" id="sec-github">
-    <h3>Bootstrap GitHub (codestrap <code>github</code>)</h3>
-    <div class="row"><label><input type="checkbox" id="gh-auto" /> Use <code>--auto</code> (env vars)</label></div>
-    <div id="gh-fields">
-      <label>Username</label>
-      <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
-      <label>Token (classic)</label>
+      <label>New password</label>
       <div class="input-with-eye">
-        <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
-        <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide">👁</button>
+        <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
+        <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide" aria-label="Show/Hide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
       </div>
-      <label>Name (blank=use GitHub username)</label>
-      <input id="git-name" type="text" placeholder="GIT_NAME" />
-      <label>Email (blank=use GitHub account email)</label>
-      <input id="git-email" type="text" placeholder="GIT_EMAIL" />
-      <label>Repos (comma-separated owner/repo or owner/repo#branch or URLs)</label>
-      <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
-      <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
+
+      <label style="margin-top:6px;">Confirm password</label>
+      <div class="input-with-eye">
+        <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
+        <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="pw-run">Change</button>
+      </div>
     </div>
-    <div class="row center-row" style="margin-top:8px;">
-      <button id="gh-run">Run</button>
+
+    <div class="section" id="sec-config">
+      <h3>Bootstrap config (codestrap <code>config</code>)</h3>
+      <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label></div>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="cfg-run">Merge</button>
+        <span class="small">Merge codestrap config files into user config files</span>
+      </div>
     </div>
-  </div>
+
+    <div class="section" id="sec-ext">
+      <h3>Manage extensions (codestrap <code>extensions</code>)</h3>
+      <label>Uninstall scope</label>
+      <select id="ext-un">
+        <option value="">(none)</option>
+        <option value="missing">missing (cleanup)</option>
+        <option value="all">all (remove everything)</option>
+      </select>
+      <label style="margin-top:6px;">Install scope</label>
+      <select id="ext-in">
+        <option value="">(none)</option>
+        <option value="missing">missing</option>
+        <option value="all">all (update to latest)</option>
+      </select>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="ext-run">Apply</button>
+      </div>
+    </div>
+
+    <div class="section" id="sec-github">
+      <h3>Bootstrap GitHub (codestrap <code>github</code>)</h3>
+      <div class="row"><label><input type="checkbox" id="gh-auto" /> Use <code>--auto</code> (env vars)</label></div>
+      <div id="gh-fields">
+        <label>Username</label>
+        <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
+        <label>Token (classic)</label>
+        <div class="input-with-eye">
+          <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
+          <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <label>Name (blank=use GitHub username)</label>
+        <input id="git-name" type="text" placeholder="GIT_NAME" />
+        <label>Email (blank=use GitHub account email)</label>
+        <input id="git-email" type="text" placeholder="GIT_EMAIL" />
+        <label>Repos (comma-separated owner/repo or owner/repo#branch or URLs)</label>
+        <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
+        <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
+      </div>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="gh-run">Run</button>
+      </div>
+    </div>
+  </div><!-- /#app -->
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
@@ -491,15 +517,14 @@ const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'p
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
 
-// Reboot with spinner on the button (no text shifting)
+// Reboot with spinner-only (no changing text); proper centered spin
 (function setupReboot(){
   const btn = $("reboot");
   btn.onclick = () => {
     btn.classList.add("loading");
     btn.disabled = true;
-    btn.textContent = "Rebooting…";
     vscode.postMessage({ type:"reboot" });
-    // Webview should be torn down by restart; if not, button remains in loading state.
+    // webview should be torn down by restart
   };
 })();
 
@@ -581,6 +606,8 @@ function activate(context){
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
+
+  registerTerminalWatcher(context);
 }
 function deactivate(){}
 module.exports = { activate, deactivate };
