@@ -186,8 +186,6 @@ PKG
      viewBox="0 0 24 24" fill="none" stroke="currentColor"
      stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
      aria-hidden="true" role="img">
-  <!-- subtle rounded-corner tile -->
-  <rect x="2.5" y="2.5" width="19" height="19" rx="5" opacity="0.12" fill="currentColor" stroke="none"/>
   <!-- C (open on the right for a modern feel) -->
   <path d="M16 6
            A7 7 0 1 0 16 18" />
