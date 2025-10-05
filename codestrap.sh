@@ -2376,6 +2376,10 @@ extensions_cmd(){
   # Parse flags
   MODE=""         # install scope: "", "all", "missing"
   UNMODE=""       # uninstall scope: "", "all", "missing"
+
+  # --- NEVER uninstall this extension (version-agnostic) ---
+  PROTECTED_RE='^(codestrap\.codestrap)(@.*)?$'
+
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)
@@ -2421,8 +2425,9 @@ EHELP
   [ -n "$CODE_BIN" ] || { CTX_TAG="[Extensions]"; warn "code-server/VS Code CLI not found; cannot manage extensions"; CTX_TAG=""; exit 0; }
 
   tmp_recs="$(mktemp)"; tmp_installed="$(mktemp)"
-  emit_recommended_exts >"$tmp_recs" || true
-  emit_installed_exts >"$tmp_installed" || true
+  # Filter out protected ID from both the recommendations and installed sets
+  emit_recommended_exts | grep -Ev "$PROTECTED_RE" >"$tmp_recs" || true
+  emit_installed_exts  | grep -Ev "$PROTECTED_RE" >"$tmp_installed" || true
 
   # Build sets
   tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
@@ -2452,9 +2457,14 @@ EHELP
     case "$scope" in
       all)
         if [ -s "$tmp_installed" ]; then
-          log "uninstalling ALL installed extensions"
+          log "uninstalling ALL installed extensions (protected ones are skipped)"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
+            # Belt-and-suspenders: skip protected even if it sneaks in
+            if echo "$ext" | grep -Eq "$PROTECTED_RE"; then
+              log "skip uninstall (protected): ${ext}"
+              continue
+            fi
             if uninstall_one_ext "$ext"; then
               log "uninstalled ${ext}"
             else
@@ -2467,9 +2477,13 @@ EHELP
         ;;
       missing)
         if [ -s "$tmp_not_recommended" ]; then
-          log "uninstalling extensions not in recommendations (cleanup)"
+          log "uninstalling extensions not in recommendations (cleanup; protected skipped)"
           while IFS= read -r ext; do
             [ -n "$ext" ] || continue
+            if echo "$ext" | grep -Eq "$PROTECTED_RE"; then
+              log "skip uninstall (protected): ${ext}"
+              continue
+            fi
             if uninstall_one_ext "$ext"; then
               log "uninstalled ${ext}"
             else
@@ -2556,7 +2570,7 @@ EHELP
       scope_raw="$(prompt_def "Uninstall scope (all|missing) [missing]: " "missing")"
       UNMODE="$(normalize_scope "$scope_raw")"; [ -n "$UNMODE" ] || UNMODE="missing"
       if [ "$UNMODE" = "all" ]; then
-        conf="$(prompt_def "This will remove ALL installed extensions. Continue? (y/N) " "n")"
+        conf="$(prompt_def "This will remove ALL installed extensions (protected skipped). Continue? (y/N) " "n")"
         [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }
       fi
       do_uninstall "$UNMODE"
