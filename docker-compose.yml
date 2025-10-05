@@ -32,8 +32,7 @@ services:
       PWA_APPNAME: ${PWA_APPNAME:-code-server}
       PROXY_DOMAIN: ${PROXY_DOMAIN}
     
-    networks:
-      - codestrap-network
+    networks: [codestrap-network]
 
     volumes:
       - config:/config
@@ -45,6 +44,8 @@ services:
       - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
     expose:
       - "8443"
+    ports:
+      - ":8443"
     restart: always
 
   splash:
@@ -56,19 +57,20 @@ services:
       PROXY_PORT: "8080"
       CODE_SERVICE_NAME: "code"
       CODE_EXPOSED_PORT: "8443"
-    networks:
-      - codestrap-network
+    networks: [codestrap-network]
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     expose:
       - "8080"
+    ports:
+      - ":8080"
     depends_on:
       - code
     restart: always
 
 networks:
-  codestrap-network:
+  codestrap-network: {}
 
 volumes:
   config:
