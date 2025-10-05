@@ -147,6 +147,7 @@ install_codestrap_extension(){
   "publisher": "codestrap",
   "version": "0.5.2",
   "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel.",
+  "icon": "icon-blue.svg",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
@@ -180,16 +181,29 @@ install_codestrap_extension(){
 }
 PKG
 
-    # ---------- icon ----------
+    # ---------- icon for activity bar (monochrome, inherits theme via currentColor) ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
-<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512">
-	<style>
-		.s0 { fill: none;stroke: #000000;stroke-linecap: round;stroke-linejoin: round;stroke-width: 3 } 
-	</style>
-	<g id="Layer 1">
-		<path class="s0" d="m18.61 3.05c-3.23-1.94-7.25-1.99-10.52-0.14-3.28 1.85-5.3 5.33-5.3 9.09 0 3.76 2.02 7.24 5.3 9.09 3.27 1.85 7.29 1.8 10.52-0.14"/>
-		<path class="s0" d="m12.64 6.03c-4.48 0-4.48 5.97 0 5.97 4.48 0 4.48 5.97 0 5.97"/>
-	</g>
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512" aria-hidden="true" role="img">
+  <style>
+    .s0 { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3 }
+  </style>
+  <g id="Layer 1">
+    <path class="s0" d="m18.61 3.05c-3.23-1.94-7.25-1.99-10.52-0.14-3.28 1.85-5.3 5.33-5.3 9.09 0 3.76 2.02 7.24 5.3 9.09 3.27 1.85 7.29 1.8 10.52-0.14"/>
+    <path class="s0" d="m12.64 6.03c-4.48 0-4.48 5.97 0 5.97 4.48 0 4.48 5.97 0 5.97"/>
+  </g>
+</svg>
+SVG
+
+    # ---------- icon for extension card (VS Code blue) ----------
+    cat >"${NEW_DIR}/icon-blue.svg" <<'SVG'
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512" aria-hidden="true" role="img">
+  <style>
+    .s0 { fill: none; stroke: #007ACC; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3 }
+  </style>
+  <g id="Layer 1">
+    <path class="s0" d="m18.61 3.05c-3.23-1.94-7.25-1.99-10.52-0.14-3.28 1.85-5.3 5.33-5.3 9.09 0 3.76 2.02 7.24 5.3 9.09 3.27 1.85 7.29 1.8 10.52-0.14"/>
+    <path class="s0" d="m12.64 6.03c-4.48 0-4.48 5.97 0 5.97 4.48 0 4.48 5.97 0 5.97"/>
+  </g>
 </svg>
 SVG
 
@@ -214,10 +228,20 @@ function resolveCodestrapString(){
 function buildAndRun(args){
   const runner = resolveCodestrapString();
   if (!runner) { vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).'); return; }
-  // We still send to the integrated terminal for logs when actions run:
   const t = vscode.window.createTerminal({ name: 'Codestrap' });
   t.sendText(`${runner} ${args.join(' ')}`, true);
   t.show(true);
+}
+
+function openCLI(){ // open terminal with "codestrap" pre-typed (not executed)
+  const t = vscode.window.createTerminal({ name: 'Codestrap' });
+  t.sendText('codestrap', false);
+  t.show(true);
+}
+
+function openDocs(){
+  const url = process.env.CODESTRAP_DOCS_URL || 'https://REPLACEME.com';
+  vscode.env.openExternal(vscode.Uri.parse(url));
 }
 
 function callRestartGate(){
@@ -248,6 +272,12 @@ class ViewProvider {
     this.webview.html = this.html(nonce, src, initialJSON);
     this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
+        case 'open:docs':
+          openDocs();
+          break;
+        case 'open:cli':
+          openCLI();
+          break;
         case 'passwd:set': {
           const pw = msg.password || '';
           const cf = msg.confirm  || '';
@@ -330,19 +360,23 @@ class ViewProvider {
       border:1px solid var(--border); border-radius:8px;
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .toprow{ display:flex; justify-content:flex-end; align-items:center; margin-bottom:8px; }
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
+    .toprow{
+      display:flex; justify-content:center; align-items:center; gap:8px; margin-bottom:8px;
+    }
+    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; min-width:92px; }
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
       background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:var(--muted);
     }
     .pad-right-eye{ padding-right:30px; }
-    .small{ font-size:11px; color:var(--muted); }
+    .small{ font-size:11px; color: var(--muted); }
   </style>
 </head>
 <body>
   <div class="toprow">
+    <button id="btn-docs">Docs</button>
+    <button id="btn-cli">CLI</button>
     <button id="reboot">Reboot</button>
   </div>
 
@@ -429,8 +463,36 @@ const INITIAL = ${initialJSON};
 const $ = (id) => document.getElementById(id);
 const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'password') ? 'text' : 'password'; };
 
-// top button
-$("reboot").onclick = () => vscode.postMessage({ type:"reboot" });
+// --- Top buttons ---
+$("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
+$("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
+
+// Reboot with animated dots: "Rebooting.", "..", "..."
+(function setupReboot(){
+  const btn = $("reboot");
+  let timer = null;
+  let i = 0;
+
+  function startDots(){
+    stopDots();
+    btn.disabled = true;
+    btn.dataset.original = btn.textContent;
+    btn.textContent = "Rebooting.";
+    timer = setInterval(() => {
+      i = (i % 3) + 1; // 1..3
+      btn.textContent = "Rebooting" + ".".repeat(i);
+    }, 500);
+  }
+  function stopDots(){
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  btn.onclick = () => {
+    startDots();
+    vscode.postMessage({ type:"reboot" });
+    // do not stop the dots; the process should restart and tear down the webview
+  };
+})();
 
 // password toggles
 $("pw-eye").onclick  = () => togglePw("pw");
@@ -525,8 +587,6 @@ JS
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
-
-
 }
 
 write_codestrap_login() {
