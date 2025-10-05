@@ -62,107 +62,7 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
-ensure_openvsx_registry(){
-  CTX_TAG="[Marketplace]"
-  # --- where to signal reload in your script ---
-  FLAGDIR="${HOME}/.codestrap"
-  FLAGFILE="${FLAGDIR}/reload.signal"
-  mkdir -p "$FLAGDIR" || true
-
-  is_json(){ python3 - <<'PY' 2>/dev/null || exit 1
-import sys, json; json.load(sys.stdin); print("ok")
-PY
-  }
-
-  patch_code_server_product_json(){
-    # Try common install paths then derive from code-server binary
-    CANDIDATES="
-      /app/code-server/lib/vscode/product.json
-      /app/code-server/lib/vscode/product.json
-      $(dirname "$(readlink -f "$(command -v code-server 2>/dev/null || echo /bin/false)")")/../lib/vscode/product.json
-    "
-    TARGET=""
-    for f in $CANDIDATES; do
-      [ -f "$f" ] && { TARGET="$f"; break; }
-    done
-
-    if [ -z "$TARGET" ]; then
-      warn "could not locate code-server product.json; skipping patch"
-      return 0
-    fi
-
-    log "patching product.json → $TARGET"
-    cp -a "$TARGET" "${TARGET}.bak.$(date +%s)" || true
-
-    tmp="$(mktemp)"
-    python3 - "$TARGET" >"$tmp" <<'PY'
-import json,sys
-p=sys.argv[1]
-with open(p,'r',encoding='utf-8') as f:
-  data=json.load(f)
-eg=data.get("extensionsGallery",{})
-eg.update({
-  "serviceUrl": "https://open-vsx.org/vscode/gallery",
-  "itemUrl": "https://open-vsx.org/vscode/item",
-  "resourceUrlTemplate": "https://open-vsx.org/vscode/{publisher}/{name}/{version}/{path}",
-  "controlUrl": "https://open-vsx.org/vscode/api",
-  "recommendationsUrl": ""
-})
-data["extensionsGallery"]=eg
-print(json.dumps(data,ensure_ascii=False,indent=2))
-PY
-    # Write atomically
-    cat "$tmp" > "$TARGET"
-    rm -f "$tmp" || true
-    log "patched Open VSX endpoints in product.json"
-  }
-
-  wrap_openvscode_server_with_flags(){
-    command -v openvscode-server >/dev/null 2>&1 || return 0
-    WRAP="/usr/local/bin/openvscode-server"
-    # Don’t clobber an existing custom wrapper
-    if [ -f "$WRAP" ] && ! grep -q "open-vsx.org/vscode/gallery" "$WRAP" 2>/dev/null; then
-      warn "openvscode-server wrapper exists; leaving as-is"
-      return 0
-    fi
-    require_root || { warn "need root to install openvscode-server wrapper; skipping"; return 0; }
-    cat >"$WRAP" <<'SH'
-#!/usr/bin/env sh
-exec /usr/bin/openvscode-server \
-  --host 0.0.0.0 \
-  --extensions-gallery-url "https://open-vsx.org/vscode/gallery" \
-  --extensions-control-url "https://open-vsx.org/vscode/api" \
-  "$@"
-SH
-    chmod 755 "$WRAP"
-    log "installed openvscode-server wrapper with Open VSX flags"
-  }
-
-  # Do the right thing for the server we have
-  if command -v code-server >/dev/null 2>&1; then
-    patch_code_server_product_json
-  fi
-  wrap_openvscode_server_with_flags
-
-  # Health check (expect JSON, not HTML)
-  hc_code=000
-  body="$(curl -fsS -m 5 -X POST \
-    -H "Content-Type: application/json" \
-    -d '{"filters":[],"assetTypes":[],"pageNumber":1,"pageSize":1}' \
-    "https://open-vsx.org/vscode/gallery/extensionquery" 2>/dev/null || true)"
-  if printf '%s' "$body" | is_json >/dev/null 2>&1; then
-    log "Open VSX registry reachable ✔"
-  else
-    warn "Open VSX health check did not return JSON (marketplace may be blocked). Webviews may still misbehave."
-  fi
-
-  # Nudge a reload so the extension host re-reads marketplace config
-  touch "$FLAGFILE" 2>/dev/null || true
-  chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
-  CTX_TAG=""
-}
-
-ensure_codestrap_extension(){
+install_codestrap_extension(){
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT \
     /config/extensions \
@@ -174,10 +74,6 @@ ensure_codestrap_extension(){
   NEW_ID="codestrap.codestrap"
   NEW_VER="0.5.2"   # bump to force rescan
   NEW_FOLDER="${NEW_ID}-${NEW_VER}"
-
-  FLAGDIR="${HOME}/.codestrap"
-  FLAGFILE="${FLAGDIR}/reload.signal"
-  mkdir -p "$FLAGDIR" || true
 
   # --- helper: remove "bad" extensions that break the host
   scrub_bad_extensions_root(){
@@ -603,20 +499,7 @@ JS
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
 
-  # Signal outer app to rescan
-  mkdir -p "$FLAGDIR" || true
-  touch "$FLAGFILE" 2>/dev/null || true
-  chown "${PUID:-1000}:${PGID:-1000}" "$FLAGFILE" 2>/dev/null || true
-}
 
-
-
-reload_window(){
-  # unconditionally ask the running code-server window to reload
-  FLAG="${HOME}/.codestrap/reload.signal"
-  mkdir -p "$(dirname "$FLAG")"
-  touch "$FLAG" 2>/dev/null || true
-  log "requested window reload"
 }
 
 write_codestrap_login() {
@@ -902,52 +785,6 @@ merge_preserve_files_union(){
   rm -f "$tmp" 2>/dev/null || true
 }
 
-ensure_preserve_store(){
-  ensure_dir "$(dirname "$PRESERVE_MAIN")"
-  ensure_dir "$USER_DIR"
-
-  # If neither exists, seed an empty object
-  if [ ! -e "$PRESERVE_MAIN" ] && [ ! -e "$PRESERVE_LINK" ]; then
-    printf '%s\n' '{ "settings": [], "keybindings": [] }' >"$PRESERVE_MAIN"
-    chown "${PUID}:${PGID}" "$PRESERVE_MAIN" 2>/dev/null || true
-  fi
-
-  # If a regular file exists in the user dir, migrate/merge it into main then remove it
-  if [ -e "$PRESERVE_LINK" ] && [ ! -L "$PRESERVE_LINK" ]; then
-    [ -e "$PRESERVE_MAIN" ] || printf '%s\n' '{}' >"$PRESERVE_MAIN"
-    merge_preserve_files_union "$PRESERVE_LINK" "$PRESERVE_MAIN"
-    rm -f "$PRESERVE_LINK" 2>/dev/null || true
-  fi
-
-  # Create/refresh link from user dir → main
-  if [ -L "$PRESERVE_LINK" ]; then
-    # Already a symlink: if it points to the right place, keep; else replace.
-    tgt="$(readlink "$PRESERVE_LINK" || true)"
-    case "$tgt" in
-      /*) abs="$tgt" ;;
-      *)  abs="$(cd "$(dirname "$PRESERVE_LINK")" 2>/dev/null && printf "%s/%s" "$(pwd)" "$tgt")" ;;
-    esac
-    if [ "$abs" != "$PRESERVE_MAIN" ]; then
-      rm -f "$PRESERVE_LINK" 2>/dev/null || true
-      ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null || true
-    fi
-  elif [ -e "$PRESERVE_LINK" ]; then
-    # A non-symlink file existed; we've migrated it above. Do nothing further.
-    :
-  else
-    # Link path does not exist — try symlink first; if that fails (FS limitation), copy.
-    if ! ln -s "$PRESERVE_MAIN" "$PRESERVE_LINK" 2>/dev/null; then
-      # Avoid copying a file onto itself
-      if [ ! "$PRESERVE_MAIN" -ef "$PRESERVE_LINK" ]; then
-        cp -f "$PRESERVE_MAIN" "$PRESERVE_LINK"
-      fi
-    fi
-  fi
-
-  # Chown link itself (if supported) or the file it points to
-  chown -h "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || chown "${PUID}:${PGID}" "$PRESERVE_LINK" 2>/dev/null || true
-}
-
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
 
@@ -994,7 +831,7 @@ EOF
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
 
 # ===== first-boot default password =====
-init_default_password(){
+init_default_password_if_env(){
   DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-}"
   [ -n "$DEFAULT_PASSWORD" ] || { log "DEFAULT_PASSWORD not set; skipping default hash"; return 0; }
   [ -s "$PASS_HASH_PATH" ] && { log "hash exists; leaving as-is"; return 0; }
@@ -1081,8 +918,6 @@ password_change_interactive(){
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"
   CTX_TAG="$_OLD_CTX_TAG"
-  sleep 2
-  reload_window
 }
 
 password_set_noninteractive(){
@@ -1098,8 +933,6 @@ password_set_noninteractive(){
   printf '%s' "$hash" > "$PASS_HASH_PATH"; chmod 644 "$PASS_HASH_PATH" || true; chown "${PUID}:${PGID}" "$PASS_HASH_PATH" 2>/dev/null || true
   log "password updated (non-interactive)"
   trigger_restart_gate
-  sleep 1
-  reload_window
   return 0
 }
 
@@ -2745,7 +2578,6 @@ recompute_base(){
 config_interactive(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  ensure_preserve_store
   if [ "$(prompt_yn "merge codestrap settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
   else
@@ -2773,14 +2605,12 @@ config_interactive(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
-  reload_window
 }
 
 # --- hybrid / flag-aware config flow ---
 config_hybrid(){
   PROMPT_TAG="[Bootstrap config] ? "
   CTX_TAG="[Bootstrap config]"
-  ensure_preserve_store
   
   # --settings
   if [ -n "${CFG_SETTINGS+x}" ]; then
@@ -2845,7 +2675,6 @@ config_hybrid(){
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
-  reload_window
 }
 
 # ===== github flags handler =====
@@ -3027,7 +2856,6 @@ cli_entry(){
         config_hybrid
       else
         CTX_TAG="[Bootstrap config]"
-        ensure_preserve_store
         # Non-interactive defaults to true unless explicitly set
         if [ -n "${CFG_SETTINGS+x}" ]; then
           if [ "$(normalize_bool "$CFG_SETTINGS")" = "true" ]; then merge_codestrap_settings; else log "skipped settings merge"; fi
@@ -3051,7 +2879,6 @@ cli_entry(){
         fi
         log "Bootstrap config completed"
         CTX_TAG=""
-        reload_window
       fi
       ;;
     extensions)
@@ -3090,7 +2917,7 @@ cli_entry(){
 }
 
 # ===== autorun at container start (env-driven) =====
-autorun_env_if_present(){
+bootstrap_github_if_envs(){
   if [ -n "${GITHUB_USERNAME:-}" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ ! -f "$LOCK_FILE" ]; then
     : > "$LOCK_FILE" || true
     log "env present and no lock → running bootstrap"
@@ -3104,7 +2931,7 @@ autorun_env_if_present(){
 }
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
-autorun_install_extensions(){
+manage_extensions_if_envs(){
   # Normalize envs
   inst_mode="$(printf "%s" "${EXTENSIONS_INSTALL:-}"   | tr '[:upper:]' '[:lower:]')"
   uninst_mode="$(printf "%s" "${EXTENSIONS_UNINSTALL:-}" | tr '[:upper:]' '[:lower:]')"
@@ -3137,20 +2964,18 @@ autorun_install_extensions(){
 case "${1:-init}" in
   init)
     RUN_MODE="init"
-    safe_run "[Restart gate]"            install_restart_gate
-    #safe_run "[Marketplace]"             ensure_openvsx_registry
-    safe_run "[Codestrap Extension]"     ensure_codestrap_extension
-    safe_run "[Codestrap UI] Overwrite   login page" write_codestrap_login
     safe_run "[CLI shim]"                install_cli_shim
-    safe_run "[Default password]"        init_default_password
-    safe_run "[Preserve store]"          ensure_preserve_store
+    safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[Codestrap extension]"     install_codestrap_extension
+    safe_run "[Codestrap UI]"            write_codestrap_login
+    safe_run "[Default password]"        init_default_password_if_env
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
     #safe_run "[Bootstrap config]"        merge_codestrap_extensions
-    safe_run "[Bootstrap GitHub]"        autorun_env_if_present
-    safe_run "[Extensions env]"          autorun_install_extensions
-    log "Codestrap initialized. Use: codestrap -h"
+    safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
+    safe_run "[Extensions env]"          manage_extensions_if_envs
+    log "Codestrap initialized!"
     ;;
   cli)
     RUN_MODE="cli"
