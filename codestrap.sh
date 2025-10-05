@@ -179,7 +179,7 @@ install_codestrap_extension(){
 }
 PKG
 
-    # ---------- icon for activity bar (monochrome; inherits theme via currentColor) ----------
+    # ---------- icon for activity bar (monochrome; theme-inherited) ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512" aria-hidden="true" role="img">
   <style>
@@ -233,8 +233,41 @@ function buildAndRun(args){
   t.show(true);
 }
 
+/** Try to add Docs domain to Trusted Domains (best-effort).
+ *  There is no stable public API to silently trust domains for a user.
+ *  We attempt known commands when available; otherwise we fall back to opening the manager.
+ */
+async function tryTrustDocsDomain(urlStr){
+  try{
+    const u = new URL(urlStr);
+    const host = u.host;                 // e.g. docs.example.com
+    const apex = host.split('.').slice(-2).join('.'); // example.com
+    // Reasonable trust candidates:
+    const candidates = [
+      `${u.protocol}//${host}`,
+      `${u.protocol}//*.${apex}`
+    ];
+    const all = await vscode.commands.getCommands(true);
+    // Known (but not officially documented) IDs used by VS Code UI over the years:
+    const addCmds = ['workbench.trustedDomains.add', 'setTrustedDomains'];
+    const manageCmds = ['workbench.trustedDomains.manage', 'workbench.action.manageTrustedDomain', 'workbench.action.manageTrustedDomains'];
+    const addCmd = addCmds.find(id => all.includes(id));
+    if (addCmd){
+      await vscode.commands.executeCommand(addCmd, candidates);
+      return true;
+    }
+    const manageCmd = manageCmds.find(id => all.includes(id));
+    if (manageCmd){
+      await vscode.commands.executeCommand(manageCmd);
+      vscode.window.showInformationMessage(`Add ${u.origin} to your Trusted Domains to skip the confirmation next time.`);
+    }
+  } catch(e){
+    // ignore
+  }
+  return false;
+}
+
 function openCLI(){ // reuse one terminal if already open
-  // Try to find an existing "Codestrap" terminal first
   const existing = vscode.window.terminals.find(term => term.name === 'Codestrap');
   if (existing) {
     cliTerminal = existing;
@@ -247,7 +280,9 @@ function openCLI(){ // reuse one terminal if already open
 
 function openDocs(){
   const url = process.env.CODESTRAP_DOCS_URL || 'https://REPLACEME.com';
-  vscode.env.openExternal(vscode.Uri.parse(url));
+  tryTrustDocsDomain(url).finally(() => {
+    vscode.env.openExternal(vscode.Uri.parse(url));
+  });
 }
 
 function callRestartGate(){
@@ -362,7 +397,6 @@ class ViewProvider {
     }
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; }
-    /* eliminate double scrollbars: only #app scrolls */
     body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
     #app{ height:100vh; overflow:auto; padding:12px; }
 
@@ -375,13 +409,10 @@ class ViewProvider {
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
-    /* Top buttons: either all inline OR all stacked (never 2/1 wrap) */
     .toprow{
-      display:flex; gap:8px; margin-bottom:8px; justify-content:center;
-      flex-direction: row;
+      display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row;
     }
     .toprow button{ min-width:120px; }
-    /* Stack only when VERY narrow (tighter breakpoint) */
     @media (max-width: 400px){
       .toprow{ flex-direction: column; }
       .toprow button{ width:100%; }
@@ -392,20 +423,16 @@ class ViewProvider {
       padding:6px 12px; cursor:pointer; position:relative;
     }
 
-    /* Proper centered spinner when .loading is set (no text shown) */
     @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
     .loading{ color: transparent !important; }
     .loading::before{
-      content:"";
-      position:absolute; left:50%; top:50%;
-      margin-left:-8px; margin-top:-8px;   /* center without translate() so animation doesn't fight it */
+      content:""; position:absolute; left:50%; top:50%; margin-left:-8px; margin-top:-8px;
       width:16px; height:16px; border-radius:50%;
       border:2px solid rgba(255,255,255,0.25);
       border-top-color: rgba(255,255,255,0.95);
       animation: spin 0.8s linear infinite;
     }
 
-    /* Eye icon controls (fixed right alignment and color) */
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
@@ -414,10 +441,9 @@ class ViewProvider {
       color: var(--eyeGrey) !important; -webkit-text-fill-color: var(--eyeGrey); outline: none;
     }
     .eye-btn svg { width:16px; height:16px; stroke: currentColor; fill: none; }
-    .pad-right-eye{ padding-right:44px; } /* enough room so icon never overlaps text */
+    .pad-right-eye{ padding-right:44px; }
 
     .small{ font-size:11px; color: var(--muted); }
-    /* Center action buttons inside sections */
     .center-row{ justify-content:center; }
   </style>
 </head>
@@ -530,7 +556,6 @@ $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
     btn.classList.add("loading");
     btn.disabled = true;
     vscode.postMessage({ type:"reboot" });
-    // webview should be torn down by restart
   };
 })();
 
@@ -547,7 +572,6 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
   if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL.GIT_EMAIL;
   if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL.GITHUB_REPOS;
 
-  // Only touch the checkbox if env provided; otherwise keep default checked
   if (INITIAL.GITHUB_PULL) {
     const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
     $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
