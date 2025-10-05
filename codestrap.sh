@@ -62,6 +62,24 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
+chown_necessary_dirs(){
+  # create important dirs and ensure ownership for the abc user
+  for d in \
+    "$HOME/.local/share/code-server" \
+    "$HOME/.config/code-server" \
+    "$HOME/data" \
+    "$HOME/extensions"
+  do
+    ensure_dir "$d"
+  done
+
+  chown -R "${PUID:-1000}:${PGID:-1000}" \
+    "$HOME/.local/share/code-server" \
+    "$HOME/.config/code-server" \
+    "$HOME/data" \
+    "$HOME/extensions" 2>/dev/null || true
+}
+
 install_codestrap_extension(){
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
   CANDIDATES="$EXTBASE_DEFAULT \
@@ -2964,6 +2982,7 @@ manage_extensions_if_envs(){
 case "${1:-init}" in
   init)
     RUN_MODE="init"
+    safe_run "[Permissions]"             chown_necessary_dirs
     safe_run "[CLI shim]"                install_cli_shim
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[Codestrap extension]"     install_codestrap_extension
