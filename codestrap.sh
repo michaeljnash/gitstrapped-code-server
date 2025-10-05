@@ -146,14 +146,13 @@ install_codestrap_extension(){
   "displayName": "Codestrap",
   "publisher": "codestrap",
   "version": "0.5.2",
-  "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel. Uses terminal for logs.",
+  "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel.",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.view",
     "onCommand:codestrap.open",
-    "onCommand:codestrap.openTerminal",
     "onCommand:codestrap.refresh"
   ],
   "contributes": {
@@ -169,13 +168,12 @@ install_codestrap_extension(){
     },
     "commands": [
       { "command": "codestrap.open", "title": "Codestrap: Open Sidebar" },
-      { "command": "codestrap.openTerminal", "title": "Codestrap: Show Terminal" },
       { "command": "codestrap.refresh", "title": "Codestrap: Refresh Panel" }
     ],
     "viewsWelcome": [
       {
         "view": "codestrap.view",
-        "contents": "Run any Codestrap command from the sections below. Logs open in the integrated Terminal.\n"
+        "contents": "Run any Codestrap command from the sections below.\n"
       }
     ]
   }
@@ -194,19 +192,7 @@ SVG
     cat >"${NEW_DIR}/extension.js" <<'JS'
 const vscode = require('vscode');
 const fs = require('fs');
-
-class Term {
-  static get(name='Codestrap'){
-    if (!this._term || this._termExit) {
-      this._term = vscode.window.createTerminal({ name });
-      this._termExit = false;
-      vscode.window.onDidCloseTerminal(t => { if (t === this._term) this._termExit = true; });
-    }
-    return this._term;
-  }
-  static show(){ this.get().show(true); }
-  static send(cmd){ const t = this.get(); t.sendText(cmd, true); this.show(); }
-}
+const http = require('http');
 
 function shellQ(s){
   if (s === undefined || s === null) return "''";
@@ -223,8 +209,27 @@ function resolveCodestrapString(){
 function buildAndRun(args){
   const runner = resolveCodestrapString();
   if (!runner) { vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).'); return; }
-  Term.send(`${runner} ${args.join(' ')}`);
+  // We still send to the integrated terminal for logs when actions run:
+  const t = vscode.window.createTerminal({ name: 'Codestrap' });
+  t.sendText(`${runner} ${args.join(' ')}`, true);
+  t.show(true);
 }
+
+function callRestartGate(){
+  const req = http.request({ hostname:'127.0.0.1', port:9000, path:'/restart', method:'GET', timeout:2000 }, () => {});
+  req.on('error', () => {});
+  req.end();
+  vscode.window.showInformationMessage('Reboot requested.');
+}
+
+const INITIALS = {
+  GITHUB_USERNAME: process.env.GITHUB_USERNAME || '',
+  GITHUB_TOKEN:    process.env.GITHUB_TOKEN    || '',
+  GIT_NAME:        (process.env.GIT_NAME || process.env.GITHUB_USERNAME || ''),
+  GIT_EMAIL:       process.env.GIT_EMAIL       || '',
+  GITHUB_REPOS:    process.env.GITHUB_REPOS    || '',
+  GITHUB_PULL:     (process.env.GITHUB_PULL || '').toString()
+};
 
 class ViewProvider {
   resolveWebviewView(webviewView){
@@ -232,7 +237,10 @@ class ViewProvider {
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
     const src = this.webview.cspSource;
-    this.webview.html = this.html(nonce, src);
+
+    const initialJSON = JSON.stringify(INITIALS).replace(/</g, '\\u003c');
+
+    this.webview.html = this.html(nonce, src, initialJSON);
     this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
         case 'passwd:set': {
@@ -275,12 +283,14 @@ class ViewProvider {
           buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
-        case 'openTerminal': Term.show(); break;
+        case 'reboot':
+          callRestartGate();
+          break;
       }
     });
   }
 
-  html(nonce, cspSource){
+  html(nonce, cspSource, initialJSON){
     const csp = [
       "default-src 'none'",
       `img-src ${cspSource} https: data:`,
@@ -305,81 +315,47 @@ class ViewProvider {
       --border: var(--vscode-panel-border);
       --input: var(--vscode-input-background);
     }
-
-    /* ensure padding/border are included in width calc (prevents right overflow) */
     *, *::before, *::after { box-sizing: border-box; }
-
-    body{
-      margin:0; padding:12px;
-      font-family: var(--vscode-font-family);
-      color: var(--fg);
-      background: var(--bg);
-    }
-
+    body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
     h3{ margin:12px 0 8px; font-size:13px; }
-
-    .section{
-      border:1px solid var(--border);
-      border-radius:12px;
-      padding:12px;
-      margin-bottom:10px;
-    }
-
+    .section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
     label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
-
-    /* FIX: keep form controls inside the card border */
-    input[type="text"],
-    input[type="password"],
-    select{
-      width:100%;
-      max-width:100%;
-      display:block;
-      padding:8px 10px;
-      background:var(--input);
-      color:var(--fg);
-      border:1px solid var(--border);
-      border-radius:8px;
-      box-sizing:border-box;
+    input[type="text"], input[type="password"], select{
+      width:100%; max-width:100%; display:block; padding:8px 10px; background:var(--input); color:var(--fg);
+      border:1px solid var(--border); border-radius:8px;
     }
-
-    .row{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap; /* avoid horizontal overflow in narrow sidebars */
+    .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .toprow{ display:flex; justify-content:flex-end; align-items:center; margin-bottom:8px; }
+    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
+    .input-with-eye{ position:relative; }
+    .eye-btn{
+      position:absolute; top:50%; right:8px; transform:translateY(-50%);
+      background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:var(--muted);
     }
-
-    .toprow{
-      display:flex;
-      justify-content:space-between;
-      align-items:center;
-      margin-bottom:8px;
-    }
-
-    button{
-      border:0;
-      border-radius:8px;
-      background:var(--btn);
-      color:var(--btnText);
-      padding:6px 10px;
-      cursor:pointer;
-    }
-
+    .pad-right-eye{ padding-right:30px; }
     .small{ font-size:11px; color:var(--muted); }
   </style>
 </head>
 <body>
   <div class="toprow">
-    <div style="font-size:11px; color:var(--muted)">Logs will appear in the integrated Terminal.</div>
-    <button id="term">Terminal</button>
+    <button id="reboot">Reboot</button>
   </div>
 
   <div class="section" id="sec-passwd">
     <h3>Change password (codestrap <code>passwd</code>)</h3>
+
     <label>New password</label>
-    <input id="pw" type="password" placeholder="at least 8 characters" />
+    <div class="input-with-eye">
+      <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
+      <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide">👁</button>
+    </div>
+
     <label style="margin-top:6px;">Confirm password</label>
-    <input id="pw2" type="password" placeholder="re-enter password" />
+    <div class="input-with-eye">
+      <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
+      <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide">👁</button>
+    </div>
+
     <div class="row" style="margin-top:8px;">
       <button id="pw-run">Change</button>
     </div>
@@ -423,7 +399,10 @@ class ViewProvider {
       <label>Username</label>
       <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
       <label>Token (classic)</label>
-      <input id="gh-token" type="password" placeholder="GITHUB_TOKEN" />
+      <div class="input-with-eye">
+        <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
+        <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide">👁</button>
+      </div>
       <label>Name (blank=use GitHub username)</label>
       <input id="git-name" type="text" placeholder="GIT_NAME" />
       <label>Email (blank=use GitHub account email)</label>
@@ -439,10 +418,36 @@ class ViewProvider {
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
+const INITIAL = ${initialJSON};
+
+// helpers
 const $ = (id) => document.getElementById(id);
+const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'password') ? 'text' : 'password'; };
 
-$("term").onclick = () => vscode.postMessage({ type:"openTerminal" });
+// top button
+$("reboot").onclick = () => vscode.postMessage({ type:"reboot" });
 
+// password toggles
+$("pw-eye").onclick  = () => togglePw("pw");
+$("pw2-eye").onclick = () => togglePw("pw2");
+$("gh-token-eye").onclick = () => togglePw("gh-token");
+
+// prefill GitHub fields from env if provided
+(function prefill(){
+  if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL.GITHUB_USERNAME;
+  if (INITIAL.GITHUB_TOKEN)    $("gh-token").value = INITIAL.GITHUB_TOKEN;
+  if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL.GIT_NAME;
+  if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL.GIT_EMAIL;
+  if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL.GITHUB_REPOS;
+
+  // Only touch the checkbox if env provided; otherwise keep default checked
+  if (INITIAL.GITHUB_PULL) {
+    const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
+    $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
+  }
+})();
+
+// actions
 $("pw-run").onclick = () => {
   const a = $("pw").value || "";
   const b = $("pw2").value || "";
@@ -500,7 +505,6 @@ function activate(context){
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
-  context.subscriptions.push(vscode.commands.registerCommand('codestrap.openTerminal', () => Term.show()));
 }
 function deactivate(){}
 module.exports = { activate, deactivate };
