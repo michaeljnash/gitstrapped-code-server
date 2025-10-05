@@ -233,16 +233,22 @@ function buildAndRun(args){
   t.show(true);
 }
 
-function openCLI(){ // reuse one terminal if already open
-  // Try to find an existing "Codestrap" terminal first
-  const existing = vscode.window.terminals.find(term => term.name === 'Codestrap');
-  if (existing) {
-    cliTerminal = existing;
-  } else {
-    cliTerminal = vscode.window.createTerminal({ name: 'Codestrap' });
-    cliTerminal.sendText('codestrap', false); // pre-type once
+// Open/reuse a "Codestrap" terminal and ensure "codestrap" is freshly typed at the prompt
+function openCLI(){
+  // Reuse existing terminal if present, else create it
+  let term = vscode.window.terminals.find(t => t.name === 'Codestrap');
+  if (!term) {
+    term = vscode.window.createTerminal({ name: 'Codestrap' });
   }
-  cliTerminal.show(true);
+  term.show(true);
+
+  // Clear any unsubmitted input on the current line (Ctrl+U in bash/zsh/readline)
+  term.sendText('\u0015', false);
+
+  // Type the command without executing it
+  term.sendText('codestrap', false);
+
+  cliTerminal = term;
 }
 
 function openDocs(){
@@ -398,7 +404,7 @@ class ViewProvider {
     .loading::before{
       content:"";
       position:absolute; left:50%; top:50%;
-      margin-left:-8px; margin-top:-8px;   /* center without translate() so animation doesn't fight it */
+      margin-left:-8px; margin-top:-8px;
       width:16px; height:16px; border-radius:50%;
       border:2px solid rgba(255,255,255,0.25);
       border-top-color: rgba(255,255,255,0.95);
@@ -414,10 +420,9 @@ class ViewProvider {
       color: var(--eyeGrey) !important; -webkit-text-fill-color: var(--eyeGrey); outline: none;
     }
     .eye-btn svg { width:16px; height:16px; stroke: currentColor; fill: none; }
-    .pad-right-eye{ padding-right:44px; } /* enough room so icon never overlaps text */
+    .pad-right-eye{ padding-right:44px; }
 
     .small{ font-size:11px; color: var(--muted); }
-    /* Center action buttons inside sections */
     .center-row{ justify-content:center; }
   </style>
 </head>
@@ -543,11 +548,10 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
 (function prefill(){
   if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL.GITHUB_USERNAME;
   if (INITIAL.GITHUB_TOKEN)    $("gh-token").value = INITIAL.GITHUB_TOKEN;
-  if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL.GIT_NAME;
+  if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL_GIT_NAME;
   if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL.GIT_EMAIL;
-  if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL.GITHUB_REPOS;
+  if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL_GITHUB_REPOS;
 
-  // Only touch the checkbox if env provided; otherwise keep default checked
   if (INITIAL.GITHUB_PULL) {
     const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
     $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
