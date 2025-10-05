@@ -323,8 +323,10 @@ class ViewProvider {
       switch (msg.type) {
         case 'passwd:set': {
           const pw = msg.password || '';
+          const cf = msg.confirm  || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
-          buildAndRun(['passwd','--set',shellQ(pw)]);
+          if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+          buildAndRun(['passwd','--set', shellQ(pw), shellQ(cf)]);
           break;
         }
         case 'config:run': {
@@ -462,6 +464,8 @@ class ViewProvider {
     <h3>Change password (codestrap <code>passwd</code>)</h3>
     <label>New password</label>
     <input id="pw" type="password" placeholder="at least 8 characters" />
+    <label style="margin-top:6px;">Confirm password</label>
+    <input id="pw2" type="password" placeholder="re-enter password" />
     <div class="row" style="margin-top:8px;">
       <button id="pw-run">Change</button>
     </div>
@@ -526,7 +530,11 @@ const $ = (id) => document.getElementById(id);
 $("term").onclick = () => vscode.postMessage({ type:"openTerminal" });
 
 $("pw-run").onclick = () => {
-  vscode.postMessage({ type:"passwd:set", password: $("pw").value || "" });
+  const a = $("pw").value || "";
+  const b = $("pw2").value || "";
+  if (a.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
+  if (a !== b)      { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+  vscode.postMessage({ type:"passwd:set", password: a, confirm: b });
 };
 
 $("cfg-run").onclick = () => {
@@ -761,6 +769,7 @@ Usage (subcommands):
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
   codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
   codestrap passwd               # Interactive password change (secure prompts)
+  codestrap passwd --set "<pw>" "<pw>"   # Non-interactive (pw + confirm)
   codestrap -h | --help          # Help
   codestrap -v | --version       # Version
 
@@ -1077,10 +1086,12 @@ password_change_interactive(){
 }
 
 password_set_noninteractive(){
-  # usage: codestrap passwd --set "<password>"
-  PW="$1"
+  # usage: codestrap passwd --set "<password>" "<confirm>"
+  PW="${1:-}"; CONF="${2:-}"
   command -v argon2 >/dev/null 2>&1 || { CTX_TAG="[Change password]"; err "argon2 not found."; CTX_TAG=""; return 1; }
-  [ -n "$PW" ] || { CTX_TAG="[Change password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ -n "$PW" ]   || { CTX_TAG="[Change password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ -n "$CONF" ] || { CTX_TAG="[Change password]"; err "confirmation required"; CTX_TAG=""; return 1; }
+  [ "$PW" = "$CONF" ] || { CTX_TAG="[Change password]"; err "passwords do not match"; CTX_TAG=""; return 1; }
   [ ${#PW} -ge 8 ] || { CTX_TAG="[Change password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
   salt="$(head -c16 /dev/urandom | base64)"
   hash="$(printf '%s' "$PW" | argon2 "$salt" -id -e)"
@@ -3051,20 +3062,28 @@ cli_entry(){
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     passwd)
       shift || true
-      if [ "${1:-}" = "--set" ]; then
-        shift || true
-        PW="${1:-}"
-        [ -n "$PW" ] || { CTX_TAG="[Change password]"; err "--set requires a password argument"; CTX_TAG=""; exit 2; }
-        CTX_TAG="[Change password]"
-        password_set_noninteractive "$PW" || exit 1
-        CTX_TAG=""
-        exit 0
-      fi
-      bootstrap_banner
-      CTX_TAG="[Change password]"
-      password_change_interactive
-      CTX_TAG=""
-      exit 0;;
+      case "${1:-}" in
+        --set)
+          shift || true
+          PW="${1:-}"
+          CONF="${2:-}"
+          if [ -z "$PW" ] || [ -z "$CONF" ]; then
+            CTX_TAG="[Change password]"; err "--set requires two args: <password> <confirm>"; CTX_TAG=""; exit 2
+          fi
+          CTX_TAG="[Change password]"
+          password_set_noninteractive "$PW" "$CONF" || exit 1
+          CTX_TAG=""
+          exit 0
+          ;;
+        *)
+          bootstrap_banner
+          CTX_TAG="[Change password]"
+          password_change_interactive
+          CTX_TAG=""
+          exit 0
+          ;;
+      esac
+      ;;
     *)
       err "Unknown subcommand: $1"; print_help; exit 1;;
   esac
