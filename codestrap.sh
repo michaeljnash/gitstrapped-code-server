@@ -105,7 +105,6 @@ install_codestrap_extension(){
     find "$_root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read -r extdir; do
       pkg="$extdir/package.json"
       [ -f "$pkg" ] || continue
-      # fast grep first (avoid jq requirement)
       if grep -q '"activationEvents"' "$pkg" 2>/dev/null; then
         if ! grep -q '"main"' "$pkg" 2>/dev/null && ! grep -q '"browser"' "$pkg" 2>/dev/null; then
           rm -rf "$extdir" 2>/dev/null || true
@@ -122,7 +121,6 @@ install_codestrap_extension(){
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # scrub anything that can poison the host (incl. the webview sample you saw)
     scrub_bad_extensions_root "$_base"
 
     # remove old versions of our extension
@@ -181,7 +179,7 @@ install_codestrap_extension(){
 }
 PKG
 
-    # ---------- icon for activity bar (monochrome, inherits theme via currentColor) ----------
+    # ---------- icon for activity bar (monochrome; theme-inherited) ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
 <svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="512" height="512" aria-hidden="true" role="img">
   <style>
@@ -236,11 +234,9 @@ function buildAndRun(args){
 }
 
 /**
- * Ensure a docs URL's domain is added to Trusted Domains (best-effort).
- * Strategy:
- * 1) If 'vscode.getTrustedDomains' exists, fetch the current list.
- * 2) Merge in the origin and a wildcard for the apex domain.
- * 3) Apply via 'setTrustedDomains' (or 'workbench.trustedDomains.add' fallback).
+ * Actually add the Docs domain to the user's trusted domains list.
+ * We first try the documented commands; if they are missing or ignored (code-server),
+ * we directly write the `workbench.trustedDomains` user setting via the configuration API.
  */
 async function ensureDocsDomainTrusted(urlStr){
   try{
@@ -250,29 +246,30 @@ async function ensureDocsDomainTrusted(urlStr){
     const apex = parts.length >= 2 ? parts.slice(-2).join('.') : u.host;
     const wildcard = `${u.protocol}//*.${apex}`;
 
+    // 1) Try built-in commands if available
     const cmds = await vscode.commands.getCommands(true);
-
-    // read existing (shape may be array<string> or {domains:string[]})
-    let existing = [];
-    if (cmds.includes('vscode.getTrustedDomains')) {
-      const got = await vscode.commands.executeCommand('vscode.getTrustedDomains');
-      if (Array.isArray(got)) existing = got;
-      else if (got && Array.isArray(got.domains)) existing = got.domains;
+    if (cmds.includes('vscode.getTrustedDomains') || cmds.includes('setTrustedDomains')) {
+      let existing = [];
+      if (cmds.includes('vscode.getTrustedDomains')) {
+        const got = await vscode.commands.executeCommand('vscode.getTrustedDomains');
+        if (Array.isArray(got)) existing = got;
+        else if (got && Array.isArray(got.domains)) existing = got.domains;
+      }
+      const merged = Array.from(new Set([...(existing||[]), origin, wildcard]));
+      if (cmds.includes('setTrustedDomains')) {
+        await vscode.commands.executeCommand('setTrustedDomains', merged);
+        return true;
+      }
     }
 
-    const desired = [origin, wildcard];
-    const merged = Array.from(new Set([...(existing||[]), ...desired]));
-
-    // prefer setTrustedDomains; fall back to workbench.trustedDomains.add
-    if (cmds.includes('setTrustedDomains')) {
-      await vscode.commands.executeCommand('setTrustedDomains', merged);
-      return true;
-    }
-    if (cmds.includes('workbench.trustedDomains.add')) {
-      await vscode.commands.executeCommand('workbench.trustedDomains.add', desired);
-      return true;
-    }
-  } catch(e){
+    // 2) Fall back to updating user settings directly
+    const cfg = vscode.workspace.getConfiguration('workbench');
+    const current = cfg.get('trustedDomains') || [];
+    const mergedSettings = Array.from(new Set([...(Array.isArray(current)? current : []), origin, wildcard]));
+    // Update in user scope (global)
+    await cfg.update('trustedDomains', mergedSettings, vscode.ConfigurationTarget.Global);
+    return true;
+  } catch (e) {
     // ignore; we'll still open the link
   }
   return false;
@@ -408,7 +405,6 @@ class ViewProvider {
     }
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; }
-    /* eliminate double scrollbars: only #app scrolls */
     body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
     #app{ height:100vh; overflow:auto; padding:12px; }
 
@@ -421,12 +417,8 @@ class ViewProvider {
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
-    /* Top buttons: either all inline OR all stacked (never 2/1 wrap) */
-    .toprow{
-      display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row;
-    }
+    .toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }
     .toprow button{ min-width:120px; }
-    /* Stack only when very narrow */
     @media (max-width: 400px){
       .toprow{ flex-direction: column; }
       .toprow button{ width:100%; }
@@ -437,7 +429,6 @@ class ViewProvider {
       padding:6px 12px; cursor:pointer; position:relative;
     }
 
-    /* Proper centered spinner when .loading is set (no text shown) */
     @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
     .loading{ color: transparent !important; }
     .loading::before{
@@ -448,7 +439,6 @@ class ViewProvider {
       animation: spin 0.8s linear infinite;
     }
 
-    /* Eye icon controls (fixed right alignment and color) */
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
@@ -565,7 +555,7 @@ const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'p
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
 
-// Reboot with spinner-only; proper centered spin
+// Reboot with spinner-only
 (function setupReboot(){
   const btn = $("reboot");
   btn.onclick = () => {
@@ -582,13 +572,12 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
 
 // prefill GitHub fields from env if provided
 (function prefill(){
-  if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL.GITHUB_USERNAME;
+  if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL_GITHUB_USERNAME;
   if (INITIAL.GITHUB_TOKEN)    $("gh-token").value = INITIAL_GITHUB_TOKEN;
   if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL_GIT_NAME;
   if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL_GIT_EMAIL;
   if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL_GITHUB_REPOS;
 
-  // Only touch the checkbox if env provided; otherwise keep default checked
   if (INITIAL.GITHUB_PULL) {
     const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
     $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
