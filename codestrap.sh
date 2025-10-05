@@ -212,7 +212,6 @@ const fs = require('fs');
 const http = require('http');
 
 let cliTerminal = null;
-let cliPrimed = false;
 
 function shellQ(s){
   if (s === undefined || s === null) return "''";
@@ -235,12 +234,13 @@ function buildAndRun(args){
 }
 
 function openCLI(){ // reuse one terminal if already open
-  if (!cliTerminal || cliTerminal.exitStatus) {
+  // Try to find an existing "Codestrap" terminal first
+  const existing = vscode.window.terminals.find(term => term.name === 'Codestrap');
+  if (existing) {
+    cliTerminal = existing;
+  } else {
     cliTerminal = vscode.window.createTerminal({ name: 'Codestrap' });
-    cliPrimed = false;
-    // if just created, pre-type once
-    cliTerminal.sendText('codestrap', false);
-    cliPrimed = true;
+    cliTerminal.sendText('codestrap', false); // pre-type once
   }
   cliTerminal.show(true);
 }
@@ -271,7 +271,6 @@ function registerTerminalWatcher(context){
     vscode.window.onDidCloseTerminal((term) => {
       if (cliTerminal && term === cliTerminal) {
         cliTerminal = null;
-        cliPrimed = false;
       }
     })
   );
@@ -363,7 +362,7 @@ class ViewProvider {
     }
     *, *::before, *::after { box-sizing: border-box; }
     html, body { height: 100%; }
-    /* eliminate double scrollbars: let only #app scroll */
+    /* eliminate double scrollbars: only #app scrolls */
     body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
     #app{ height:100vh; overflow:auto; padding:12px; }
 
@@ -375,31 +374,38 @@ class ViewProvider {
       border:1px solid var(--border); border-radius:8px;
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
     /* Top buttons: either all inline OR all stacked (never 2/1 wrap) */
     .toprow{
       display:flex; gap:8px; margin-bottom:8px; justify-content:center;
       flex-direction: row;
     }
     .toprow button{ min-width:120px; }
-    @media (max-width: 520px){
+    /* Stack only when VERY narrow (tighter breakpoint) */
+    @media (max-width: 400px){
       .toprow{ flex-direction: column; }
       .toprow button{ width:100%; }
     }
 
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 12px; cursor:pointer; position:relative; }
-    /* Spinner-only style on button when .loading is set */
-    @keyframes spin { to { transform: rotate(360deg); } }
+    button{
+      border:0; border-radius:8px; background:var(--btn); color:var(--btnText);
+      padding:6px 12px; cursor:pointer; position:relative;
+    }
+
+    /* Proper centered spinner when .loading is set (no text shown) */
+    @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
     .loading{ color: transparent !important; }
     .loading::before{
       content:"";
-      position:absolute; left:50%; top:50%; transform: translate(-50%,-50%);
+      position:absolute; left:50%; top:50%;
+      margin-left:-8px; margin-top:-8px;   /* center without translate() so animation doesn't fight it */
       width:16px; height:16px; border-radius:50%;
       border:2px solid rgba(255,255,255,0.25);
       border-top-color: rgba(255,255,255,0.95);
       animation: spin 0.8s linear infinite;
     }
 
-    /* Eye icon controls (SVG; fixed right alignment and color) */
+    /* Eye icon controls (fixed right alignment and color) */
     .input-with-eye{ position:relative; }
     .eye-btn{
       position:absolute; top:50%; right:8px; transform:translateY(-50%);
@@ -408,7 +414,7 @@ class ViewProvider {
       color: var(--eyeGrey) !important; -webkit-text-fill-color: var(--eyeGrey); outline: none;
     }
     .eye-btn svg { width:16px; height:16px; stroke: currentColor; fill: none; }
-    .pad-right-eye{ padding-right:42px; }
+    .pad-right-eye{ padding-right:44px; } /* enough room so icon never overlaps text */
 
     .small{ font-size:11px; color: var(--muted); }
     /* Center action buttons inside sections */
@@ -517,7 +523,7 @@ const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'p
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
 
-// Reboot with spinner-only (no changing text); proper centered spin
+// Reboot with spinner-only; proper centered spin
 (function setupReboot(){
   const btn = $("reboot");
   btn.onclick = () => {
