@@ -424,12 +424,12 @@ class ViewProvider {
       <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
       <label>Token (classic)</label>
       <input id="gh-token" type="password" placeholder="GITHUB_TOKEN" />
-      <label>Name</label>
-      <input id="gh-name" type="text" placeholder="git user.name" />
-      <label>Email</label>
-      <input id="gh-email" type="text" placeholder="git user.email (blank=auto)" />
-      <label>Repos (comma-separated owner/repo[#branch] or URLs)</label>
-      <input id="gh-repos" type="text" placeholder="owner/repo, org/infra#main, ..." />
+      <label>Name (blank=use GitHub username)</label>
+      <input id="git-name" type="text" placeholder="GIT_NAME" />
+      <label>Email (blank=use GitHub account email)</label>
+      <input id="git-email" type="text" placeholder="GIT_EMAIL" />
+      <label>Repos (comma-separated owner/repo / owner/repo#branch or URLs)</label>
+      <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
       <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
     </div>
     <div class="row" style="margin-top:8px;">
@@ -479,8 +479,8 @@ $("gh-run").onclick = () => {
     auto,
     username: auto ? "" : $("gh-user").value,
     token:    auto ? "" : $("gh-token").value,
-    name:     auto ? "" : $("gh-name").value,
-    email:    auto ? "" : $("gh-email").value,
+    name:     auto ? "" : $("git-name").value,
+    email:    auto ? "" : $("git-email").value,
     repos:    auto ? "" : $("gh-repos").value,
     pull:     auto ? undefined : $("gh-pull").checked
   });
@@ -680,8 +680,8 @@ NOTE: For any flag that expects a boolean or scope value, you can use the first 
 Flags for 'codestrap github' (hyphenated only; envs shown at right):
   -u, --username <val>           → GITHUB_USERNAME
   -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
-  -n, --name <val>               → GITHUB_NAME
-  -e, --email <val>              → GITHUB_EMAIL
+  -n, --name <val>               → GIT_NAME
+  -e, --email <val>              → GIT_EMAIL
   -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
   -p, --pull <true|false>        → GITHUB_PULL    (default: true)
   -a, --auto                     Use environment variables only (no prompts)
@@ -1016,7 +1016,7 @@ clone_one(){
 
 codestrap_run(){
   GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-  GITHUB_NAME="${GITHUB_NAME:-${GITHUB_USERNAME:-}}"; GITHUB_EMAIL="${GITHUB_EMAIL:-}"
+  GIT_NAME="${GIT_NAME:-${GITHUB_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
   GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
 
   if ! validate_github_username; then
@@ -1032,12 +1032,12 @@ codestrap_run(){
   git config --global pull.ff only || true
   git config --global advice.detachedHead false || true
   git config --global --add safe.directory "*"
-  git config --global user.name "${GITHUB_NAME:-codestrap}" || true
-  if [ -z "${GITHUB_EMAIL:-}" ]; then GITHUB_EMAIL="$(resolve_email || true)"; fi
-  git config --global user.email "$GITHUB_EMAIL" || true
-  log "identity: ${GITHUB_NAME:-} <${GITHUB_EMAIL:-}>"
+  git config --global user.name "${GIT_NAME:-codestrap}" || true
+  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
+  git config --global user.email "$GIT_EMAIL" || true
+  log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
   umask 077
-  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GITHUB_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
+  [ -f "$PRIVATE_KEY_PATH" ] || { log "Generating SSH key"; ssh-keygen -t ed25519 -f "$PRIVATE_KEY_PATH" -N "" -C "${GIT_EMAIL:-git@github.com}"; chmod 600 "$PRIVATE_KEY_PATH"; chmod 644 "$PUBLIC_KEY_PATH"; }
   touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
   if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
   git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
@@ -2559,13 +2559,13 @@ bootstrap_banner(){ if has_tty; then printf "[codestrap] Interactive bootstrap �
 bootstrap_interactive(){
   GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
   GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
-  GITHUB_NAME="$(read_or_env "GitHub name [${GITHUB_NAME:-${GITHUB_USERNAME:-}}]" GITHUB_NAME "${GITHUB_NAME:-${GITHUB_USERNAME:-}}")"
-  GITHUB_EMAIL="$(read_or_env "GitHub email (blank=auto)" GITHUB_EMAIL "")"
+  GIT_NAME="$(read_or_env "Git name (blank=use GitHub account username) [${GIT_NAME:-${GITHUB_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GITHUB_USERNAME:-}}")"
+  GIT_EMAIL="$(read_or_env "Git email (blank=use GitHub account email)" GIT_EMAIL "")"
   GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
   GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
   [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required." >&2; exit 2; }
   [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required." >&2; exit 2; }
-  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run; log "bootstrap complete"
 }
 
@@ -2699,7 +2699,7 @@ config_hybrid(){
 bootstrap_from_args(){ # used by: codestrap github [flags...]
   USE_ENV=false
   # Clear any old values (so flags fully control when provided)
-  unset GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL
+  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)     print_help; exit 0;;
@@ -2707,8 +2707,8 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
       -a|--auto)     USE_ENV=true;;
       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
-      -n|--name)     shift || true; GITHUB_NAME="${1:-}";;
-      -e|--email)    shift || true; GITHUB_EMAIL="${1:-}";;
+      -n|--name)     shift || true; GIT_NAME="${1:-}";;
+      -e|--email)    shift || true; GIT_EMAIL="${1:-}";;
       -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
       -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
       --*)           err "Unknown flag '$1'"; print_help; exit 1;;
@@ -2743,7 +2743,7 @@ bootstrap_from_args(){ # used by: codestrap github [flags...]
   [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (flag/env/prompt)." >&2; exit 2; }
 
   CTX_TAG="[Bootstrap GitHub]"
-  export GITHUB_USERNAME GITHUB_TOKEN GITHUB_NAME GITHUB_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
   codestrap_run
   log "bootstrap complete"
   CTX_TAG=""
