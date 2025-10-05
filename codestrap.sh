@@ -105,7 +105,6 @@ install_codestrap_extension(){
     find "$_root" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read -r extdir; do
       pkg="$extdir/package.json"
       [ -f "$pkg" ] || continue
-      # fast grep first (avoid jq requirement)
       if grep -q '"activationEvents"' "$pkg" 2>/dev/null; then
         if ! grep -q '"main"' "$pkg" 2>/dev/null && ! grep -q '"browser"' "$pkg" 2>/dev/null; then
           rm -rf "$extdir" 2>/dev/null || true
@@ -122,7 +121,7 @@ install_codestrap_extension(){
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
-    # scrub anything that can poison the host (incl. the webview sample you saw)
+    # scrub anything that can poison the host
     scrub_bad_extensions_root "$_base"
 
     # remove old versions of our extension
@@ -180,11 +179,27 @@ install_codestrap_extension(){
 }
 PKG
 
-    # ---------- icon ----------
+    # ---------- icon (activity bar): your SVG, monochrome/tinted by VS Code ----------
     cat >"${NEW_DIR}/icon.svg" <<'SVG'
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="#9ca3af" role="img" aria-label="Codestrap">
-  <circle cx="12" cy="12" r="9" opacity=".15"/>
-  <path d="M7 12h10M12 7v10" stroke="#9ca3af" stroke-width="2" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+     viewBox="0 0 24 24" fill="none" stroke="currentColor"
+     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true" role="img">
+  <rect x="2.5" y="2.5" width="19" height="19" rx="5" opacity="0.12" fill="currentColor" stroke="none"/>
+  <path d="M16 6 A7 7 0 1 0 16 18" />
+  <path d="M12 8 C 9 8, 9 12, 12 12 C 15 12, 15 16, 12 16" />
+</svg>
+SVG
+
+    # ---------- icon-blue.svg (used inside webview) ----------
+    cat >"${NEW_DIR}/icon-blue.svg" <<'SVG'
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"
+     viewBox="0 0 24 24" fill="none" stroke="#3ea8ff"
+     stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+     aria-hidden="true" role="img">
+  <rect x="2.5" y="2.5" width="19" height="19" rx="5" opacity="0.18" fill="#3ea8ff" stroke="none"/>
+  <path d="M16 6 A7 7 0 1 0 16 18" />
+  <path d="M12 8 C 9 8, 9 12, 12 12 C 15 12, 15 16, 12 16" />
 </svg>
 SVG
 
@@ -209,17 +224,26 @@ function resolveCodestrapString(){
 function buildAndRun(args){
   const runner = resolveCodestrapString();
   if (!runner) { vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).'); return; }
-  // We still send to the integrated terminal for logs when actions run:
   const t = vscode.window.createTerminal({ name: 'Codestrap' });
-  t.sendText(`${runner} ${args.join(' ')}`, true);
+  t.sendText(`${runner} ${args.map(a => a).join(' ')}`, true);
   t.show(true);
 }
-
+function openCLIWithPrefill(){
+  const t = vscode.window.createTerminal({ name: 'Codestrap' });
+  // pre-type "codestrap" but DO NOT press enter
+  // VS Code API: second arg addNewLine=false avoids sending Enter
+  t.sendText('codestrap', false);
+  t.show(true);
+}
 function callRestartGate(){
-  const req = http.request({ hostname:'127.0.0.1', port:9000, path:'/restart', method:'GET', timeout:2000 }, () => {});
-  req.on('error', () => {});
-  req.end();
-  vscode.window.showInformationMessage('Reboot requested.');
+  try {
+    const req = http.request({ hostname:'127.0.0.1', port:9000, path:'/restart', method:'GET', timeout:2000 }, () => {});
+    req.on('error', () => {});
+    req.end();
+  } catch (_) {}
+}
+function openDocs(){
+  vscode.env.openExternal(vscode.Uri.parse('https://REPLACEME.com'));
 }
 
 const INITIALS = {
@@ -237,9 +261,7 @@ class ViewProvider {
     this.webview.options = { enableScripts: true };
     const nonce = String(Math.random()).slice(2);
     const src = this.webview.cspSource;
-
-    const initialJSON = JSON.stringify(INITIALS).replace(/</g, '\\u003c');
-
+    const initialJSON = JSON.stringify(INITIALS).replace(/</g,'\\u003c');
     this.webview.html = this.html(nonce, src, initialJSON);
     this.webview.onDidReceiveMessage((msg) => {
       switch (msg.type) {
@@ -258,14 +280,14 @@ class ViewProvider {
           if ('keybindings' in msg)args.push('-k', tf(!!msg.keybindings));
           if ('tasks' in msg)      args.push('-t', tf(!!msg.tasks));
           if ('extensions' in msg) args.push('-e', tf(!!msg.extensions));
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          buildAndRun(args);
           break;
         }
         case 'ext:apply': {
           const args=['extensions'];
           if (msg.uninstall==='all' || msg.uninstall==='missing') args.push('-u', msg.uninstall);
           if (msg.install==='all'   || msg.install==='missing')   args.push('-i', msg.install);
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          buildAndRun(args);
           break;
         }
         case 'github:run': {
@@ -280,12 +302,15 @@ class ViewProvider {
             if (msg.repos)    args.push('-r', msg.repos);
             if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          buildAndRun(args.map(a => (a.startsWith?.('-') ? a : shellQ(a))));
           break;
         }
+        case 'openDocs':
+          openDocs(); break;
+        case 'openCLI':
+          openCLIWithPrefill(); break;
         case 'reboot':
-          callRestartGate();
-          break;
+          callRestartGate(); break;
       }
     });
   }
@@ -314,6 +339,7 @@ class ViewProvider {
       --btnText: var(--vscode-button-foreground);
       --border: var(--vscode-panel-border);
       --input: var(--vscode-input-background);
+      --blue: #3ea8ff;
     }
     *, *::before, *::after { box-sizing: border-box; }
     body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
@@ -325,37 +351,54 @@ class ViewProvider {
       border:1px solid var(--border); border-radius:8px;
     }
     .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .toprow{ display:flex; justify-content:flex-end; align-items:center; margin-bottom:8px; }
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer; }
-    .input-with-eye{ position:relative; }
-    .eye-btn{
-      position:absolute; top:50%; right:8px; transform:translateY(-50%);
-      background:transparent; border:0; cursor:pointer; font-size:14px; line-height:1; padding:2px 4px; color:var(--muted);
+    .topbar{
+      display:flex; justify-content:center; gap:10px; align-items:center; margin-bottom:12px;
     }
-    .pad-right-eye{ padding-right:30px; }
+    .topbar button{ flex:0 1 120px; }
+    button{
+      border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer;
+    }
+    button[disabled]{ opacity:.7; cursor:default; }
     .small{ font-size:11px; color:var(--muted); }
+
+    /* password visibility toggle wrapper */
+    .pw-wrap{ position:relative; }
+    .pw-wrap input{ padding-right:36px; }
+    .eye{
+      position:absolute; right:8px; top:50%; transform:translateY(-50%);
+      border:1px solid var(--border); background:transparent; color:var(--muted);
+      width:26px; height:26px; border-radius:6px; display:flex; align-items:center; justify-content:center;
+    }
+    .brand{
+      display:flex; align-items:center; gap:8px; justify-content:center; margin-bottom:8px; color: var(--blue);
+    }
+    .brand img{ width:18px; height:18px; }
   </style>
 </head>
 <body>
-  <div class="toprow">
-    <button id="reboot">Reboot</button>
+  <div class="brand">
+    <img src="icon-blue.svg" alt="Codestrap"/>
+    <div style="font-weight:600;">Codestrap</div>
+  </div>
+
+  <div class="topbar">
+    <button id="btn-docs" title="Open Docs">Docs</button>
+    <button id="btn-cli"  title="Open CLI with 'codestrap' typed">CLI</button>
+    <button id="btn-reboot" title="Restart service">Reboot</button>
   </div>
 
   <div class="section" id="sec-passwd">
     <h3>Change password (codestrap <code>passwd</code>)</h3>
-
     <label>New password</label>
-    <div class="input-with-eye">
-      <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
-      <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide">👁</button>
+    <div class="pw-wrap">
+      <input id="pw" type="password" placeholder="at least 8 characters" />
+      <button class="eye" data-for="pw" aria-label="toggle password visibility">👁</button>
     </div>
-
     <label style="margin-top:6px;">Confirm password</label>
-    <div class="input-with-eye">
-      <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
-      <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide">👁</button>
+    <div class="pw-wrap">
+      <input id="pw2" type="password" placeholder="re-enter password" />
+      <button class="eye" data-for="pw2" aria-label="toggle password visibility">👁</button>
     </div>
-
     <div class="row" style="margin-top:8px;">
       <button id="pw-run">Change</button>
     </div>
@@ -399,9 +442,9 @@ class ViewProvider {
       <label>Username</label>
       <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
       <label>Token (classic)</label>
-      <div class="input-with-eye">
-        <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
-        <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide">👁</button>
+      <div class="pw-wrap">
+        <input id="gh-token" type="password" placeholder="GITHUB_TOKEN" />
+        <button class="eye" data-for="gh-token" aria-label="toggle token visibility">👁</button>
       </div>
       <label>Name (blank=use GitHub username)</label>
       <input id="git-name" type="text" placeholder="GIT_NAME" />
@@ -418,41 +461,75 @@ class ViewProvider {
 
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
-const INITIAL = ${initialJSON};
-
-// helpers
 const $ = (id) => document.getElementById(id);
-const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'password') ? 'text' : 'password'; };
+const INITIALS = JSON.parse(${JSON.stringify(''+ '${initialJSON}').replace(/\\/g,'\\\\').replace(/'/g,"\\'")});
 
-// top button
-$("reboot").onclick = () => vscode.postMessage({ type:"reboot" });
-
-// password toggles
-$("pw-eye").onclick  = () => togglePw("pw");
-$("pw2-eye").onclick = () => togglePw("pw2");
-$("gh-token-eye").onclick = () => togglePw("gh-token");
-
-// prefill GitHub fields from env if provided
-(function prefill(){
-  if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL.GITHUB_USERNAME;
-  if (INITIAL.GITHUB_TOKEN)    $("gh-token").value = INITIAL.GITHUB_TOKEN;
-  if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL.GIT_NAME;
-  if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL.GIT_EMAIL;
-  if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL.GITHUB_REPOS;
-
-  // Only touch the checkbox if env provided; otherwise keep default checked
-  if (INITIAL.GITHUB_PULL) {
-    const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
-    $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
+function setIf(el, val){ if (typeof val === 'string' && val.length) el.value = val; }
+function setBoolIf(el, val){
+  if (typeof val === 'string' && val.length){
+    const v = val.trim().toLowerCase();
+    if (['true','t','1','y','yes'].includes(v)) el.checked = true;
+    if (['false','f','0','n','no'].includes(v)) el.checked = false;
   }
-})();
+}
 
-// actions
+// Top buttons
+$("btn-docs").onclick = () => vscode.postMessage({ type:"openDocs" });
+$("btn-cli").onclick  = () => vscode.postMessage({ type:"openCLI" });
+$("btn-reboot").onclick = () => {
+  const btn = $("btn-reboot");
+  if (btn.dataset.animating === "1") return;
+  btn.dataset.animating = "1";
+  btn.disabled = true;
+
+  let dots = 0;
+  const base = "Rebooting";
+  btn.textContent = base + ".";
+  const iv = setInterval(()=>{
+    dots = (dots % 3) + 1;
+    btn.textContent = base + ".".repeat(dots);
+  }, 450);
+
+  vscode.postMessage({ type:"reboot" });
+
+  // keep animating for a while, then restore
+  setTimeout(()=>{
+    clearInterval(iv);
+    btn.textContent = "Reboot";
+    btn.disabled = false;
+    btn.dataset.animating = "0";
+  }, 12000);
+};
+
+// Password visibility toggles (both code-server pw fields and GitHub token)
+for (const eye of document.querySelectorAll(".eye")){
+  eye.addEventListener("click", (e)=>{
+    const id = eye.getAttribute("data-for");
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.type = (input.type === "password") ? "text" : "password";
+  });
+}
+
+// Prefill GitHub fields from envs (when present)
+setIf($("gh-user"),  INITIALS.GITHUB_USERNAME || "");
+setIf($("gh-token"), INITIALS.GITHUB_TOKEN    || "");
+setIf($("git-name"), INITIALS.GIT_NAME        || "");
+setIf($("git-email"),INITIALS.GIT_EMAIL       || "");
+setIf($("gh-repos"), INITIALS.GITHUB_REPOS    || "");
+setBoolIf($("gh-pull"), INITIALS.GITHUB_PULL || "");
+
+// Auto toggle (hide/show manual fields)
+$("gh-auto").onchange = () => {
+  $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";
+};
+
+// Actions
 $("pw-run").onclick = () => {
   const a = $("pw").value || "";
   const b = $("pw2").value || "";
-  if (a.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
-  if (a !== b)      { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+  if (a.length < 8) { vscode.window.showErrorMessage?.('Password must be at least 8 characters.'); return; }
+  if (a !== b)      { vscode.window.showErrorMessage?.('Passwords do not match.'); return; }
   vscode.postMessage({ type:"passwd:set", password: a, confirm: b });
 };
 
@@ -474,9 +551,6 @@ $("ext-run").onclick = () => {
   });
 };
 
-$("gh-auto").onchange = () => {
-  $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";
-};
 $("gh-run").onclick = () => {
   const auto = $("gh-auto").checked;
   vscode.postMessage({
@@ -520,8 +594,6 @@ JS
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
-
-
 }
 
 write_codestrap_login() {
