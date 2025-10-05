@@ -380,18 +380,76 @@ class ViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Codestrap</title>
   <style>
-    :root{ --bg: var(--vscode-sideBar-background); --fg: var(--vscode-foreground); --muted: var(--vscode-descriptionForeground);
-           --btn: var(--vscode-button-background); --btnText: var(--vscode-button-foreground); --border: var(--vscode-panel-border);
-           --input: var(--vscode-input-background); }
-    body{ margin:0; padding:12px; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg);}
-    h3{ margin:12px 0 8px; font-size:13px;}
-    .section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px;}
-    label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted);}
-    input[type="text"],input[type="password"],select{ width:100%; padding:6px 8px; background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:8px;}
-    .row{ display:flex; gap:8px; align-items:center;}
-    .toprow{ display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;}
-    button{ border:0; border-radius:8px; background:var(--btn); color:var(--btnText); padding:6px 10px; cursor:pointer;}
-    .small{ font-size:11px; color:var(--muted);}
+    :root{
+      --bg: var(--vscode-sideBar-background);
+      --fg: var(--vscode-foreground);
+      --muted: var(--vscode-descriptionForeground);
+      --btn: var(--vscode-button-background);
+      --btnText: var(--vscode-button-foreground);
+      --border: var(--vscode-panel-border);
+      --input: var(--vscode-input-background);
+    }
+
+    /* ensure padding/border are included in width calc (prevents right overflow) */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    body{
+      margin:0; padding:12px;
+      font-family: var(--vscode-font-family);
+      color: var(--fg);
+      background: var(--bg);
+    }
+
+    h3{ margin:12px 0 8px; font-size:13px; }
+
+    .section{
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:12px;
+      margin-bottom:10px;
+    }
+
+    label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
+
+    /* FIX: keep form controls inside the card border */
+    input[type="text"],
+    input[type="password"],
+    select{
+      width:100%;
+      max-width:100%;
+      display:block;
+      padding:8px 10px;
+      background:var(--input);
+      color:var(--fg);
+      border:1px solid var(--border);
+      border-radius:8px;
+      box-sizing:border-box;
+    }
+
+    .row{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap; /* avoid horizontal overflow in narrow sidebars */
+    }
+
+    .toprow{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      margin-bottom:8px;
+    }
+
+    button{
+      border:0;
+      border-radius:8px;
+      background:var(--btn);
+      color:var(--btnText);
+      padding:6px 10px;
+      cursor:pointer;
+    }
+
+    .small{ font-size:11px; color:var(--muted); }
   </style>
 </head>
 <body>
