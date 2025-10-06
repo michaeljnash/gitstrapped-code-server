@@ -40,20 +40,41 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
   }
 })();
 
-// actions
+// password actions
+function showPwError(msg){
+  const el = $("pw-error");
+  el.textContent = msg || "";
+  el.style.display = msg ? "block" : "none";
+}
+
 $("pw-run").onclick = () => {
   const a = $("pw").value || "";
   const b = $("pw2").value || "";
+
+  // local validation + inline error
   if (a.length < 8) {
+    showPwError("Password must be at least 8 characters.");
     vscode.postMessage({ type: "host:error", message: "Password must be at least 8 characters." });
     return;
   }
   if (a !== b) {
+    showPwError("Passwords do not match.");
     vscode.postMessage({ type: "host:error", message: "Passwords do not match." });
     return;
   }
+
+  // clear error & let the host do final validation + action
+  showPwError("");
   vscode.postMessage({ type:"passwd:set", password: a, confirm: b });
 };
+
+// Optional: live-clear the inline error while typing
+["pw","pw2"].forEach(id => {
+  const el = $(id);
+  el && el.addEventListener("input", () => showPwError(""));
+});
+
+// config actions
 
 $("cfg-run").onclick = () => {
   vscode.postMessage({
@@ -65,6 +86,8 @@ $("cfg-run").onclick = () => {
   });
 };
 
+//extension actions
+
 $("ext-run").onclick = () => {
   vscode.postMessage({
     type:"ext:apply",
@@ -72,6 +95,8 @@ $("ext-run").onclick = () => {
     install: $("ext-in").value || ""
   });
 };
+
+//gh actions
 
 $("gh-auto").onchange = () => {
   $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";

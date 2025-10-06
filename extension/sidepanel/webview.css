@@ -58,3 +58,5 @@ button{
 
 .small{ font-size:11px; color: var(--muted); }
 .center-row{ justify-content:center; }
+
+.error{ color:#ef4444; font-size:12px; margin-top:8px; }
