@@ -149,6 +149,10 @@ class ViewProvider {
             if (msg.repos)    args.push('-r', msg.repos);
             if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
+        case 'host:error': {
+            if (msg && msg.message) vscode.window.showErrorMessage(String(msg.message));
+            break;
+        }
           buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
