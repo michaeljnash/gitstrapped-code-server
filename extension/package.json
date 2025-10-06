@@ -3,7 +3,6 @@
   "displayName": "Codestrap",
   "publisher": "codestrap",
   "version": "0.5.4",
-  "source": "https://github.com/michaeljnash/gitstrapped-code-server/tree/main/extension",
   "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel.",
   "icon": "icon-blue.svg",
   "engines": { "vscode": "^1.70.0" },

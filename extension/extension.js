@@ -226,7 +226,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-passwd">
-      <h3>Change password (<code>\`codestrap passwd\`</code>)</h3>
+      <h3>Change password</h3>
 
       <label>New password</label>
       <div class="input-with-eye">
@@ -250,7 +250,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-config">
-      <h3>Bootstrap config ( <code>codestrap config</code> )</h3>
+      <h3>Bootstrap config</h3>
       <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
       <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
       <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
@@ -262,7 +262,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-ext">
-      <h3>Manage extensions (codestrap <code>extensions</code>)</h3>
+      <h3>Manage extensions</h3>
       <label>Uninstall scope</label>
       <select id="ext-un">
         <option value="">(none)</option>
@@ -281,7 +281,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-github">
-      <h3>Bootstrap GitHub (codestrap <code>github</code>)</h3>
+      <h3>Bootstrap GitHub</h3>
       <div class="row"><label><input type="checkbox" id="gh-auto" /> Use <code>--auto</code> (env vars)</label></div>
       <div id="gh-fields">
         <label>Username</label>
