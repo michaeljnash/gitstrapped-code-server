@@ -134,6 +134,8 @@ install_codestrap_extension(){
     [ -n "$_base" ] || return 0
     mkdir -p "$_base" || true
 
+    extensions_cleanup "$_base"
+
     # remove old versions of our extension (keep only NEW_FOLDER)
     for old in "$_base"/${NEW_ID}-*; do
       [ -e "$old" ] || continue
