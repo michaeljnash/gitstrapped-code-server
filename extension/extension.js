@@ -226,7 +226,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-passwd">
-      <h3>Change passwordddd (codestrap <code>passwd</code>)</h3>
+      <h3>Change password (<code>\`codestrap passwd\`</code>)</h3>
 
       <label>New password</label>
       <div class="input-with-eye">
@@ -250,7 +250,7 @@ class ViewProvider {
     </div>
 
     <div class="section" id="sec-config">
-      <h3>Bootstrap config (codestrap <code>config</code>)</h3>
+      <h3>Bootstrap config (\`<code>codestrap config</code>\`)</h3>
       <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
       <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
       <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
