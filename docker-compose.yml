@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=123456dfderd 7 dde44rtydfede dsre8ederd4frerdd6ededrdfgfefdg5rertddgregeftyteFrd4eeyd3eee3er4egee3edddeeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=123456dfderd 7 dde44rtyydfede dsre8ederd4frerdd6ededrdfgfefdg5rertddgregeftyteFrd4eeyd3eee3er4egee3edddeeedddd7eedfeddd4dsddder37re89544"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
@@ -48,7 +48,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=123456ered4e5rced d ydded4g7deddgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=123456ered4e5rced d ydded4g7dedydgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
