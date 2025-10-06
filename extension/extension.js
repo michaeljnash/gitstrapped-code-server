@@ -152,10 +152,10 @@ class ViewProvider {
           buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
           break;
         }
-        case 'host:error': {
-            if (msg && msg.message) vscode.window.showErrorMessage(String(msg.message));
-            break;
-        }
+        //case 'host:error': {
+        //    if (msg && msg.message) vscode.window.showErrorMessage(String(msg.message));
+        //    break;
+        //}
         case 'reboot': callRestartGate(); break;
       }
     });
