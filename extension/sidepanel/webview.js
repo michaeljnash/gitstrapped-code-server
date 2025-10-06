@@ -44,8 +44,8 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
 $("pw-run").onclick = () => {
   const a = $("pw").value || "";
   const b = $("pw2").value || "";
-  if (a.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
-  if (a !== b)      { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+  if (a.length < 8) { alert('Password must be at least 8 characters.'); return; }
+  if (a !== b)      { alert('Passwords do not match.'); return; }
   vscode.postMessage({ type:"passwd:set", password: a, confirm: b });
 };
 
