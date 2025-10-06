@@ -1,6 +1,7 @@
 /* global acquireVsCodeApi */
 const vscode = acquireVsCodeApi();
-const INITIAL = __INITIAL__;
+const meta = document.getElementById('codestrap-initial');
+const INITIAL = meta ? JSON.parse(meta.dataset.json || '{}') : {};
 
 // helpers
 const $ = (id) => document.getElementById(id);

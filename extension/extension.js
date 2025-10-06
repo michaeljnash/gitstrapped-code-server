@@ -89,9 +89,14 @@ function loadWebviewHtml(webview, context, initialJSON){
   raw = raw
     .replace(/__CSP__/, csp)
     .replace(/__NONCE__/g, nonce)
-    .replace(/__INITIAL__/g, safeInitial)
     .replace(/__JS_URI__/g, jsUri.toString())
     .replace(/__CSS_URI__/g, cssUri.toString());
+
+  // inject the INITIAL payload as a meta tag right after <head>
+  raw = raw.replace(
+    '<head>',
+    `<head>\n  <meta id="codestrap-initial" data-json='${safeInitial}' />`
+  );
 
   return raw;
 }
