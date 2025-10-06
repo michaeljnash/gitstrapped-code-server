@@ -24,7 +24,7 @@ input[type="text"], input[type="password"], select{
 
 .toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }
 .toprow button{ min-width:70px; }
-@media (max-width: 240px){
+@media (max-width: 250px){
   .toprow{ flex-direction: column; }
   .toprow button{ width:80%; }
 }
