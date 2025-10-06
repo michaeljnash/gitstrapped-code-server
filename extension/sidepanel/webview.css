@@ -1,0 +1,60 @@
+:root{
+  --bg: var(--vscode-sideBar-background);
+  --fg: var(--vscode-foreground);
+  --muted: var(--vscode-descriptionForeground);
+  --btn: var(--vscode-button-background);
+  --btnText: var(--vscode-button-foreground);
+  --border: var(--vscode-panel-border);
+  --input: var(--vscode-input-background);
+  --eyeGrey: #8a8a8a;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg); }
+#app{ height:100vh; overflow:auto; padding:12px; }
+
+h3{ margin:12px 0 8px; font-size:13px; }
+.section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
+label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
+input[type="text"], input[type="password"], select{
+  width:100%; max-width:100%; display:block; padding:8px 10px; background:var(--input); color:var(--fg);
+  border:1px solid var(--border); border-radius:8px;
+}
+.row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+.toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }
+.toprow button{ min-width:120px; }
+@media (max-width: 400px){
+  .toprow{ flex-direction: column; }
+  .toprow button{ width:100%; }
+}
+
+button{
+  border:0; border-radius:8px; background:var(--btn); color: var(--btnText);
+  padding:6px 12px; cursor:pointer; position:relative;
+}
+
+@keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+.loading{ color: transparent !important; }
+.loading::before{
+  content:"";
+  position:absolute; left:50%; top:50%;
+  margin-left:-8px; margin-top:-8px;
+  width:16px; height:16px; border-radius:50%;
+  border:2px solid rgba(255,255,255,0.25);
+  border-top-color: rgba(255,255,255,0.95);
+  animation: spin 0.8s linear infinite;
+}
+
+.input-with-eye{ position:relative; }
+.eye-btn{
+  position:absolute; top:50%; right:8px; transform:translateY(-50%);
+  display:inline-flex; align-items:center; justify-content:center;
+  width:22px; height:22px; background:transparent; border:0; cursor:pointer; padding:0; margin:0;
+  color: var(--eyeGrey) !important; -webkit-text-fill-color: var(--eyeGrey); outline: none;
+}
+.eye-btn svg { width:16px; height:16px; stroke: currentColor; fill: none; }
+.pad-right-eye{ padding-right:44px; }
+
+.small{ font-size:11px; color: var(--muted); }
+.center-row{ justify-content:center; }

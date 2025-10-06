@@ -1,0 +1,101 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="__CSP__" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codestrap</title>
+  <link rel="stylesheet" href="__CSS_URI__" />
+</head>
+<body>
+  <div id="app">
+    <div class="toprow">
+      <button id="btn-docs">Docs</button>
+      <button id="btn-cli">CLI</button>
+      <button id="reboot">Reboot</button>
+    </div>
+
+    <div class="section" id="sec-passwd">
+      <h3>Change passwordddddddddddd</h3>
+      <label>New password</label>
+      <div class="input-with-eye">
+        <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
+        <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide" aria-label="Show/Hide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+
+      <label style="margin-top:6px;">Confirm password</label>
+      <div class="input-with-eye">
+        <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
+        <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
+
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="pw-run">Change</button>
+      </div>
+    </div>
+
+    <div class="section" id="sec-config">
+      <h3>Bootstrap config</h3>
+      <div class="row"><label><input type="checkbox" id="cfg-settings" checked /> Merge <code>settings.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-keyb" checked /> Merge <code>keybindings.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-tasks" checked /> Merge <code>tasks.json</code></label></div>
+      <div class="row"><label><input type="checkbox" id="cfg-ext" checked /> Merge <code>extensions.json</code></label></div>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="cfg-run">Merge</button>
+        <span class="small">Merge codestrap config files into user config files</span>
+      </div>
+    </div>
+
+    <div class="section" id="sec-ext">
+      <h3>Manage extensions</h3>
+      <label>Uninstall scope</label>
+      <select id="ext-un">
+        <option value="">(none)</option>
+        <option value="missing">missing (cleanup)</option>
+        <option value="all">all (remove everything)</option>
+      </select>
+      <label style="margin-top:6px;">Install scope</label>
+      <select id="ext-in">
+        <option value="">(none)</option>
+        <option value="missing">missing</option>
+        <option value="all">all (update to latest)</option>
+      </select>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="ext-run">Apply</button>
+      </div>
+    </div>
+
+    <div class="section" id="sec-github">
+      <h3>Bootstrap GitHub</h3>
+      <div class="row"><label><input type="checkbox" id="gh-auto" /> Use <code>--auto</code> (env vars)</label></div>
+      <div id="gh-fields">
+        <label>Username</label>
+        <input id="gh-user" type="text" placeholder="GITHUB_USERNAME" />
+        <label>Token (classic)</label>
+        <div class="input-with-eye">
+          <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
+          <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <label>Name (blank=use GitHub username)</label>
+        <input id="git-name" type="text" placeholder="GIT_NAME" />
+        <label>Email (blank=use GitHub account email)</label>
+        <input id="git-email" type="text" placeholder="GIT_EMAIL" />
+        <label>Repos (comma-separated owner/repo or owner/repo#branch or URLs)</label>
+        <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
+        <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
+      </div>
+      <div class="row center-row" style="margin-top:8px;">
+        <button id="gh-run">Run</button>
+      </div>
+    </div>
+  </div>
+
+  <script nonce="__NONCE__" src="__JS_URI__"></script>
+</body>
+</html>

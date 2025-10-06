@@ -2,9 +2,9 @@
   "name": "codestrap",
   "displayName": "Codestrap",
   "publisher": "codestrap",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel.",
-  "icon": "icon-blue.svg",
+  "icon": "icon.svg",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
   "activationEvents": [
@@ -16,7 +16,7 @@
   "contributes": {
     "viewsContainers": {
       "activitybar": [
-        { "id": "codestrap", "title": "Codestrap", "icon": "icon.svg" }
+        { "id": "codestrap", "title": "Codestrap", "icon": "sidepanel/icon.svg" }
       ]
     },
     "views": {

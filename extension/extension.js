@@ -24,13 +24,12 @@ function buildAndRun(args){
   t.show(true);
 }
 
-// Open/reuse a "Codestrap" terminal and ensure "codestrap" is freshly typed at the prompt
 function openCLI(){
   let term = vscode.window.terminals.find(t => t.name === 'Codestrap');
   if (!term) term = vscode.window.createTerminal({ name: 'Codestrap' });
   term.show(true);
-  term.sendText('\u0015', false);      // Ctrl+U to clear current line
-  term.sendText('codestrap', false);   // type but do not execute
+  term.sendText('\u0015', false);
+  term.sendText('codestrap', false);
   cliTerminal = term;
 }
 
@@ -63,46 +62,45 @@ function registerTerminalWatcher(context){
   );
 }
 
-// --- webview html loader ---
-function getNonce(){
-  return Math.random().toString(36).slice(2);
-}
+function getNonce(){ return Math.random().toString(36).slice(2); }
+
 function buildCSP(cspSource, nonce){
   return [
     "default-src 'none'",
     `img-src ${cspSource} https: data:`,
     `font-src ${cspSource} data:`,
     `style-src ${cspSource} 'unsafe-inline'`,
-    `script-src 'nonce-${nonce}'`
+    // allow external script from the webview origin AND inline by nonce
+    `script-src ${cspSource} 'nonce-${nonce}'`
   ].join('; ');
 }
+
 function loadWebviewHtml(webview, context, initialJSON){
-  const htmlUri = vscode.Uri.joinPath(context.extensionUri, 'webview.html');
+  const htmlUri = vscode.Uri.joinPath(context.extensionUri, 'sidepanel', 'webview.html');
+  const jsUri   = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'sidepanel', 'webview.js'));
+  const cssUri  = webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, 'sidepanel', 'webview.css'));
+
   let raw = fs.readFileSync(htmlUri.fsPath, 'utf8');
 
   const nonce = getNonce();
-  const csp = buildCSP(webview.cspSource, nonce);
-
-  // guard against </script> breaks, etc.
+  const csp   = buildCSP(webview.cspSource, nonce);
   const safeInitial = JSON.stringify(initialJSON).replace(/</g, '\\u003c');
 
-  // replace placeholders
   raw = raw
     .replace(/__CSP__/, csp)
     .replace(/__NONCE__/g, nonce)
-    .replace(/__INITIAL__/g, safeInitial);
+    .replace(/__INITIAL__/g, safeInitial)
+    .replace(/__JS_URI__/g, jsUri.toString())
+    .replace(/__CSS_URI__/g, cssUri.toString());
 
   return raw;
 }
 
 class ViewProvider {
-  constructor(context){
-    this.context = context;
-  }
+  constructor(context){ this.context = context; }
   resolveWebviewView(webviewView){
     this.webview = webviewView.webview;
     this.webview.options = { enableScripts: true };
-
     this.webview.html = loadWebviewHtml(this.webview, this.context, INITIALS);
 
     this.webview.onDidReceiveMessage((msg) => {
@@ -164,10 +162,8 @@ function activate(context){
     vscode.commands.executeCommand('workbench.view.extension.codestrap')
   ));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
-
   registerTerminalWatcher(context);
 }
-
 function deactivate(){}
 
 module.exports = { activate, deactivate };
