@@ -1,0 +1,38 @@
+{
+  "name": "codestrap",
+  "displayName": "Codestrap",
+  "publisher": "codestrap",
+  "version": "0.5.2",
+  "description": "GUI for the Codestrap CLI (passwd, config, extensions, github) in a side panel.",
+  "icon": "icon-blue.svg",
+  "engines": { "vscode": "^1.70.0" },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:codestrap.view",
+    "onCommand:codestrap.open",
+    "onCommand:codestrap.refresh"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "codestrap", "title": "Codestrap", "icon": "icon.svg" }
+      ]
+    },
+    "views": {
+      "codestrap": [
+        { "type": "webview", "id": "codestrap.view", "name": "Codestrap" }
+      ]
+    },
+    "commands": [
+      { "command": "codestrap.open", "title": "Codestrap: Open Sidebar" },
+      { "command": "codestrap.refresh", "title": "Codestrap: Refresh Panel" }
+    ],
+    "viewsWelcome": [
+      {
+        "view": "codestrap.view",
+        "contents": "Run any Codestrap command from the sections below.\n"
+      }
+    ]
+  }
+}

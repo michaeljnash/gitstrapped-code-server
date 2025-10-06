@@ -37,11 +37,8 @@ services:
     volumes:
       - config:/config
       - workspace:/config/workspace
-      - ./settings.json:/config/codestrap/settings.json:ro
-      - ./keybindings.json:/config/codestrap/keybindings.json:ro
-      - ./extensions.json:/config/codestrap/extensions.json:ro
-      - ./tasks.json:/config/codestrap/tasks.json:ro
-      - ./codestrap.sh:/custom-cont-init.d/10-codestrap.sh:ro
+      - ./config:/config/codestrap/config:ro
+      - ./extension:/config/codestrap/extension:ro
     expose:
       - "8443"
     ports:
