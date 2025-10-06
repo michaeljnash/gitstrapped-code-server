@@ -23,8 +23,8 @@ input[type="text"], input[type="password"], select{
 .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
 .toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }
-.toprow button{ min-width:50px; }
-@media (max-width: 200px){
+.toprow button{ min-width:75px; }
+@media (max-width: 250px){
   .toprow{ flex-direction: column; }
   .toprow button{ width:80%; }
 }
