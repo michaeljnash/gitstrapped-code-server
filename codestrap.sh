@@ -378,10 +378,10 @@ LOCK_FILE="$LOCK_DIR/init-codestrap.lock"
 PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
-# SUDO password (crypt(3) style hash like $6$salt$hash)
-SUDO_USER="${SUDO_USER:-abc}"
-SUDO_HASH_PATH="${FILE__SUDO_PASSWORD_HASH:-$STATE_DIR/sudo_password.hash}"
-ALLOW_SUDO_PASSWORD_CHANGE="$(normalize_bool "${ALLOW_SUDO_PASSWORD_CHANGE:-true}")"
+# ===== sudo password + policies =====
+SUDO_PASS_HASH_PATH="${FILE__SUDO_PASSWORD_HASH:-$STATE_DIR/sudo_password.hash}"
+POLICY_YAML="/config/.codestrap/policies.yml"
+SUDO_USER="${SUDO_USER:-abc}"    # linuxserver/code-server runs as 'abc' by default
 
 # Workspace + repos path joining (REPOS_SUBDIR always relative)
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
@@ -469,6 +469,116 @@ merge_preserve_files_union(){
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
+
+# ==== sudo password change policy, bool helper, password hash fn, policy enforcement, init default pass fn, cli change fn's ====
+bool_from_token(){ case "$(printf '%s' "$1" | tr '[:space:][:upper:]' '[:space:][:lower:]' | tr -d '\r\n')" in t|true|1|y|yes) echo 1;; f|false|0|n|no|"") echo 0;; *) echo 0;; esac; }
+
+policy_allow_sudo_change(){
+  # default deny if file missing/unreadable
+  [ -r "$POLICY_YAML" ] || { echo 0; return; }
+  # naive YAML line parser: key: value (first match wins)
+  v="$(awk -F: '/^[[:space:]]*allow-sudo-password-change[[:space:]]*:/ {sub(/^[^:]*:/,"",$0); gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0); print; exit}' "$POLICY_YAML" 2>/dev/null)"
+  bool_from_token "$v"
+}
+
+sudo_hash_pw(){
+  # usage: sudo_hash_pw "<plain>" -> prints $6$<salt>$<hash>
+  _pw="$1"
+  _salt="$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9./' | cut -c1-16)"
+  openssl passwd -6 -salt "$_salt" "$_pw"
+}
+
+enforce_policy_permissions(){
+  allow="$(policy_allow_sudo_change)"
+
+  # sudo hash file perms
+  if [ -s "$SUDO_PASS_HASH_PATH" ] || [ -d "$(dirname "$SUDO_PASS_HASH_PATH")" ]; then
+    if [ "$allow" = "1" ]; then
+      # editable by code-server user
+      chown "${PUID:-1000}:${PGID:-1000}" "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+      chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+    else
+      # locked to root
+      chown root:root "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+      chmod 600 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+    fi
+  fi
+
+  # login hash file perms (FILE__HASHED_PASSWORD)
+  if [ -s "$PASS_HASH_PATH" ] || [ -d "$(dirname "$PASS_HASH_PATH")" ]; then
+    if [ "$allow" = "1" ]; then
+      chown "${PUID:-1000}:${PGID:-1000}" "$PASS_HASH_PATH" 2>/dev/null || true
+      chmod 640 "$PASS_HASH_PATH" 2>/dev/null || true
+    else
+      chown root:root "$PASS_HASH_PATH" 2>/dev/null || true
+      chmod 600 "$PASS_HASH_PATH" 2>/dev/null || true
+    fi
+  fi
+}
+
+init_default_sudo_password_if_env(){
+  DEFAULT_SUDO_PASSWORD="${DEFAULT_SUDO_PASSWORD:-}"
+  [ -n "$DEFAULT_SUDO_PASSWORD" ] || { log "DEFAULT_SUDO_PASSWORD not set; skipping sudo default"; return 0; }
+  [ -s "$SUDO_PASS_HASH_PATH" ] && { log "sudo hash exists; leaving as-is"; return 0; }
+
+  ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
+  _hash="$(sudo_hash_pw "$DEFAULT_SUDO_PASSWORD")"
+  printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
+  log "wrote default sudo password hash → $SUDO_PASS_HASH_PATH"
+}
+
+sudo_password_change_interactive(){
+  if [ "$(policy_allow_sudo_change)" != "1" ]; then
+    CTX_TAG="[Change sudo password]"
+    err "Changing sudo password is disabled by policy (see $POLICY_YAML → allow-sudo-password-change: false)."
+    CTX_TAG=""
+    return 1
+  fi
+
+  _OLD_PROMPT_TAG="$PROMPT_TAG"; _OLD_CTX_TAG="$CTX_TAG"
+  PROMPT_TAG="[Change sudo password] ? "; CTX_TAG="[Change sudo password]"
+
+  NEW="$(prompt_secret "New sudo password (user: ${SUDO_USER}): ")"
+  CONF="$(prompt_secret "Confirm sudo password: ")"
+
+  [ -n "$NEW" ]  || { err "password required!";  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+
+  ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
+  _hash="$(sudo_hash_pw "$NEW")"
+  printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
+
+  log "sudo password hash written for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
+  trigger_restart_gate
+
+  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
+}
+
+sudo_password_set_noninteractive(){
+  PW="${1:-}"; CONF="${2:-}"
+
+  if [ "$(policy_allow_sudo_change)" != "1" ]; then
+    CTX_TAG="[Change sudo password]"
+    err "Changing sudo password is disabled by policy (see $POLICY_YAML → allow-sudo-password-change: false)."
+    CTX_TAG=""
+    return 1
+  fi
+
+  [ -n "$PW" ]   || { CTX_TAG="[Change sudo password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ -n "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "confirmation required"; CTX_TAG=""; return 1; }
+  [ "$PW" = "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "passwords do not match"; CTX_TAG=""; return 1; }
+  [ ${#PW} -ge 8 ] || { CTX_TAG="[Change sudo password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
+
+  ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
+  _hash="$(sudo_hash_pw "$PW")"
+  printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
+
+  log "sudo password hash updated (non-interactive) for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
+  trigger_restart_gate
+  return 0
+}
 
 # ===== restart gate (root-only) =====
 install_restart_gate(){
@@ -2593,6 +2703,29 @@ cli_entry(){
           ;;
       esac
       ;;
+    sudopasswd)
+      shift || true
+      case "${1:-}" in
+        --set)
+          shift || true
+          PW="${1:-}"; CONF="${2:-}"
+          if [ -z "$PW" ] || [ -z "$CONF" ]; then
+            CTX_TAG="[Change sudo password]"; err "--set requires two args: <password> <confirm>"; CTX_TAG=""; exit 2
+          fi
+          CTX_TAG="[Change sudo password]"
+          sudo_password_set_noninteractive "$PW" "$CONF" || exit 1
+          CTX_TAG=""
+          exit 0
+          ;;
+        *)
+          bootstrap_banner
+          CTX_TAG="[Change sudo password]"
+          sudo_password_change_interactive
+          CTX_TAG=""
+          exit 0
+          ;;
+      esac
+      ;;
     *)
       err "Unknown subcommand: $1"; print_help; exit 1;;
   esac
@@ -2652,6 +2785,8 @@ case "${1:-init}" in
     safe_run "[Codestrap extension]"     install_codestrap_extension
     safe_run "[Codestrap UI]"            write_codestrap_login
     safe_run "[Default password]"        init_default_password_if_env
+    safe_run "[Sudo default password]"   init_default_sudo_password_if_env
+    safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
