@@ -471,13 +471,36 @@ merge_preserve_files_union(){
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
 
 # ==== sudo password change policy, bool helper, password hash fn, policy enforcement, init default pass fn, cli change fn's ====
-bool_from_token(){ case "$(printf '%s' "$1" | tr '[:space:][:upper:]' '[:space:][:lower:]' | tr -d '\r\n')" in t|true|1|y|yes) echo 1;; f|false|0|n|no|"") echo 0;; *) echo 0;; esac; }
+bool_from_token(){
+  # normalize to lowercase, strip whitespace/newlines
+  v="$(printf '%s' "$1" | tr -d ' \t\r\n' | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    t|true|1|y|yes) echo 1 ;;
+    f|false|0|n|no|'') echo 0 ;;
+    *) echo 0 ;;
+  esac
+}
 
 policy_allow_sudo_change(){
   # default deny if file missing/unreadable
   [ -r "$POLICY_YAML" ] || { echo 0; return; }
-  # naive YAML line parser: key: value (first match wins)
-  v="$(awk -F: '/^[[:space:]]*allow-sudo-password-change[[:space:]]*:/ {sub(/^[^:]*:/,"",$0); gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0); print; exit}' "$POLICY_YAML" 2>/dev/null)"
+
+  if command -v yq >/dev/null 2>&1; then
+    # yq: read scalar, could be true/false/"true"/"false"
+    v="$(yq -r '."allow-sudo-password-change" // ""' "$POLICY_YAML" 2>/dev/null || true)"
+  else
+    # Fallback: naive "key: value" line parser
+    v="$(
+      awk -F: '
+        /^[[:space:]]*allow-sudo-password-change[[:space:]]*:/ {
+          # print text after colon, strip leading/trailing spaces
+          sub(/^[^:]*:/,"",$0);
+          gsub(/^[[:space:]]+|[[:space:]]+$/,"",$0);
+          print; exit
+        }' "$POLICY_YAML" 2>/dev/null
+    )"
+  fi
+
   bool_from_token "$v"
 }
 
