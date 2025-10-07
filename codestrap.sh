@@ -383,9 +383,6 @@ SUDO_USER="${SUDO_USER:-abc}"
 SUDO_HASH_PATH="${FILE__SUDO_PASSWORD_HASH:-$STATE_DIR/sudo_password.hash}"
 ALLOW_SUDO_PASSWORD_CHANGE="$(normalize_bool "${ALLOW_SUDO_PASSWORD_CHANGE:-true}")"
 
-POLICY_DIR="/config/codestrap/policy"
-ALLOW_SUDO_FILE="$POLICY_DIR/allow-sudo-change"
-
 # Workspace + repos path joining (REPOS_SUBDIR always relative)
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
 WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
@@ -619,182 +616,6 @@ password_set_noninteractive(){
   log "password updated (non-interactive)"
   trigger_restart_gate
   return 0
-}
-
-
-# ----- SUDO password helpers -----
-ensure_policy_dir(){
-  require_root || { warn "not root; cannot secure policy dir $POLICY_DIR"; return 0; }
-  mkdir -p "$POLICY_DIR" || true
-  chown root:root "$POLICY_DIR" 2>/dev/null || true
-  chmod 0755 "$POLICY_DIR" 2>/dev/null || true
-}
-
-seed_allow_sudo_change_from_env(){
-  val="${ALLOW_SUDO_PASSWORD_CHANGE:-}"
-  [ -z "$val" ] && return 0
-  require_root || { warn "ALLOW_SUDO_PASSWORD_CHANGE provided but not root; skipping seed"; return 0; }
-  ensure_policy_dir
-  case "$(printf "%s" "$val" | tr '[:upper:]' '[:lower:]')" in
-    t|true|y|yes|1) echo "true"  > "$ALLOW_SUDO_FILE" ;;
-    *)              echo "false" > "$ALLOW_SUDO_FILE" ;;
-  esac
-  chown root:root "$ALLOW_SUDO_FILE" 2>/dev/null || true
-  chmod 0644 "$ALLOW_SUDO_FILE" 2>/dev/null || true
-  log "seeded allow-sudo-change policy → $ALLOW_SUDO_FILE ($(cat "$ALLOW_SUDO_FILE" 2>/dev/null))"
-}
-
-read_allow_sudo_change(){
-  if [ -f "$ALLOW_SUDO_FILE" ]; then
-    v="$(head -c 64 "$ALLOW_SUDO_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d ' \t\r\n')"
-    case "$v" in t|true|y|yes|1) echo true ;; *) echo false ;; esac
-  else
-    echo false
-  fi
-}
-
-# Use SHA-512 crypt via openssl to produce: $6$salt$hash
-mk_sudo_hash(){ # $1=plain
-  command -v openssl >/dev/null 2>&1 || { err "openssl not found"; return 1; }
-  salt="$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9./' | cut -c1-16)"
-  openssl passwd -6 -salt "$salt" "$1"
-}
-
-# Write the hash file (only when policy allows). No sudo; just fail if perms don’t allow.
-write_sudo_hash_file(){ # $1=hash
-  tmp="$(mktemp)"; printf '%s\n' "$1" > "$tmp"
-  dest="$SUDO_HASH_PATH"
-  destdir="$(dirname "$dest")"
-  mkdir -p "$destdir" 2>/dev/null || true
-  if install -m 0644 -D "$tmp" "$dest" 2>/dev/null; then
-    rm -f "$tmp"
-    return 0
-  fi
-  rm -f "$tmp"
-  return 1
-}
-
-# Adjust who can edit the hash file based on policy.
-#   true  → make it user-writable (owned by ${PUID}:${PGID}, 0640)
-#   false → make it root-owned and not writable by the user (0640)
-sync_sudo_hash_permissions_from_policy(){
-  require_root || { warn "not root; cannot sync sudo hash perms"; return 0; }
-  ensure_dir "$(dirname "$SUDO_HASH_PATH")"
-  # create the file if missing so perms are consistent
-  [ -f "$SUDO_HASH_PATH" ] || : >"$SUDO_HASH_PATH"
-  if [ "$(read_allow_sudo_change)" = "true" ]; then
-    chown "${PUID:-1000}:${PGID:-1000}" "$SUDO_HASH_PATH" 2>/dev/null || true
-    chmod 0640 "$SUDO_HASH_PATH" 2>/dev/null || true
-    log "sudo hash file writable by user (${PUID:-1000}:${PGID:-1000}) → $SUDO_HASH_PATH"
-  else
-    chown root:root "$SUDO_HASH_PATH" 2>/dev/null || true
-    chmod 0640 "$SUDO_HASH_PATH" 2>/dev/null || true
-    log "sudo hash file protected (root-owned) → $SUDO_HASH_PATH"
-  fi
-}
-
-# Return 0 if we can run root-only actions without prompting:
-_can_sudo_nopass(){
-  command -v sudo >/dev/null 2>&1 || return 1
-  sudo -n true >/dev/null 2>&1
-}
-
-# Try to apply the sudo hash immediately (root or passwordless sudo).
-# Echo nothing; return 0 on success, 1 otherwise.
-apply_sudo_hash_now(){
-  _hash="$1"
-  _user="${SUDO_USER_NAME:-abc}"
-
-  # Root path
-  if [ "$(id -u)" = "0" ]; then
-    echo "${_user}:${_hash}" | chpasswd -e >/dev/null 2>&1 && return 0
-    # Fallback to usermod if chpasswd rejects the format
-    usermod -p "$_hash" "$_user" >/dev/null 2>&1 && return 0
-    return 1
-  fi
-
-  # Passwordless sudo path
-  if _can_sudo_nopass; then
-    echo "${_user}:${_hash}" | sudo chpasswd -e >/dev/null 2>&1 && return 0
-    sudo usermod -p "$_hash" "$_user" >/dev/null 2>&1 && return 0
-  fi
-
-  return 1
-}
-
-# Verify that the provided plaintext works for sudo for the current user.
-# Uses sudo -S -v to validate credentials without running any command.
-# Returns 0 on success, 1 otherwise.
-sudo_auth_check(){
-  _pw="$1"
-  command -v sudo >/dev/null 2>&1 || return 1
-  # Forget cached creds, then validate with the new password
-  sudo -k
-  # -S reads password from stdin; -v validates credential timestamp only
-  printf '%s\n' "$_pw" | sudo -S -v >/dev/null 2>&1 || return 1
-  # Clean up cache again so we don't leave a ticket hanging
-  sudo -k >/dev/null 2>&1 || true
-  return 0
-}
-
-# One-time init from DEFAULT_SUDO_PASSWORD (if file missing/empty)
-init_default_sudo_password_if_env(){
-  DEFAULT_SUDO_PASSWORD="${DEFAULT_SUDO_PASSWORD:-}"
-  [ -n "$DEFAULT_SUDO_PASSWORD" ] || { log "DEFAULT_SUDO_PASSWORD not set; skipping sudo default hash"; return 0; }
-  [ -s "$SUDO_HASH_PATH" ] && { log "sudo hash exists; leaving as-is"; return 0; }
-  hash="$(mk_sudo_hash "$DEFAULT_SUDO_PASSWORD")" || { warn "could not create sudo hash"; return 0; }
-  write_sudo_hash_file "$hash"
-  # Best effort immediate apply during init (usually root)
-  if apply_sudo_hash_now "$hash"; then
-    log "applied sudo password (init)"
-  else
-    log "sudo password hash written; will take effect on restart or when applied later"
-  fi
-}
-
-sudo_password_change_interactive(){
-  [ "$(read_allow_sudo_change)" = "true" ] || { CTX_TAG="[Change sudo password]"; err "sudo password changes are disabled by policy"; CTX_TAG=""; return 1; }
-  command -v openssl >/dev/null 2>&1 || { CTX_TAG="[Change sudo password]"; err "openssl not found."; CTX_TAG=""; return 1; }
-
-  _OLD_PROMPT_TAG="$PROMPT_TAG"; _OLD_CTX_TAG="$CTX_TAG"
-  PROMPT_TAG="[Change sudo password] ? "; CTX_TAG="[Change sudo password]"
-
-  NEW="$(prompt_secret "New sudo password: ")"
-  CONF="$(prompt_secret "Confirm sudo password: ")"
-  [ -n "$NEW" ]  || { err "password required!";  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-
-  hash="$(mk_sudo_hash "$NEW")" || { err "failed to generate sudo hash"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  if write_sudo_hash_file "$hash"; then
-    log "stored sudo password hash → $SUDO_HASH_PATH (will be acted on by your boot logic)"
-    trigger_restart_gate
-  else
-    err "could not write sudo hash file (check policy and file permissions): $SUDO_HASH_PATH"
-  fi
-
-  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
-}
-
-sudo_password_set_noninteractive(){
-  [ "$(read_allow_sudo_change)" = "true" ] || { CTX_TAG="[Change sudo password]"; err "sudo password changes are disabled by policy"; CTX_TAG=""; return 1; }
-  PW="${1:-}"; CONF="${2:-}"
-  command -v openssl >/dev/null 2>&1 || { CTX_TAG="[Change sudo password]"; err "openssl not found."; CTX_TAG=""; return 1; }
-  [ -n "$PW" ]   || { CTX_TAG="[Change sudo password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
-  [ -n "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "confirmation required"; CTX_TAG=""; return 1; }
-  [ "$PW" = "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "passwords do not match"; CTX_TAG=""; return 1; }
-  [ ${#PW} -ge 8 ] || { CTX_TAG="[Change sudo password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
-
-  hash="$(mk_sudo_hash "$PW")" || { CTX_TAG="[Change sudo password]"; err "failed to generate sudo hash"; CTX_TAG=""; return 1; }
-  if write_sudo_hash_file "$hash"; then
-    log "stored sudo password hash (non-interactive) → $SUDO_HASH_PATH (will be acted on by your boot logic)"
-    trigger_restart_gate
-    return 0
-  else
-    CTX_TAG="[Change sudo password]"; err "could not write sudo hash file (check policy and file permissions): $SUDO_HASH_PATH"; CTX_TAG=""
-    return 1
-  fi
 }
 
 # ===== github bootstrap internals =====
@@ -2772,30 +2593,6 @@ cli_entry(){
           ;;
       esac
       ;;
-    sudopasswd)
-      shift || true
-      case "${1:-}" in
-        --set)
-          shift || true
-          PW="${1:-}"
-          CONF="${2:-}"
-          if [ -z "$PW" ] || [ -z "$CONF" ]; then
-            CTX_TAG="[Change sudo password]"; err "--set requires two args: <password> <confirm>"; CTX_TAG=""; exit 2
-          fi
-          CTX_TAG="[Change sudo password]"
-          sudo_password_set_noninteractive "$PW" "$CONF" || exit 1
-          CTX_TAG=""
-          exit 0
-          ;;
-        *)
-          bootstrap_banner
-          CTX_TAG="[Change sudo password]"
-          sudo_password_change_interactive
-          CTX_TAG=""
-          exit 0
-          ;;
-      esac
-      ;;
     *)
       err "Unknown subcommand: $1"; print_help; exit 1;;
   esac
@@ -2855,10 +2652,6 @@ case "${1:-init}" in
     safe_run "[Codestrap extension]"     install_codestrap_extension
     safe_run "[Codestrap UI]"            write_codestrap_login
     safe_run "[Default password]"        init_default_password_if_env
-    safe_run "[Default sudo password]"   init_default_sudo_password_if_env
-    safe_run "[Sudo password policy]"    ensure_policy_dir
-    safe_run "[Sudo password policy]"    seed_allow_sudo_change_from_env
-    safe_run "[Sudo password policy]"    sync_sudo_hash_permissions_from_policy
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
