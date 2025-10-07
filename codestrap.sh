@@ -378,6 +378,11 @@ LOCK_FILE="$LOCK_DIR/init-codestrap.lock"
 PASS_HASH_PATH="${FILE__HASHED_PASSWORD:-$STATE_DIR/password.hash}"
 FIRSTBOOT_MARKER="$STATE_DIR/.firstboot-auth-restart"
 
+# SUDO password (crypt(3) style hash like $6$salt$hash)
+SUDO_USER="${SUDO_USER:-abc}"
+SUDO_HASH_PATH="${FILE__SUDO_PASSWORD_HASH:-$STATE_DIR/sudo_password.hash}"
+ALLOW_SUDO_PASSWORD_CHANGE="$(normalize_bool "${ALLOW_SUDO_PASSWORD_CHANGE:-true}")"
+
 # Workspace + repos path joining (REPOS_SUBDIR always relative)
 WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
 WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
@@ -612,6 +617,105 @@ password_set_noninteractive(){
   trigger_restart_gate
   return 0
 }
+
+
+# ----- SUDO password helpers -----
+
+# Create a crypt(3) SHA-512 hash ($6$...) using openssl.
+# (LinuxServer code-server supports $type$salt$hash; $6$ is SHA-512)
+mk_sudo_hash(){
+  # openssl passwd -6 generates $6$<salt>$<hash>; provide random salt
+  command -v openssl >/dev/null 2>&1 || { err "openssl not found (needed to generate sudo password hash)"; return 1; }
+  salt="$(head -c16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-16)"
+  openssl passwd -6 -salt "$salt" "$1"
+}
+
+# Write hash to file and chown perms
+write_sudo_hash_file(){
+  hash="$1"
+  ensure_dir "$(dirname "$SUDO_HASH_PATH")"
+  printf '%s' "$hash" > "$SUDO_HASH_PATH"
+  chmod 640 "$SUDO_HASH_PATH" 2>/dev/null || true
+  chown "${PUID}:${PGID}" "$SUDO_HASH_PATH" 2>/dev/null || true
+}
+
+# Try to apply the sudo hash immediately (preferred), else fall back to file-only.
+apply_sudo_hash_now(){
+  hash="$1"
+  # Use root directly when in init; else try passwordless sudo; else file-only
+  if [ "$(id -u)" = "0" ]; then
+    echo "${SUDO_USER}:${hash}" | chpasswd -e && return 0
+  elif command -v sudo >/dev/null 2>&1; then
+    echo "${SUDO_USER}:${hash}" | sudo -n chpasswd -e && return 0
+  fi
+  return 1
+}
+
+# One-time init from DEFAULT_SUDO_PASSWORD (if file missing/empty)
+init_default_sudo_password_if_env(){
+  DEFAULT_SUDO_PASSWORD="${DEFAULT_SUDO_PASSWORD:-}"
+  [ -n "$DEFAULT_SUDO_PASSWORD" ] || { log "DEFAULT_SUDO_PASSWORD not set; skipping sudo default hash"; return 0; }
+  [ -s "$SUDO_HASH_PATH" ] && { log "sudo hash exists; leaving as-is"; return 0; }
+  hash="$(mk_sudo_hash "$DEFAULT_SUDO_PASSWORD")" || { warn "could not create sudo hash"; return 0; }
+  write_sudo_hash_file "$hash"
+  # Best effort immediate apply during init (usually root)
+  if apply_sudo_hash_now "$hash"; then
+    log "applied sudo password (init)"
+  else
+    log "sudo password hash written; will take effect on restart or when applied later"
+  fi
+}
+
+sudo_password_change_interactive(){
+  [ "$ALLOW_SUDO_PASSWORD_CHANGE" = "true" ] || { CTX_TAG="[Change sudo password]"; err "sudo password changes are disabled (ALLOW_SUDO_PASSWORD_CHANGE=false)"; CTX_TAG=""; return 1; }
+  command -v openssl >/dev/null 2>&1 || { CTX_TAG="[Change sudo password]"; err "openssl not found."; CTX_TAG=""; return 1; }
+
+  _OLD_PROMPT_TAG="$PROMPT_TAG"; _OLD_CTX_TAG="$CTX_TAG"
+  PROMPT_TAG="[Change sudo password] ? "
+  CTX_TAG="[Change sudo password]"
+
+  NEW="$(prompt_secret "New sudo password: ")"
+  CONF="$(prompt_secret "Confirm sudo password: ")"
+  [ -n "$NEW" ]  || { err "password required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+
+  hash="$(mk_sudo_hash "$NEW")" || { err "failed to generate sudo hash"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  write_sudo_hash_file "$hash"
+
+  if apply_sudo_hash_now "$hash"; then
+    log "sudo password updated"
+  else
+    warn "could not apply sudo password immediately (not root/no sudo). The stored hash will be applied on next container restart."
+  fi
+
+  trigger_restart_gate
+  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
+}
+
+sudo_password_set_noninteractive(){
+  # usage: codestrap sudopasswd --set "<password>" "<confirm>"
+  [ "$ALLOW_SUDO_PASSWORD_CHANGE" = "true" ] || { CTX_TAG="[Change sudo password]"; err "sudo password changes are disabled (ALLOW_SUDO_PASSWORD_CHANGE=false)"; CTX_TAG=""; return 1; }
+  PW="${1:-}"; CONF="${2:-}"
+  command -v openssl >/dev/null 2>&1 || { CTX_TAG="[Change sudo password]"; err "openssl not found."; CTX_TAG=""; return 1; }
+  [ -n "$PW" ]   || { CTX_TAG="[Change sudo password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ -n "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "confirmation required"; CTX_TAG=""; return 1; }
+  [ "$PW" = "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "passwords do not match"; CTX_TAG=""; return 1; }
+  [ ${#PW} -ge 8 ] || { CTX_TAG="[Change sudo password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
+
+  hash="$(mk_sudo_hash "$PW")" || { CTX_TAG="[Change sudo password]"; err "failed to generate sudo hash"; CTX_TAG=""; return 1; }
+  write_sudo_hash_file "$hash"
+
+  if apply_sudo_hash_now "$hash"; then
+    log "sudo password updated (non-interactive)"
+  else
+    warn "could not apply sudo password immediately (not root/no sudo). The stored hash will be applied on next container restart."
+  fi
+  trigger_restart_gate
+  return 0
+}
+
 
 # ===== github bootstrap internals =====
 resolve_email(){
@@ -2588,6 +2692,30 @@ cli_entry(){
           ;;
       esac
       ;;
+    sudopasswd)
+      shift || true
+      case "${1:-}" in
+        --set)
+          shift || true
+          PW="${1:-}"
+          CONF="${2:-}"
+          if [ -z "$PW" ] || [ -z "$CONF" ]; then
+            CTX_TAG="[Change sudo password]"; err "--set requires two args: <password> <confirm>"; CTX_TAG=""; exit 2
+          fi
+          CTX_TAG="[Change sudo password]"
+          sudo_password_set_noninteractive "$PW" "$CONF" || exit 1
+          CTX_TAG=""
+          exit 0
+          ;;
+        *)
+          bootstrap_banner
+          CTX_TAG="[Change sudo password]"
+          sudo_password_change_interactive
+          CTX_TAG=""
+          exit 0
+          ;;
+      esac
+      ;;
     *)
       err "Unknown subcommand: $1"; print_help; exit 1;;
   esac
@@ -2647,6 +2775,7 @@ case "${1:-init}" in
     safe_run "[Codestrap extension]"     install_codestrap_extension
     safe_run "[Codestrap UI]"            write_codestrap_login
     safe_run "[Default password]"        init_default_password_if_env
+    safe_run "[Default sudo password]"   init_default_sudo_password_if_env
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
