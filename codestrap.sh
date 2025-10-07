@@ -777,29 +777,24 @@ sudo_password_change_interactive(){
   PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
 }
 
-sudo_password_change_interactive(){
+sudo_password_set_noninteractive(){
   [ "$(read_allow_sudo_change)" = "true" ] || { CTX_TAG="[Change sudo password]"; err "sudo password changes are disabled by policy"; CTX_TAG=""; return 1; }
+  PW="${1:-}"; CONF="${2:-}"
   command -v openssl >/dev/null 2>&1 || { CTX_TAG="[Change sudo password]"; err "openssl not found."; CTX_TAG=""; return 1; }
+  [ -n "$PW" ]   || { CTX_TAG="[Change sudo password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
+  [ -n "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "confirmation required"; CTX_TAG=""; return 1; }
+  [ "$PW" = "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "passwords do not match"; CTX_TAG=""; return 1; }
+  [ ${#PW} -ge 8 ] || { CTX_TAG="[Change sudo password]"; err "minimum length 8"; CTX_TAG=""; return 1; }
 
-  _OLD_PROMPT_TAG="$PROMPT_TAG"; _OLD_CTX_TAG="$CTX_TAG"
-  PROMPT_TAG="[Change sudo password] ? "; CTX_TAG="[Change sudo password]"
-
-  NEW="$(prompt_secret "New sudo password: ")"
-  CONF="$(prompt_secret "Confirm sudo password: ")"
-  [ -n "$NEW" ]  || { err "password required!";  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ -n "$CONF" ] || { err "confirmation required!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ "$NEW" = "$CONF" ] || { err "passwords do not match!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-  [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
-
-  hash="$(mk_sudo_hash "$NEW")" || { err "failed to generate sudo hash"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
+  hash="$(mk_sudo_hash "$PW")" || { CTX_TAG="[Change sudo password]"; err "failed to generate sudo hash"; CTX_TAG=""; return 1; }
   if write_sudo_hash_file "$hash"; then
-    log "stored sudo password hash → $SUDO_HASH_PATH (will be acted on by your boot logic)"
+    log "stored sudo password hash (non-interactive) → $SUDO_HASH_PATH (will be acted on by your boot logic)"
     trigger_restart_gate
+    return 0
   else
-    err "could not write sudo hash file (check policy and file permissions): $SUDO_HASH_PATH"
+    CTX_TAG="[Change sudo password]"; err "could not write sudo hash file (check policy and file permissions): $SUDO_HASH_PATH"; CTX_TAG=""
+    return 1
   fi
-
-  PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
 }
 
 # ===== github bootstrap internals =====
