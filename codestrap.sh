@@ -586,9 +586,11 @@ sudo_password_change_interactive(){
   [ ${#NEW} -ge 8 ] || { err "minimum length 8!"; PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"; return 1; }
 
   ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
-  _hash="$(sudo_hash_pw "$PW")"
+  _hash="$(sudo_hash_pw "$NEW")"
   atomic_write "$SUDO_PASS_HASH_PATH" "$_hash"
+  # keep it editable when policy allows (may be no-op for non-root)
   chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+  # tiny delay prevents “one change behind” on fast restarts
   sleep 0.25
 
   log "sudo password hash written for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
