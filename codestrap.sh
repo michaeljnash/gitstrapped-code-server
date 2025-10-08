@@ -2149,6 +2149,18 @@ extensions_cmd(){
   MODE=""         # install scope: "", "all", "missing"
   UNMODE=""       # uninstall scope: "", "all", "missing"
 
+  # No flags provided → interactive only when TTY is available.
+  if [ -z "${MODE:-}" ] && [ -z "${UNMODE:-}" ]; then
+    if is_tty; then
+      : # fall through to your existing interactive prompts
+    else
+      CTX_TAG="[Extensions]"
+      err "No scope provided. Use --install <all|missing> and/or --uninstall <all|missing>."
+      CTX_TAG=""
+      exit 2
+    fi
+  fi
+
   # --- NEVER uninstall this extension (version-agnostic) ---
   PROTECTED_RE='^(codestrap\.codestrap)(@.*)?$'
 

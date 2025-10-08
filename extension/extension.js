@@ -195,11 +195,22 @@ class ViewProvider {
           break;
         }
         case 'ext:apply': {
-          const args=['extensions'];
-          if (msg.uninstall==='all' || msg.uninstall==='missing') args.push('-u', msg.uninstall);
-          if (msg.install==='all'   || msg.install==='missing')   args.push('-i', msg.install);
-          // Run; ack when finished
-          runCodestrap('extensions', args, { expectAck:true, postAck });
+          const args = ['extensions'];
+          const un = (msg.uninstall || '').trim();
+          const ins = (msg.install   || '').trim();
+
+          if (un === '' && ins === '') {
+            vscode.window.showWarningMessage('Select an Install or Uninstall scope first.');
+            // If the webview started a spinner somehow, stop it.
+            postAck && postAck({ type: 'ack', op: 'extensions', ok: false });
+            break;
+          }
+
+          if (un === 'all' || un === 'missing') args.push('-u', un);
+          if (ins === 'all' || ins === 'missing') args.push('-i', ins);
+
+          // Run with NO TTY; ack when finished
+          runCodestrap('extensions', args, { expectAck: true, postAck });
           break;
         }
         case 'github:run': {

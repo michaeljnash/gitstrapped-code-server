@@ -183,11 +183,20 @@ $("cfg-run").onclick = () => {
 //extension actions
 
 $("ext-run").onclick = () => {
+  const uninstall = ($("ext-un").value || "").trim();
+  const install   = ($("ext-in").value || "").trim();
+
+  // Guard: at least one scope must be selected
+  if (!uninstall && !install) {
+    alert("Choose an Install or Uninstall scope first.");
+    return; // don't start spinner, don't send message
+  }
+
   setButtonLoading("ext-run", true);
   vscode.postMessage({
-    type:"ext:apply",
-    uninstall: $("ext-un").value || "",
-    install: $("ext-in").value || ""
+    type: "ext:apply",
+    uninstall,
+    install
   });
 };
 
