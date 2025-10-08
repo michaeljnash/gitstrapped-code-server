@@ -1,2 +1,2 @@
 # policies.yml
-allow-sudo-password-change: false
+allow-sudo-password-change: true
