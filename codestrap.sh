@@ -514,28 +514,28 @@ sudo_hash_pw(){
 enforce_policy_permissions(){
   allow="$(policy_allow_sudo_change)"
 
-  # sudo hash file perms
-  if [ -s "$SUDO_PASS_HASH_PATH" ] || [ -d "$(dirname "$SUDO_PASS_HASH_PATH")" ]; then
-    if [ "$allow" = "1" ]; then
-      # editable by code-server user
-      chown "${PUID:-1000}:${PGID:-1000}" "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-      chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-    else
-      # locked to root
-      chown root:root "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-      chmod 600 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-    fi
-  fi
+  # ensure parent dirs exist
+  ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
+  ensure_dir "$(dirname "$PASS_HASH_PATH")"
 
-  # login hash file perms (FILE__HASHED_PASSWORD)
-  if [ -s "$PASS_HASH_PATH" ] || [ -d "$(dirname "$PASS_HASH_PATH")" ]; then
-    if [ "$allow" = "1" ]; then
-      chown "${PUID:-1000}:${PGID:-1000}" "$PASS_HASH_PATH" 2>/dev/null || true
-      chmod 640 "$PASS_HASH_PATH" 2>/dev/null || true
-    else
-      chown root:root "$PASS_HASH_PATH" 2>/dev/null || true
-      chmod 600 "$PASS_HASH_PATH" 2>/dev/null || true
-    fi
+  # always ensure files exist so we can re-chown on policy flips
+  [ -f "$SUDO_PASS_HASH_PATH" ] || : > "$SUDO_PASS_HASH_PATH"
+  [ -f "$PASS_HASH_PATH" ]      || : > "$PASS_HASH_PATH"
+
+  if [ "$allow" = "1" ]; then
+    # Editable by code-server user when allowed
+    chown "${PUID:-1000}:${PGID:-1000}" "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+    chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+
+    chown "${PUID:-1000}:${PGID:-1000}" "$PASS_HASH_PATH" 2>/dev/null || true
+    chmod 640 "$PASS_HASH_PATH" 2>/dev/null || true
+  else
+    # Locked down when not allowed
+    chown root:root "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+    chmod 600 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
+
+    chown root:root "$PASS_HASH_PATH" 2>/dev/null || true
+    chmod 600 "$PASS_HASH_PATH" 2>/dev/null || true
   fi
 }
 
@@ -548,6 +548,7 @@ init_default_sudo_password_if_env(){
   _hash="$(sudo_hash_pw "$DEFAULT_SUDO_PASSWORD")"
   printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
   log "wrote default sudo password hash → $SUDO_PASS_HASH_PATH"
+  enforce_policy_permissions
 }
 
 sudo_password_change_interactive(){
