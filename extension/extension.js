@@ -4,11 +4,15 @@ const http = require('http');
 
 let cliTerminal = null;
 
+const { spawn } = require('child_process');
+let outChan = null;
+
 function shellQ(s){
   if (s === undefined || s === null) return "''";
   s = String(s); if (s === '') return "''";
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
+// For Terminal-based runs (used only by passwd/sudopasswd to keep UX identical)
 function resolveCodestrapString(){
   if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) return shellQ(process.env.CODESTRAP_BIN);
   const cands = ['/usr/local/bin/codestrap','/usr/bin/codestrap'];
@@ -16,12 +20,52 @@ function resolveCodestrapString(){
   if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) return `sh ${shellQ('/custom-cont-init.d/10-codestrap.sh')} cli`;
   return null;
 }
+
+// For spawn() runs (need raw cmd & args, unquoted)
+function resolveCodestrapSpawn() {
+  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) {
+    return { cmd: process.env.CODESTRAP_BIN, baseArgs: [] };
+  }
+  const cands = ['/usr/local/bin/codestrap','/usr/bin/codestrap'];
+  for (const p of cands) if (fs.existsSync(p)) return { cmd: p, baseArgs: [] };
+  if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) {
+    return { cmd: 'sh', baseArgs: ['/custom-cont-init.d/10-codestrap.sh','cli'] };
+  }
+  return null;
+}
+
 function buildAndRun(args){
   const runner = resolveCodestrapString();
   if (!runner) { vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).'); return; }
   const t = vscode.window.createTerminal({ name: 'Codestrap' });
   t.sendText(`${runner} ${args.join(' ')}`, true);
   t.show(true);
+}
+
+// Async background run for non-reboot ops; acks on completion
+function runAndAck(op, args, postAck) {
+  const r = resolveCodestrapSpawn();
+  if (!r) {
+    vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).');
+    postAck({ type: 'ack', op, ok:false });
+    return;
+  }
+  if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+  outChan.show(true);
+  outChan.appendLine(`$ codestrap ${args.join(' ')}`);
+
+  const proc = spawn(r.cmd, [...r.baseArgs, ...args], { env: process.env });
+  proc.stdout.on('data', d => outChan.append(d.toString()));
+  proc.stderr.on('data', d => outChan.append(d.toString()));
+  proc.on('error', (err) => {
+    outChan.appendLine(`\n[error] ${err && err.message ? err.message : String(err)}`);
+  });
+  proc.on('close', (code) => {
+    const ok = code === 0;
+    outChan.appendLine(`\n[exit] ${ok ? 'success' : 'failed'} (code ${code})`);
+    if (!ok) vscode.window.showErrorMessage(`Codestrap ${op} failed (exit ${code}). See "Codestrap" output for details.`);
+    postAck({ type:'ack', op, ok });
+  });
 }
 
 function openCLI(){
@@ -124,6 +168,7 @@ class ViewProvider {
     this.webview.html = loadWebviewHtml(this.webview, this.context, INITIALS);
 
     this.webview.onDidReceiveMessage((msg) => {
+      const postAck = (payload) => { try { this.webview?.postMessage(payload); } catch(_){} };
       switch (msg.type) {
         case 'open:docs': openDocs(); break;
         case 'open:cli':  openCLI();  break;
@@ -132,8 +177,9 @@ class ViewProvider {
           const cf = msg.confirm  || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
           if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+          // Keep spinner until reboot; run via Terminal for same UX as before
           buildAndRun(['passwd','--set', shellQ(pw), shellQ(cf)]);
-          break;
+          break; // no ack (spinner continues)
         }
         case 'sudopasswd:set': {
           if (!INITIALS.ALLOW_SUDO_PASSWORD_CHANGE) {
@@ -144,8 +190,9 @@ class ViewProvider {
           const cf = msg.confirm  || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
           if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+          // Keep spinner until reboot; run via Terminal
           buildAndRun(['sudopasswd','--set', shellQ(pw), shellQ(cf)]);
-          break;
+          break; // no ack (spinner continues)
         }
         case 'config:run': {
           const tf=(b)=> b?'true':'false';
@@ -154,14 +201,16 @@ class ViewProvider {
           if ('keybindings' in msg)args.push('-k', tf(!!msg.keybindings));
           if ('tasks' in msg)      args.push('-t', tf(!!msg.tasks));
           if ('extensions' in msg) args.push('-e', tf(!!msg.extensions));
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          // Run in background; ack when finished
+          runAndAck('config', args, postAck);
           break;
         }
         case 'ext:apply': {
           const args=['extensions'];
           if (msg.uninstall==='all' || msg.uninstall==='missing') args.push('-u', msg.uninstall);
           if (msg.install==='all'   || msg.install==='missing')   args.push('-i', msg.install);
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          // Run in background; ack when finished
+          runAndAck('extensions', args, postAck);
           break;
         }
         case 'github:run': {
@@ -176,7 +225,8 @@ class ViewProvider {
             if (msg.repos)    args.push('-r', msg.repos);
             if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
-          buildAndRun(args.map(a => a.startsWith('-')? a : shellQ(a)));
+          // Run in background; ack when finished
+          runAndAck('github', args, postAck);
           break;
         }
         //case 'host:error': {

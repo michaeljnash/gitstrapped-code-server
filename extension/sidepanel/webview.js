@@ -7,6 +7,18 @@ const INITIAL = meta ? JSON.parse(meta.dataset.json || '{}') : {};
 const $ = (id) => document.getElementById(id);
 const togglePw = (inputId) => { const el = $(inputId); el.type = (el.type === 'password') ? 'text' : 'password'; };
 
+function setButtonLoading(btnId, isLoading) {
+  const btn = $(btnId);
+  if (!btn) return;
+  if (isLoading) {
+    btn.classList.add('loading');
+    btn.disabled = true;
+  } else {
+    btn.classList.remove('loading');
+    btn.disabled = false;
+  }
+}
+
 // --- Top buttons ---
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
@@ -87,6 +99,8 @@ $("login-run").onclick = () => {
 
   // clear error & let the host do final validation + action
   setError("login-error", "");
+  // spinner continues until reboot (no ack expected)
+  setButtonLoading("login-run", true);
   vscode.postMessage({ type:"passwd:set", password: a, confirm: b });
 };
 
@@ -111,6 +125,8 @@ $("sudo-run").onclick = () => {
     return;
   }
   setError("sudo-error", "");
+  // spinner continues until reboot (no ack expected)
+  setButtonLoading("sudo-run", true);
   vscode.postMessage({ type:"sudopasswd:set", password: a, confirm: b });
 };
 ["sudo-pw","sudo-pw2"].forEach(id => {
@@ -154,6 +170,7 @@ $("sudo-run").onclick = () => {
 // config actions
 
 $("cfg-run").onclick = () => {
+  setButtonLoading("cfg-run", true);
   vscode.postMessage({
     type:"config:run",
     settings: $("cfg-settings").checked,
@@ -166,6 +183,7 @@ $("cfg-run").onclick = () => {
 //extension actions
 
 $("ext-run").onclick = () => {
+  setButtonLoading("ext-run", true);
   vscode.postMessage({
     type:"ext:apply",
     uninstall: $("ext-un").value || "",
@@ -179,6 +197,7 @@ $("gh-auto").onchange = () => {
   $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";
 };
 $("gh-run").onclick = () => {
+  setButtonLoading("gh-run", true);
   const auto = $("gh-auto").checked;
   vscode.postMessage({
     type: "github:run",
@@ -198,3 +217,24 @@ setupEnterToSubmit('panel-sudo', 'sudo-run');
 setupEnterToSubmit('sec-config', 'cfg-run');
 setupEnterToSubmit('sec-ext',    'ext-run');
 setupEnterToSubmit('sec-github', 'gh-run');
+
+// Stop spinners when host ACKs completion (non-reboot ops only)
+window.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type !== 'ack') return;
+  switch (data.op) {
+    case 'config':
+      setButtonLoading('cfg-run', false);
+      if (data.ok === false) alert('Config merge failed. Check "Codestrap" output.');
+      break;
+    case 'extensions':
+      setButtonLoading('ext-run', false);
+      if (data.ok === false) alert('Extensions operation failed. Check "Codestrap" output.');
+      break;
+    case 'github':
+      setButtonLoading('gh-run', false);
+      if (data.ok === false) alert('GitHub bootstrap failed. Check "Codestrap" output.');
+      break;
+    // passwd/sudopasswd: no ack => spinner keeps spinning until reboot refreshes the webview
+  }
+});
