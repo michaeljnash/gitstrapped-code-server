@@ -7,6 +7,9 @@
   "icon": "icon.svg",
   "engines": { "vscode": "^1.70.0" },
   "main": "./extension.js",
+  "dependencies": {
+    "node-pty": "^1.0.0"
+  },
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.view",

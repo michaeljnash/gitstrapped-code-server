@@ -3,8 +3,6 @@ const fs = require('fs');
 const http = require('http');
 
 let cliTerminal = null;
-
-const { spawn } = require('child_process');
 let outChan = null;
 
 function shellQ(s){
@@ -12,17 +10,9 @@ function shellQ(s){
   s = String(s); if (s === '') return "''";
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
-// For Terminal-based runs (used only by passwd/sudopasswd to keep UX identical)
-function resolveCodestrapString(){
-  if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) return shellQ(process.env.CODESTRAP_BIN);
-  const cands = ['/usr/local/bin/codestrap','/usr/bin/codestrap'];
-  for (const p of cands) if (fs.existsSync(p)) return shellQ(p);
-  if (fs.existsSync('/custom-cont-init.d/10-codestrap.sh')) return `sh ${shellQ('/custom-cont-init.d/10-codestrap.sh')} cli`;
-  return null;
-}
 
-// For spawn() runs (need raw cmd & args, unquoted)
-function resolveCodestrapSpawn() {
+// Single resolver that returns raw cmd + base args (used by PTY runner)
+function resolveCodestrapCmd() {
   if (process.env.CODESTRAP_BIN && fs.existsSync(process.env.CODESTRAP_BIN)) {
     return { cmd: process.env.CODESTRAP_BIN, baseArgs: [] };
   }
@@ -34,25 +24,9 @@ function resolveCodestrapSpawn() {
   return null;
 }
 
-function runCodestrap(op, args, { useTerminal=false, expectAck=false, postAck } = {}) {
-  // Terminal path (used for passwd/sudopasswd so the UX stays identical)
-  if (useTerminal) {
-    const runner = resolveCodestrapString();
-    if (!runner) {
-      vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).');
-      if (expectAck && postAck) postAck({ type:'ack', op, ok:false });
-      return;
-    }
-    const t = vscode.window.createTerminal({ name: 'Codestrap' });
-    t.sendText(`${runner} ${args.join(' ')}`, true);
-    t.show(true);
-    // No ack from terminal flow; caller keeps spinner until reboot (or you could
-    // craft a more complex terminal listener, but not needed for passwd flows)
-    return;
-  }
-
-  // Spawn path (non-TTY + ack) used for config/extensions/github
-  const r = resolveCodestrapSpawn();
+function runCodestrap(op, args, { expectAck=false, postAck } = {}) {
+  // Single PTY-based path for ALL commands (gives TTY and onExit for ACKs)
+  const r = resolveCodestrapCmd();
   if (!r) {
     vscode.window.showErrorMessage('codestrap not found (set CODESTRAP_BIN or install /usr/local/bin/codestrap).');
     if (expectAck && postAck) postAck({ type:'ack', op, ok:false });
@@ -62,21 +36,21 @@ function runCodestrap(op, args, { useTerminal=false, expectAck=false, postAck } 
   outChan.show(true);
   outChan.appendLine(`$ codestrap ${args.join(' ')}`);
 
-  // IMPORTANT: force non-TTY so Codestrap won’t write to /dev/tty
-  const env = { ...process.env, CODESTRAP_NO_TTY: '1' };
-
-  const { spawn } = require('child_process');
-  const proc = spawn(r.cmd, [...r.baseArgs, ...args], { env });
-
-  proc.stdout.on('data', d => outChan.append(d.toString()));
-  proc.stderr.on('data', d => outChan.append(d.toString()));
-  proc.on('error', (err) => {
-    outChan.appendLine(`\n[error] ${err && err.message ? err.message : String(err)}`);
+  const env = { ...process.env }; // we WANT a TTY; no CODESTRAP_NO_TTY here
+  const fullArgs = [...r.baseArgs, ...args];
+  const p = pty.spawn(r.cmd, fullArgs, {
+    name: 'xterm-color',
+    cols: 80,
+    rows: 24,
+    cwd: process.cwd(),
+    env
   });
-  proc.on('close', (code) => {
-    const ok = code === 0;
-    outChan.appendLine(`\n[exit] ${ok ? 'success' : 'failed'} (code ${code})`);
-    if (!ok) vscode.window.showErrorMessage(`Codestrap ${op} failed (exit ${code}). See "Codestrap" output for details.`);
+
+  p.onData(d => outChan.append(d.toString()));
+  p.onExit(({ exitCode, signal }) => {
+    const ok = exitCode === 0;
+    outChan.appendLine(`\n[exit] ${ok ? 'success' : 'failed'} (code ${exitCode}${signal ? `, sig ${signal}` : ''})`);
+    if (!ok) vscode.window.showErrorMessage(`Codestrap ${op} failed (exit ${exitCode}). See "Codestrap" output for details.`);
     if (expectAck && postAck) postAck({ type:'ack', op, ok });
   });
 }
@@ -190,8 +164,8 @@ class ViewProvider {
           const cf = msg.confirm  || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
           if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
-          // Keep spinner until reboot; run via Terminal for same UX as before
-          runCodestrap('passwd', ['passwd','--set', shellQ(pw), shellQ(cf)], { useTerminal:true, expectAck:false });
+          // Keep spinner until reboot; run in PTY (no ack)
+          runCodestrap('passwd', ['passwd','--set', pw, cf], { expectAck:false });
           break; // no ack (spinner continues)
         }
         case 'sudopasswd:set': {
@@ -203,8 +177,8 @@ class ViewProvider {
           const cf = msg.confirm  || '';
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
           if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
-          // Keep spinner until reboot; run via Terminal
-          runCodestrap('sudopasswd', ['sudopasswd','--set', shellQ(pw), shellQ(cf)], { useTerminal:true, expectAck:false });
+          // Keep spinner until reboot; run in PTY (no ack)
+          runCodestrap('sudopasswd', ['sudopasswd','--set', pw, cf], { expectAck:false });
           break; // no ack (spinner continues)
         }
         case 'config:run': {
@@ -214,16 +188,16 @@ class ViewProvider {
           if ('keybindings' in msg)args.push('-k', tf(!!msg.keybindings));
           if ('tasks' in msg)      args.push('-t', tf(!!msg.tasks));
           if ('extensions' in msg) args.push('-e', tf(!!msg.extensions));
-          // Run in background; ack when finished
-          runCodestrap('config', args, { useTerminal:false, expectAck:true, postAck });
+          // Run in PTY; ack when finished
+          runCodestrap('config', args, { expectAck:true, postAck });
           break;
         }
         case 'ext:apply': {
           const args=['extensions'];
           if (msg.uninstall==='all' || msg.uninstall==='missing') args.push('-u', msg.uninstall);
           if (msg.install==='all'   || msg.install==='missing')   args.push('-i', msg.install);
-          // Run in background; ack when finished
-          runCodestrap('extensions', args, { useTerminal:false, expectAck:true, postAck });
+          // Run in PTY; ack when finished
+          runCodestrap('extensions', args, { expectAck:true, postAck });
           break;
         }
         case 'github:run': {
@@ -238,8 +212,8 @@ class ViewProvider {
             if (msg.repos)    args.push('-r', msg.repos);
             if ('pull' in msg)args.push('-p', String(!!msg.pull));
           }
-          // Run in background; ack when finished
-          runCodestrap('github', args, { useTerminal:false, expectAck:true, postAck });
+          // Run in PTY; ack when finished
+          runCodestrap('github', args, { expectAck:true, postAck });
           break;
         }
         //case 'host:error': {
