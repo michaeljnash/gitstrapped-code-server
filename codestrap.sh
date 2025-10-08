@@ -31,7 +31,7 @@ err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
 
 # ----- run-mode + generic helpers -----
 # Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
-+UN_MODE="${RUN_MODE:-cli}"
+RUN_MODE="${RUN_MODE:-cli}"
 
 # ----- force NO TTY when called non-interactively (extension spawn path) -----
 # If CODESTRAP_NO_TTY=1|true is set, never attempt to read/write /dev/tty.
