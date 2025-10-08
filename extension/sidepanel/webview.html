@@ -20,24 +20,24 @@
         <h3>Change password</h3>
       </div>
 
-      <div class="tabs">
+      <div class="tabs row center-row">
         <button class="tab active" id="tab-login" aria-selected="true">Login</button>
         <button class="tab" id="tab-sudo" aria-selected="false" title="Sudo password">Sudo</button>
       </div>
 
       <!-- LOGIN PANEL -->
       <div class="tabpanel" id="panel-login">
-        <label>New password</label>
+        <label>New login password</label>
         <div class="input-with-eye">
           <input id="login-pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
-          <button class="eye-btn" type="button" id="login-pw-eye" title="Show/Hide" aria-label="Show/Hide">
+          <button class="eye-btn" type="button" id="login-pw-eye" title="Show/Hide" aria-label="Show/Hide" tabindex="-1">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
-        <label style="margin-top:6px;">Confirm password</label>
+        <label style="margin-top:6px;">Confirm login password</label>
         <div class="input-with-eye">
           <input id="login-pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
-          <button class="eye-btn" type="button" id="login-pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+          <button class="eye-btn" type="button" id="login-pw2-eye" title="Show/Hide" aria-label="Show/Hide" tabindex="-1">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
@@ -52,14 +52,14 @@
         <label>New sudo password</label>
         <div class="input-with-eye">
           <input id="sudo-pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
-          <button class="eye-btn" type="button" id="sudo-pw-eye" title="Show/Hide" aria-label="Show/Hide">
+          <button class="eye-btn" type="button" id="sudo-pw-eye" title="Show/Hide" aria-label="Show/Hide" tabindex="-1">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
         <label style="margin-top:6px;">Confirm sudo password</label>
         <div class="input-with-eye">
           <input id="sudo-pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
-          <button class="eye-btn" type="button" id="sudo-pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+          <button class="eye-btn" type="button" id="sudo-pw2-eye" title="Show/Hide" aria-label="Show/Hide" tabindex="-1">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>
@@ -115,7 +115,7 @@
         <label>Token (classic)</label>
         <div class="input-with-eye">
           <input id="gh-token" type="password" class="pad-right-eye" placeholder="GITHUB_TOKEN" />
-          <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide" aria-label="Show/Hide">
+          <button class="eye-btn" type="button" id="gh-token-eye" title="Show/Hide" aria-label="Show/Hide" tabindex="-1">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
           </button>
         </div>

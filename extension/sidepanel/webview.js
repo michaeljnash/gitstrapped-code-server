@@ -42,6 +42,25 @@ $("gh-token-eye").onclick = () => togglePw("gh-token");
   }
 })();
 
+// submit on enter
+function setupEnterToSubmit(sectionId, buttonId) {
+  const sec = $(sectionId);
+  const btn = $(buttonId);
+  if (!sec || !btn) return;
+
+  sec.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+
+    // Don’t hijack Enter for actual buttons (let them click themselves)
+    const tag = e.target && e.target.tagName ? e.target.tagName.toLowerCase() : '';
+    if (tag === 'button') return;
+
+    // Prevent default so it doesn't trigger other unintended behaviors
+    e.preventDefault();
+    btn.click();
+  });
+}
+
 // password actions
 function setError(id, msg){
   const el = $(id);
@@ -110,6 +129,7 @@ $("sudo-run").onclick = () => {
   if (!allowSudo) {
     tabSudo.setAttribute("aria-disabled","true");
     tabSudo.title = "Changing sudo password is disabled by policy.";
+    tabSudo.tabIndex = -1;
   }
 
   function activate(which){
@@ -171,3 +191,10 @@ $("gh-run").onclick = () => {
     pull:     auto ? undefined : $("gh-pull").checked
   });
 };
+
+// Enter submits current panel/section
+setupEnterToSubmit('panel-login', 'login-run');
+setupEnterToSubmit('panel-sudo', 'sudo-run');
+setupEnterToSubmit('sec-config', 'cfg-run');
+setupEnterToSubmit('sec-ext',    'ext-run');
+setupEnterToSubmit('sec-github', 'gh-run');
