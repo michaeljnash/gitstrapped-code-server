@@ -11,7 +11,12 @@
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "node-pty": "^1.0.0"
+    "vsce": "^2.15.0"
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build || echo 'no build step' && npm prune --production",
+    "package": "vsce package",
+    "postinstall": "npm rebuild node-pty --runtime=node --force || true"
   },
   "activationEvents": [
     "onStartupFinished",
