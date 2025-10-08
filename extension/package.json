@@ -14,7 +14,7 @@
     "vsce": "^2.15.0"
   },
   "scripts": {
-    "deploy": "vsce publish"
+    "package": "vsce package"
   },
   "activationEvents": [
     "onStartupFinished",
