@@ -1,7 +1,6 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const http = require('http');
-const path = require('path');
 const YAML = require('yaml');
 
 let cliTerminal = null;
@@ -107,13 +106,14 @@ function loadWebviewHtml(webview, context, initialJSON){
 class ViewProvider {
   constructor(context){
     this.context = context;
-    // Parse policies.yml once (best-effort)
+    // Parse policies.yml once (best-effort, no external deps)
     try {
       const p = '/config/.codestrap/policies.yml';
       if (fs.existsSync(p)) {
         const text = fs.readFileSync(p, 'utf8');
-        const y = YAML.parse(text) || {};
-        INITIALS.ALLOW_SUDO_PASSWORD_CHANGE = !!(y['allow-sudo-password-change'] === true);
+        // look for: allow-sudo-password-change: true (ignores whitespace & case)
+        const m = /(^|\n)\s*allow-sudo-password-change\s*:\s*true\s*($|\n)/i.test(text);
+        INITIALS.ALLOW_SUDO_PASSWORD_CHANGE = !!m;
       }
     } catch (_) {
       INITIALS.ALLOW_SUDO_PASSWORD_CHANGE = false;

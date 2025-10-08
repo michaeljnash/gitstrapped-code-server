@@ -72,7 +72,7 @@ $("login-run").onclick = () => {
 };
 
 // Optional: live-clear the inline error while typing
-+["login-pw","login-pw2"].forEach(id => {
+["login-pw","login-pw2"].forEach(id => {
   const el = $(id);
   el && el.addEventListener("input", () => setError("login-error",""));
 });
