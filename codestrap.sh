@@ -8,8 +8,19 @@ VERSION="${CODESTRAP_VERSION:-0.3.8}"
 PROMPT_TAG=""     # shown before interactive questions
 CTX_TAG=""        # shown before status/warn/error lines
 
-has_tty(){ [ -c /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; }
-is_tty(){ [ -t 0 ] && [ -t 1 ] || has_tty; }
+has_tty(){
+  # hard override from env (used by VS Code extension spawn path)
+  [ "${CODESTRAP_FORCE_NO_TTY}" = "1" ] && return 1
+  # prefer descriptor checks
+  if [ -t 0 ] && [ -t 1 ]; then return 0; fi
+  # conservative fallback: only claim TTY if /dev/tty can actually be opened
+  [ -e /dev/tty ] || return 1
+  # test open for read and write without crashing the shell
+  : </dev/tty    2>/dev/null || return 1
+  : >/dev/tty    2>/dev/null || return 1
+  return 0
+}
+is_tty(){ has_tty; }
 
 red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
 ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
@@ -20,7 +31,14 @@ err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
 
 # ----- run-mode + generic helpers -----
 # Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
-RUN_MODE="${RUN_MODE:-cli}"
++UN_MODE="${RUN_MODE:-cli}"
+
+# ----- force NO TTY when called non-interactively (extension spawn path) -----
+# If CODESTRAP_NO_TTY=1|true is set, never attempt to read/write /dev/tty.
+case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|y) CODESTRAP_FORCE_NO_TTY=1 ;;
+  *)            CODESTRAP_FORCE_NO_TTY=0 ;;
+esac
 
 # Run a step safely: in CLI, exit on failure; in INIT, log + continue.
 safe_run(){ # usage: safe_run "<ctx-tag>" <command> [args...]
@@ -285,8 +303,15 @@ CSS_EOF
 }
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
-read_line(){ if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi; printf "%s" "${_l:-}"; }
-prompt(){ msg="$1"; if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi; read_line; }
+read_line(){
+  if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi
+  printf "%s" "${_l:-}"
+}
+prompt(){
+  msg="$1"
+  if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi
+  read_line
+}
 prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
 prompt_secret(){
   if has_tty; then
@@ -296,8 +321,11 @@ prompt_secret(){
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
     printf "\n" >/dev/tty 2>/dev/null || true
   else
-    printf "%s%s" "$PROMPT_TAG" "$1"; IFS= read -r s || true
-  fi; printf "%s" "${s:-}"
+    # non-interactive: read from stdin; no /dev/tty touches
+    printf "%s%s" "$PROMPT_TAG" "$1"
+    IFS= read -r s || true
+  fi
+  printf "%s" "${s:-}"
 }
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
