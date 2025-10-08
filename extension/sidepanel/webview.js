@@ -186,11 +186,14 @@ $("ext-run").onclick = () => {
   const uninstall = ($("ext-un").value || "").trim();
   const install   = ($("ext-in").value || "").trim();
 
-  // Guard: at least one scope must be selected
+  // Require at least one scope
   if (!uninstall && !install) {
-    alert("Choose an Install or Uninstall scope first.");
-    return; // don't start spinner, don't send message
+    setError("ext-error", "Choose an Install or Uninstall scope first.");
+    return; // do NOT start spinner
   }
+
+  // clear any previous error
+  setError("ext-error", "");
 
   setButtonLoading("ext-run", true);
   vscode.postMessage({
@@ -199,6 +202,17 @@ $("ext-run").onclick = () => {
     install
   });
 };
+
+// Clear the error whenever the user picks a scope
+["ext-un","ext-in"].forEach(id => {
+  const el = $(id);
+  el && el.addEventListener("change", () => {
+    const un = ($("ext-un").value || "").trim();
+    const ins = ($("ext-in").value || "").trim();
+    if (un || ins) setError("ext-error", "");
+  });
+});
+
 
 //gh actions
 
