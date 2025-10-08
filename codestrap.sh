@@ -551,21 +551,6 @@ init_default_sudo_password_if_env(){
   enforce_policy_permissions
 }
 
-atomic_write(){
-  # usage: atomic_write <dest_path> "<content>"
-  _dest="$1"; _content="$2"
-  _dir="$(dirname "$_dest")"; ensure_dir "$_dir"
-  _tmp="$(mktemp "${_dir}/.tmp.XXXXXX")" || _tmp="$(mktemp)"
-  # write to temp, then rename over the top (atomic on same fs)
-  # avoid trailing newline differences: use printf %s
-  printf '%s' "$_content" >"$_tmp"
-  # ensure content hits disk before rename; rename is atomic
-  sync
-  mv -f "$_tmp" "$_dest"
-  # in case someone reads immediately after: try to flush again
-  sync
-}
-
 sudo_password_change_interactive(){
   if [ "$(policy_allow_sudo_change)" != "1" ]; then
     CTX_TAG="[Change sudo password]"
@@ -587,11 +572,7 @@ sudo_password_change_interactive(){
 
   ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
   _hash="$(sudo_hash_pw "$NEW")"
-  atomic_write "$SUDO_PASS_HASH_PATH" "$_hash"
-  # keep it editable when policy allows (may be no-op for non-root)
-  chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-  # tiny delay prevents “one change behind” on fast restarts
-  sleep 0.25
+  printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
 
   log "sudo password hash written for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
   sleep 0.3
@@ -617,9 +598,7 @@ sudo_password_set_noninteractive(){
 
   ensure_dir "$(dirname "$SUDO_PASS_HASH_PATH")"
   _hash="$(sudo_hash_pw "$PW")"
-  atomic_write "$SUDO_PASS_HASH_PATH" "$_hash"
-  chmod 640 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
-  sleep 0.25
+  printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
 
   log "sudo password hash updated (non-interactive) for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
   sleep 0.3
@@ -2833,13 +2812,13 @@ case "${1:-init}" in
     safe_run "[Codestrap UI]"            write_codestrap_login
     safe_run "[Default password]"        init_default_password_if_env
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
-    safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
     #safe_run "[Bootstrap config]"        merge_codestrap_extensions
     safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
     safe_run "[Extensions env]"          manage_extensions_if_envs
+    safe_run "[Sudo password policy]"    enforce_policy_permissions
     log "Codestrap initialized!"
     ;;
   cli)
