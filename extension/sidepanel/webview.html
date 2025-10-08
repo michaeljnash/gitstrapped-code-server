@@ -19,26 +19,54 @@
       <div class="row center-row">
         <h3>Change password</h3>
       </div>
-      <label>New password</label>
-      <div class="input-with-eye">
-        <input id="pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
-        <button class="eye-btn" type="button" id="pw-eye" title="Show/Hide" aria-label="Show/Hide">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
+
+      <div class="tabs">
+        <button class="tab active" id="tab-login" aria-selected="true">Login</button>
+        <button class="tab" id="tab-sudo" aria-selected="false" title="Sudo password">Sudo</button>
       </div>
 
-      <label style="margin-top:6px;">Confirm password</label>
-      <div class="input-with-eye">
-        <input id="pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
-        <button class="eye-btn" type="button" id="pw2-eye" title="Show/Hide" aria-label="Show/Hide">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-        </button>
+      <!-- LOGIN PANEL -->
+      <div class="tabpanel" id="panel-login">
+        <label>New password</label>
+        <div class="input-with-eye">
+          <input id="login-pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
+          <button class="eye-btn" type="button" id="login-pw-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <label style="margin-top:6px;">Confirm password</label>
+        <div class="input-with-eye">
+          <input id="login-pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
+          <button class="eye-btn" type="button" id="login-pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <div id="login-error" class="error" role="alert" style="display:none;"></div>
+        <div class="row center-row" style="margin-top:16px;">
+          <button id="login-run">Change</button>
+        </div>
       </div>
 
-      <div id="pw-error" class="error" role="alert" style="display:none;"></div>
-
-      <div class="row center-row" style="margin-top:16px;">
-        <button id="pw-run">Change</button>
+      <!-- SUDO PANEL -->
+      <div class="tabpanel" id="panel-sudo" hidden>
+        <label>New sudo password</label>
+        <div class="input-with-eye">
+          <input id="sudo-pw" type="password" class="pad-right-eye" placeholder="at least 8 characters" />
+          <button class="eye-btn" type="button" id="sudo-pw-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <label style="margin-top:6px;">Confirm sudo password</label>
+        <div class="input-with-eye">
+          <input id="sudo-pw2" type="password" class="pad-right-eye" placeholder="re-enter password" />
+          <button class="eye-btn" type="button" id="sudo-pw2-eye" title="Show/Hide" aria-label="Show/Hide">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+        <div id="sudo-error" class="error" role="alert" style="display:none;"></div>
+        <div class="row center-row" style="margin-top:16px;">
+          <button id="sudo-run">Change</button>
+        </div>
       </div>
     </div>
 

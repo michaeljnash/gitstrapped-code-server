@@ -60,3 +60,20 @@ button{
 .center-row{ justify-content:center; }
 
 .error{ color:#ef4444; font-size:12px; margin-top:8px; }
+
+/* Tabs */
+.tabs { display:flex; gap:6px; margin-bottom:12px; }
+.tab {
+  border:1px solid var(--border, #374151);
+  background:#1f2937;
+  color:var(--text, #e5e7eb);
+  border-radius:8px;
+  padding:6px 10px;
+  cursor:pointer;
+}
+.tab.active { outline:2px solid var(--accent, #3f83f8); }
+.tab[aria-disabled="true"] {
+  opacity:0.5;
+  cursor:not-allowed;
+}
+.tabpanel[hidden] { display:none; }

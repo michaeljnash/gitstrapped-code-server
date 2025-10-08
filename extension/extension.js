@@ -1,6 +1,8 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const http = require('http');
+const path = require('path');
+const YAML = require('yaml');
 
 let cliTerminal = null;
 
@@ -51,7 +53,8 @@ const INITIALS = {
   GIT_NAME:        (process.env.GIT_NAME || process.env.GITHUB_USERNAME || ''),
   GIT_EMAIL:       process.env.GIT_EMAIL       || '',
   GITHUB_REPOS:    process.env.GITHUB_REPOS    || '',
-  GITHUB_PULL:     (process.env.GITHUB_PULL || '').toString()
+  GITHUB_PULL:     (process.env.GITHUB_PULL || '').toString(),
+  ALLOW_SUDO_PASSWORD_CHANGE: false
 };
 
 function registerTerminalWatcher(context){
@@ -102,7 +105,20 @@ function loadWebviewHtml(webview, context, initialJSON){
 }
 
 class ViewProvider {
-  constructor(context){ this.context = context; }
+  constructor(context){
+    this.context = context;
+    // Parse policies.yml once (best-effort)
+    try {
+      const p = '/config/.codestrap/policies.yml';
+      if (fs.existsSync(p)) {
+        const text = fs.readFileSync(p, 'utf8');
+        const y = YAML.parse(text) || {};
+        INITIALS.ALLOW_SUDO_PASSWORD_CHANGE = !!(y['allow-sudo-password-change'] === true);
+      }
+    } catch (_) {
+      INITIALS.ALLOW_SUDO_PASSWORD_CHANGE = false;
+    }
+  }
   resolveWebviewView(webviewView){
     this.webview = webviewView.webview;
     this.webview.options = { enableScripts: true };
@@ -118,6 +134,18 @@ class ViewProvider {
           if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
           if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
           buildAndRun(['passwd','--set', shellQ(pw), shellQ(cf)]);
+          break;
+        }
+        case 'sudopasswd:set': {
+          if (!INITIALS.ALLOW_SUDO_PASSWORD_CHANGE) {
+            vscode.window.showWarningMessage('Changing sudo password is disabled by policy.');
+            return;
+          }
+          const pw = msg.password || '';
+          const cf = msg.confirm  || '';
+          if (pw.length < 8) { vscode.window.showErrorMessage('Password must be at least 8 characters.'); return; }
+          if (pw !== cf)     { vscode.window.showErrorMessage('Passwords do not match.'); return; }
+          buildAndRun(['sudopasswd','--set', shellQ(pw), shellQ(cf)]);
           break;
         }
         case 'config:run': {
