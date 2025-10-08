@@ -575,6 +575,7 @@ sudo_password_change_interactive(){
   printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
 
   log "sudo password hash written for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
+  sleep 0.3
   trigger_restart_gate
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
@@ -600,6 +601,7 @@ sudo_password_set_noninteractive(){
   printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
 
   log "sudo password hash updated (non-interactive) for user ${SUDO_USER} → $SUDO_PASS_HASH_PATH"
+  sleep 0.3
   trigger_restart_gate
   return 0
 }

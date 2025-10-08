@@ -54,7 +54,11 @@ services:
 
   splash:
     labels:
+<<<<<<< HEAD
+      - "recreate-tag=123456eered4e5rcedd 8ddfd ddydded4Efgu7dedydfgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
+=======
       - "recreate-tag=123456eered4e5rcedd 8ddfd dydded4Efdgu7dedydfgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
+>>>>>>> 52e2cc853ea021b893a479953f4d0e1aa19394c5
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
