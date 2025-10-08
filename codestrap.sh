@@ -163,6 +163,41 @@ install_codestrap_extension(){
   done
 }
 
+cs_fix_codestrap_extension_deps() {
+  # Where code-server stores extensions
+  local exts_root="${VSCODE_EXTENSIONS_DIR:-/config/extensions}"
+
+  # Make npm happy in slim containers
+  export HOME="${HOME:-/root}"
+  export npm_config_cache="${npm_config_cache:-/tmp/.npm}"
+
+  # Find our extension dirs
+  for d in "${exts_root}"/codestrap.codestrap-*; do
+    [ -d "$d" ] || continue
+    if [ -f "$d/package.json" ]; then
+      echo "[codestrap] repairing extension deps in: $d"
+      (
+        cd "$d" || exit 0
+
+        # If node_modules missing or incomplete, install runtime deps only
+        if [ ! -d node_modules ] || [ ! -f node_modules/.codestrap_installed ]; then
+          if command -v npm >/dev/null 2>&1; then
+            # Prefer clean install of prod deps
+            npm ci --omit=dev || npm install --omit=dev || true
+            # Rebuild native module for extension host (Node runtime)
+            npm rebuild node-pty --runtime=node --force || true
+            # Mark as done so we don't redo every boot
+            mkdir -p node_modules
+            touch node_modules/.codestrap_installed
+          else
+            echo "[codestrap] WARNING: npm not found; cannot repair node modules"
+          fi
+        fi
+      )
+    fi
+  done
+}
+
 write_codestrap_login() {
   # Path inside the linuxserver/code-server image
   PAGES_DIR="/app/code-server/src/browser/pages"
@@ -2829,21 +2864,22 @@ manage_extensions_if_envs(){
 case "${1:-init}" in
   init)
     RUN_MODE="init"
-    safe_run "[Permissions]"             chown_necessary_dirs
-    safe_run "[CLI shim]"                install_cli_shim
-    safe_run "[Restart gate]"            install_restart_gate
-    safe_run "[Codestrap extension]"     install_codestrap_extension
-    safe_run "[Codestrap UI]"            write_codestrap_login
-    safe_run "[Default password]"        init_default_password_if_env
-    safe_run "[Sudo default password]"   init_default_sudo_password_if_env
-    safe_run "[Sudo password policy]"    enforce_policy_permissions
-    safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
-    safe_run "[Bootstrap config]"        merge_codestrap_settings
-    safe_run "[Bootstrap config]"        merge_codestrap_keybindings
-    safe_run "[Bootstrap config]"        merge_codestrap_tasks
-    #safe_run "[Bootstrap config]"        merge_codestrap_extensions
-    safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
-    safe_run "[Extensions env]"          manage_extensions_if_envs
+    safe_run "[Permissions]"                chown_necessary_dirs
+    safe_run "[CLI shim]"                   install_cli_shim
+    safe_run "[Restart gate]"               install_restart_gate
+    safe_run "[Codestrap extension]"        install_codestrap_extension
+    safe_run "[Codestrap extension deps]"   cs_fix_codestrap_extension_deps
+    safe_run "[Codestrap UI]"               write_codestrap_login
+    safe_run "[Default password]"           init_default_password_if_env
+    safe_run "[Sudo default password]"      init_default_sudo_password_if_env
+    safe_run "[Sudo password policy]"       enforce_policy_permissions
+    safe_run "[Apply sudo hash]"            apply_sudo_hash_if_present
+    safe_run "[Bootstrap config]"           merge_codestrap_settings
+    safe_run "[Bootstrap config]"           merge_codestrap_keybindings
+    safe_run "[Bootstrap config]"           merge_codestrap_tasks
+    #safe_run "[Bootstrap config]"            merge_codestrap_extensions
+    safe_run "[Bootstrap GitHub]"           bootstrap_github_if_envs
+    safe_run "[Extensions env]"             manage_extensions_if_envs
     log "Codestrap initialized!"
     ;;
   cli)

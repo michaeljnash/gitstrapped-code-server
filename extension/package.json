@@ -14,7 +14,7 @@
     "vsce": "^2.15.0"
   },
   "scripts": {
-    "vscode:prepublish": "npm run build || echo 'no build step' && npm prune --production",
+    "vscode:prepublish": "npm run build || echo 'no build step' && npm prune --omit=dev",
     "package": "vsce package",
     "postinstall": "npm rebuild node-pty --runtime=node --force || true"
   },
