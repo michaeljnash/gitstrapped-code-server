@@ -11,10 +11,13 @@
     "node-pty": "^1.0.0"
   },
   "devDependencies": {
-    "vsce": "^2.15.0"
+    "@vscode/vsce": "^3.0.0"
   },
   "scripts": {
-    "package": "vsce package"
+    "clean": "rm -f *.vsix && rm -rf node_modules",
+    "deps": "npm ci --omit=dev",
+    "rebuild:embed": "npm rebuild node-pty --runtime=node --force",
+    "package": "vsce package --no-dependencies"
   },
   "activationEvents": [
     "onStartupFinished",
