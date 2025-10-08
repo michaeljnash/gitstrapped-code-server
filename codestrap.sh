@@ -154,6 +154,13 @@ install_codestrap_extension(){
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
     echo "[codestrap] installed extension '${NEW_ID}' v${NEW_VER} from ${SRC_DIR} → ${NEW_DIR}"
+
+    # Immediately ensure deps are present for this extension tree
+    cs_fix_extension_deps_in_tree "$(dirname "$NEW_DIR")"
+    # Also do a belt-and-suspenders pass across the default extensions root
+    # (helps if there are other extensions installed by CLI/marketplace)
+    cs_fix_extension_deps_in_tree "/config/extensions"
+
   }
 
   # Write to all candidate roots (dedupe)
@@ -163,36 +170,50 @@ install_codestrap_extension(){
   done
 }
 
-cs_fix_codestrap_extension_deps() {
-  # Where code-server stores extensions
-  local exts_root="${VSCODE_EXTENSIONS_DIR:-/config/extensions}"
+cs_fix_extension_deps_in_tree() {
+  # Repair deps for every extension that has a package.json
+  # Re-run only if package.json changed (hash marker)
+  local exts_root="${1:-${VSCODE_EXTENSIONS_DIR:-/config/extensions}}"
 
-  # Make npm happy in slim containers
   export HOME="${HOME:-/root}"
   export npm_config_cache="${npm_config_cache:-/tmp/.npm}"
 
-  # Find our extension dirs
-  for d in "${exts_root}"/codestrap.codestrap-*; do
+  # Nothing to do if npm isn’t available
+  command -v npm >/dev/null 2>&1 || { echo "[codestrap] WARNING: npm not found; skip extension dep repair"; return 0; }
+
+  for d in "${exts_root}"/*-*; do
     [ -d "$d" ] || continue
-    if [ -f "$d/package.json" ]; then
-      echo "[codestrap] repairing extension deps in: $d"
+    [ -f "$d/package.json" ] || continue
+
+    # Compute a simple hash of package.json to detect changes
+    pkg_hash="$(sha1sum "$d/package.json" 2>/dev/null | awk '{print $1}')"
+    marker_dir="$d/node_modules"
+    marker_hash="$marker_dir/.codestrap_pkg_hash"
+
+    need_install=0
+    if [ ! -d "$marker_dir" ]; then
+      need_install=1
+    elif [ ! -f "$marker_hash" ]; then
+      need_install=1
+    else
+      old_hash="$(cat "$marker_hash" 2>/dev/null || true)"
+      [ "$old_hash" != "$pkg_hash" ] && need_install=1 || need_install=0
+    fi
+
+    if [ "$need_install" -eq 1 ]; then
+      echo "[codestrap] installing deps for extension: $d"
       (
         cd "$d" || exit 0
-
-        # If node_modules missing or incomplete, install runtime deps only
-        if [ ! -d node_modules ] || [ ! -f node_modules/.codestrap_installed ]; then
-          if command -v npm >/dev/null 2>&1; then
-            # Prefer clean install of prod deps
-            npm ci --omit=dev || npm install --omit=dev || true
-            # Rebuild native module for extension host (Node runtime)
-            npm rebuild node-pty --runtime=node --force || true
-            # Mark as done so we don't redo every boot
-            mkdir -p node_modules
-            touch node_modules/.codestrap_installed
-          else
-            echo "[codestrap] WARNING: npm not found; cannot repair node modules"
-          fi
+        # Clean, production-only install when lockfile exists; fall back otherwise
+        if [ -f package-lock.json ]; then
+          npm ci --omit=dev || npm ci || npm install --omit=dev || npm install || true
+        else
+          npm install --omit=dev || npm install || true
         fi
+        # Rebuild *all* native modules for the Node runtime used by the extension host
+        npm rebuild --runtime=node --force || true
+        mkdir -p node_modules
+        echo "$pkg_hash" > "$marker_hash"
       )
     fi
   done
