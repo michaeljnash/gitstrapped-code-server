@@ -1,7 +1,6 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const http = require('http');
-const YAML = require('yaml');
 
 let cliTerminal = null;
 
