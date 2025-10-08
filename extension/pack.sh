@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Build a VSIX that already contains the compiled node-pty for code-server.
+# POSIX sh compatible (no pipefail).
 
-set -euo pipefail
+set -eu
 
 IMG="lscr.io/linuxserver/code-server:4.101.1"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -11,25 +12,27 @@ docker run --rm \
   -w /ext \
   --entrypoint /bin/sh \
   "$IMG" -lc '
-    set -e
+    set -eu
 
-    # Detect base and install build toolchain + npm
+    # Install toolchain + Node + npm for the build step
     if command -v apk >/dev/null 2>&1; then
-      # Alpine
-      apk add --no-cache make g++ python3 npm
+      # Alpine base
+      apk add --no-cache make g++ python3 nodejs npm
     else
-      # Debian/Ubuntu
+      # Debian/Ubuntu base
       apt-get update
-      apt-get install -y --no-install-recommends make g++ python3 npm
+      apt-get install -y --no-install-recommends make g++ python3 nodejs npm
       rm -rf /var/lib/apt/lists/*
     fi
 
-    # Point node-gyp at code-server\'s embedded Node headers
+    # Point node-gyp at code-server embedded Node headers/ABI
     export npm_config_nodedir=/app/code-server/lib/node
 
-    npm run clean
-    npm run deps
-    npm run rebuild:embed
+    # Clean → install prod deps → rebuild native → package (no extra install)
+    rm -f *.vsix
+    rm -rf node_modules
+    npm ci --omit=dev
+    npm rebuild node-pty --runtime=node --force
 
     npx -y @vscode/vsce package --no-dependencies
   '
