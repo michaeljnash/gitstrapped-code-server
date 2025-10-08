@@ -154,89 +154,12 @@ install_codestrap_extension(){
     chown -R "${PUID:-1000}:${PGID:-1000}" "$NEW_DIR" 2>/dev/null || true
     chmod -R u+rwX,go+rX "$NEW_DIR" 2>/dev/null || true
     echo "[codestrap] installed extension '${NEW_ID}' v${NEW_VER} from ${SRC_DIR} → ${NEW_DIR}"
-
-    # Immediately ensure deps are present for this extension tree
-    cs_fix_extension_deps_in_tree "$(dirname "$NEW_DIR")"
-    # Also do a belt-and-suspenders pass across the default extensions root
-    # (helps if there are other extensions installed by CLI/marketplace)
-    cs_fix_extension_deps_in_tree "/config/extensions"
-
   }
 
   # Write to all candidate roots (dedupe)
   seen=""
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
-  done
-}
-
-cs_fix_extension_deps_in_tree() {
-  # Repair deps for every extension that has a package.json
-  # Re-run only if package.json changed (hash marker)
-  local exts_root="${1:-${VSCODE_EXTENSIONS_DIR:-/config/extensions}}"
-
-  # prefer running as the code-server user so perms match at runtime
-  local RUN_AS=""
-  if command -v s6-setuidgid >/dev/null 2>&1; then
-    RUN_AS="s6-setuidgid ${SUDO_USER:-abc}"
-  elif command -v su-exec >/dev/null 2>&1; then
-    RUN_AS="su-exec ${PUID:-1000}:${PGID:-1000}"
-  fi
-
-  # We need npm available
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "[codestrap] WARNING: npm not found; skip extension dep repair"
-    return 0
-  fi
-
-  # npm cache in a writable tmp to avoid permission weirdness
-  export npm_config_cache="${npm_config_cache:-/tmp/.npm}"
-
-  for d in "${exts_root}"/*-*; do
-    [ -d "$d" ] || continue
-    [ -f "$d/package.json" ] || continue
-
-    # Compute a simple hash of package.json to detect changes
-    pkg_hash="$(sha1sum "$d/package.json" 2>/dev/null | awk '{print $1}')"
-    marker_dir="$d/node_modules"
-    marker_hash="$marker_dir/.codestrap_pkg_hash"
-
-    need_install=0
-    if [ ! -d "$marker_dir" ]; then
-      need_install=1
-    elif [ ! -f "$marker_hash" ]; then
-      need_install=1
-    else
-      old_hash="$(cat "$marker_hash" 2>/dev/null || true)"
-      [ "$old_hash" != "$pkg_hash" ] && need_install=1 || need_install=0
-    fi
-
-    if [ "$need_install" -eq 1 ]; then
-      echo "[codestrap] installing deps for extension: $d"
-      (
-        cd "$d" || exit 0
-        # run the install as the non-root user when possible
-        _cmd_install='
-          set -e
-          if [ -f package-lock.json ]; then
-            npm ci --omit=dev || npm ci || npm install --omit=dev || npm install
-          else
-            npm install --omit=dev || npm install
-          fi
-          # Rebuild all native modules against the Node runtime used by the extension host
-          npm rebuild --runtime=node --force || true
-          mkdir -p node_modules
-        '
-        if [ -n "$RUN_AS" ]; then
-          # shellcheck disable=SC2016
-          $RUN_AS sh -lc "$_cmd_install"
-        else
-          sh -lc "$_cmd_install"
-        fi
-        echo "$pkg_hash" > "$marker_hash"
-        chown -R "${PUID:-1000}:${PGID:-1000}" "$d/node_modules" 2>/dev/null || true
-      )
-    fi
   done
 }
 
@@ -2906,21 +2829,21 @@ manage_extensions_if_envs(){
 case "${1:-init}" in
   init)
     RUN_MODE="init"
-    safe_run "[Permissions]"                chown_necessary_dirs
-    safe_run "[CLI shim]"                   install_cli_shim
-    safe_run "[Restart gate]"               install_restart_gate
-    safe_run "[Codestrap extension]"        install_codestrap_extension
-    safe_run "[Codestrap UI]"               write_codestrap_login
-    safe_run "[Default password]"           init_default_password_if_env
-    safe_run "[Sudo default password]"      init_default_sudo_password_if_env
-    safe_run "[Sudo password policy]"       enforce_policy_permissions
-    safe_run "[Apply sudo hash]"            apply_sudo_hash_if_present
-    safe_run "[Bootstrap config]"           merge_codestrap_settings
-    safe_run "[Bootstrap config]"           merge_codestrap_keybindings
-    safe_run "[Bootstrap config]"           merge_codestrap_tasks
-    #safe_run "[Bootstrap config]"            merge_codestrap_extensions
-    safe_run "[Bootstrap GitHub]"           bootstrap_github_if_envs
-    safe_run "[Extensions env]"             manage_extensions_if_envs
+    safe_run "[Permissions]"             chown_necessary_dirs
+    safe_run "[CLI shim]"                install_cli_shim
+    safe_run "[Restart gate]"            install_restart_gate
+    safe_run "[Codestrap extension]"     install_codestrap_extension
+    safe_run "[Codestrap UI]"            write_codestrap_login
+    safe_run "[Default password]"        init_default_password_if_env
+    safe_run "[Sudo default password]"   init_default_sudo_password_if_env
+    safe_run "[Sudo password policy]"    enforce_policy_permissions
+    safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
+    safe_run "[Bootstrap config]"        merge_codestrap_settings
+    safe_run "[Bootstrap config]"        merge_codestrap_keybindings
+    safe_run "[Bootstrap config]"        merge_codestrap_tasks
+    #safe_run "[Bootstrap config]"        merge_codestrap_extensions
+    safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
+    safe_run "[Extensions env]"          manage_extensions_if_envs
     log "Codestrap initialized!"
     ;;
   cli)
