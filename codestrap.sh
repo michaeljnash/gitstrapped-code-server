@@ -175,11 +175,22 @@ cs_fix_extension_deps_in_tree() {
   # Re-run only if package.json changed (hash marker)
   local exts_root="${1:-${VSCODE_EXTENSIONS_DIR:-/config/extensions}}"
 
-  export HOME="${HOME:-/root}"
-  export npm_config_cache="${npm_config_cache:-/tmp/.npm}"
+  # prefer running as the code-server user so perms match at runtime
+  local RUN_AS=""
+  if command -v s6-setuidgid >/dev/null 2>&1; then
+    RUN_AS="s6-setuidgid ${SUDO_USER:-abc}"
+  elif command -v su-exec >/dev/null 2>&1; then
+    RUN_AS="su-exec ${PUID:-1000}:${PGID:-1000}"
+  fi
 
-  # Nothing to do if npm isn’t available
-  command -v npm >/dev/null 2>&1 || { echo "[codestrap] WARNING: npm not found; skip extension dep repair"; return 0; }
+  # We need npm available
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "[codestrap] WARNING: npm not found; skip extension dep repair"
+    return 0
+  fi
+
+  # npm cache in a writable tmp to avoid permission weirdness
+  export npm_config_cache="${npm_config_cache:-/tmp/.npm}"
 
   for d in "${exts_root}"/*-*; do
     [ -d "$d" ] || continue
@@ -204,16 +215,26 @@ cs_fix_extension_deps_in_tree() {
       echo "[codestrap] installing deps for extension: $d"
       (
         cd "$d" || exit 0
-        # Clean, production-only install when lockfile exists; fall back otherwise
-        if [ -f package-lock.json ]; then
-          npm ci --omit=dev || npm ci || npm install --omit=dev || npm install || true
+        # run the install as the non-root user when possible
+        _cmd_install='
+          set -e
+          if [ -f package-lock.json ]; then
+            npm ci --omit=dev || npm ci || npm install --omit=dev || npm install
+          else
+            npm install --omit=dev || npm install
+          fi
+          # Rebuild all native modules against the Node runtime used by the extension host
+          npm rebuild --runtime=node --force || true
+          mkdir -p node_modules
+        '
+        if [ -n "$RUN_AS" ]; then
+          # shellcheck disable=SC2016
+          $RUN_AS sh -lc "$_cmd_install"
         else
-          npm install --omit=dev || npm install || true
+          sh -lc "$_cmd_install"
         fi
-        # Rebuild *all* native modules for the Node runtime used by the extension host
-        npm rebuild --runtime=node --force || true
-        mkdir -p node_modules
         echo "$pkg_hash" > "$marker_hash"
+        chown -R "${PUID:-1000}:${PGID:-1000}" "$d/node_modules" 2>/dev/null || true
       )
     fi
   done
