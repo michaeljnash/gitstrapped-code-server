@@ -511,6 +511,30 @@ sudo_hash_pw(){
   openssl passwd -6 -salt "$_salt" "$_pw"
 }
 
+apply_sudo_hash_if_present(){
+  # Apply the hash from $SUDO_PASS_HASH_PATH to $SUDO_USER if allowed by policy.
+  # Runs at init only (root). No-ops safely if file missing/empty.
+  [ "$RUN_MODE" = "init" ] || return 0
+  [ "$(policy_allow_sudo_change)" = "1" ] || return 0
+  [ -r "$SUDO_PASS_HASH_PATH" ] || return 0
+  [ -s "$SUDO_PASS_HASH_PATH" ] || return 0
+
+  # read full file (support newline-terminated files)
+  HASH="$(cat "$SUDO_PASS_HASH_PATH" | tr -d '\r\n')"
+  [ -n "$HASH" ] || return 0
+
+  # Only apply if we can (need root)
+  if require_root; then
+    # Prefer chpasswd -e (expects an *encrypted* password)
+    if command -v chpasswd >/dev/null 2>&1; then
+      printf '%s:%s\n' "$SUDO_USER" "$HASH" | chpasswd -e >/dev/null 2>&1 || true
+    # Fallback to usermod -p
+    elif command -v usermod >/dev/null 2>&1; then
+      usermod -p "$HASH" "$SUDO_USER" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
 enforce_policy_permissions(){
   allow="$(policy_allow_sudo_change)"
 
@@ -2812,13 +2836,14 @@ case "${1:-init}" in
     safe_run "[Codestrap UI]"            write_codestrap_login
     safe_run "[Default password]"        init_default_password_if_env
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
+    safe_run "[Sudo password policy]"    enforce_policy_permissions
+    safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
     safe_run "[Bootstrap config]"        merge_codestrap_settings
     safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     safe_run "[Bootstrap config]"        merge_codestrap_tasks
     #safe_run "[Bootstrap config]"        merge_codestrap_extensions
     safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
     safe_run "[Extensions env]"          manage_extensions_if_envs
-    safe_run "[Sudo password policy]"    enforce_policy_permissions
     log "Codestrap initialized!"
     ;;
   cli)
