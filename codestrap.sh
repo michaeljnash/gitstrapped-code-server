@@ -2868,7 +2868,6 @@ case "${1:-init}" in
     safe_run "[CLI shim]"                   install_cli_shim
     safe_run "[Restart gate]"               install_restart_gate
     safe_run "[Codestrap extension]"        install_codestrap_extension
-    safe_run "[Codestrap extension deps]"   cs_fix_codestrap_extension_deps
     safe_run "[Codestrap UI]"               write_codestrap_login
     safe_run "[Default password]"           init_default_password_if_env
     safe_run "[Sudo default password]"      init_default_sudo_password_if_env
