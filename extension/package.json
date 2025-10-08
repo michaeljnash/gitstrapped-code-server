@@ -10,6 +10,9 @@
   "dependencies": {
     "node-pty": "^1.0.0"
   },
+  "devDependencies": {
+    "node-pty": "^1.0.0"
+  },
   "activationEvents": [
     "onStartupFinished",
     "onView:codestrap.view",
