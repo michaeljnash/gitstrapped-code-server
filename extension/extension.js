@@ -1,6 +1,7 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const http = require('http');
+const pty = require('node-pty')
 
 let cliTerminal = null;
 let outChan = null;
