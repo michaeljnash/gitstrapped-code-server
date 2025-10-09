@@ -1,0 +1,4 @@
+      --ghpat)
+        shift || true; GH_PAT="${1:-}";;
+      --ghpat=*)
+        GH_PAT="${1#*=}";;

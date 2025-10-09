@@ -359,7 +359,7 @@ cat <<'HLP'
 codestrap — apply a profile + manage auth
 
 Usage:
-  codestrap profile --load <name> [--ghpat <token>]   # Load /config/codestrap/profiles/<name>.profile.json
+  codestrap profile --load <name>   # Load /config/codestrap/profiles/<name>.profile.json
   codestrap passwd                  # Change code-server password (interactive)
   codestrap passwd --set "<pw>" "<pw>"    # Non-interactive password set
   codestrap sudopasswd              # Change sudo password (interactive; policy-permitting)
@@ -2563,17 +2563,17 @@ Profile shape:
 Notes:
 - settings/keybindings/tasks/extensions overwrite current user files.
 - extensions are synced (uninstall non-recommended, then install/update recommended).
-- If the profile includes a "github" section, you MUST pass --ghpat <token>.
+- GitHub token is ALWAYS prompted (no env), and required if github block is present.
 PHELP
         exit 0;;
       --load)
-         shift || true; NAME="${1:-}";;
-       --load=*)
-         NAME="${1#*=}";;
       --ghpat)
         shift || true; GH_PAT="${1:-}";;
       --ghpat=*)
         GH_PAT="${1#*=}";;
+        shift || true; NAME="${1:-}";;
+      --load=*)
+        NAME="${1#*=}";;
       *)
         err "Unknown flag for 'profile': $1"; exit 1;;
     esac

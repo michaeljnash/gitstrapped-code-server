@@ -1,19 +1,121 @@
 @@
--validate_github_username(){ # $1=username
--  u="$1"; [ -n "$u" ] || return 0
-+validate_github_username(){ # accept arg or fall back to $GITHUB_USERNAME
-+  u="${1:-${GITHUB_USERNAME:-}}"; [ -n "$u" ] || return 0
-   code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${u}" || echo "000")"
+-profile_cmd(){
+-  # flags: --load <name>
+-  NAME=""
++profile_cmd(){
++  # flags: --load <name> [--ghpat <token>]
++  NAME=""; GH_PAT=""
+   while [ $# -gt 0 ]; do
+     case "$1" in
 @@
--validate_github_token(){ # $1=token
--  t="$1"; [ -n "$t" ] || return 0
-+validate_github_token(){ # accept arg or fall back to $GITHUB_TOKEN
-+  t="${1:-${GITHUB_TOKEN:-}}"; [ -n "$t" ] || return 0
-   code="$(curl -s -o /dev/null -w "%{http_code}" \
+-      --load)
++      --load)
+         shift || true; NAME="${1:-}";;
+       --load=*)
+         NAME="${1#*=}";;
++      --ghpat)
++        shift || true; GH_PAT="${1:-}";;
++      --ghpat=*)
++        GH_PAT="${1#*=}";;
+       *)
+         err "Unknown flag for 'profile': $1"; exit 1;;
+     esac
+     shift || true
+   done
 @@
- git config --global --add safe.directory "*"
- git config --global user.name "${GIT_NAME:-codestrap}" || true
--if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
-+if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "$GITHUB_TOKEN" || true)"; fi
- git config --global user.email "$GIT_EMAIL" || true
- log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
+-      -h|--help)
++      -h|--help)
+         cat <<'PHELP'
+ Usage:
+-  codestrap profile --load <name>
++  codestrap profile --load <name> [--ghpat <token>]
+ 
+ Loads: /config/codestrap/profiles/<name>.profile.json
+@@
+-Notes:
++Notes:
+ - settings/keybindings/tasks/extensions overwrite current user files.
+ - extensions are synced (uninstall non-recommended, then install/update recommended).
+-- GitHub token is ALWAYS prompted (no env), and required if github block is present.
++- If the profile includes a "github" section, you MUST pass --ghpat <token>.
+ PHELP
+         exit 0;;
+@@
+-  # 5) GitHub bootstrap (prompt for token; never read from env)
+-  if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
+-    if ! is_tty; then
+-      err "GitHub section present but no TTY available for token prompt."
+-      ROLLBACK=1
+-    fi
+-
+-    # read profile values
+-    GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
+-    GIT_NAME="$(jq -r '.github.name // empty' "$FILE")"
+-    GIT_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
+-    # repos as comma-separated for our existing codestrap_run loop
+-    GITHUB_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
+-    REPOS_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
+-    GITHUB_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
+-
+-    # recompute base path using the profile's repos-subdir (ignore env)
+-    recompute_base
+-
+-    # Always prompt for token (no env fallback)
+-    if [ $ROLLBACK -eq 0 ]; then
+-      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
+-      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+-      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+-      log "bootstrapping GitHub from profile"
+-      if ! codestrap_run; then
+-        err "GitHub bootstrap failed"
+-        ROLLBACK=1
+-      fi
+-    fi
+-
+-    if [ $ROLLBACK -eq 0 ]; then
+-      # Export + run bootstrap only if still clean
+-      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+-      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+-      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+-
+-      log "bootstrapping GitHub from profile"
+-      if ! codestrap_run; then
+-        err "GitHub bootstrap failed"
+-        ROLLBACK=1
+-      fi
+-    fi
+-  else
+-    [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
+-  fi
++  # 5) GitHub bootstrap (require --ghpat when github block present)
++  if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
++    # read profile values
++    GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
++    GIT_NAME="$(jq -r '.github.name // empty' "$FILE")"
++    GIT_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
++    # repos as comma-separated for our existing codestrap_run loop
++    GITHUB_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
++    REPOS_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
++    GITHUB_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
++
++    # recompute base path using the profile's repos-subdir (ignore env)
++    recompute_base
++
++    # require token via --ghpat
++    if [ -z "${GH_PAT:-}" ]; then
++      err "Profile '${NAME}' includes a github section but no token was provided. Pass --ghpat <token>."
++      ROLLBACK=1
++    else
++      GITHUB_TOKEN="$GH_PAT"
++      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
++      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
++      ORIGIN_GITHUB_TOKEN="arg --ghpat (profile:${NAME})"
++      log "bootstrapping GitHub from profile"
++      if ! codestrap_run; then
++        err "GitHub bootstrap failed"
++        ROLLBACK=1
++      fi
++    fi
++  else
++    [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
++  fi
