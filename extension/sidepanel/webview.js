@@ -134,8 +134,8 @@ $("gh-pull").addEventListener("change", () => {
   const normalize = () => {
     const cur = el.selectionStart;
     let v = el.value;
-    // turn any commas (with optional spaces) into newlines
-    if (/,/.test(v)) v = v.replace(/,+\s*/g, "\n");
+    // turn commas into "comma + newline", but only add a newline if there isn't one already after the comma
+    if (/,/.test(v)) v = v.replace(/,(?!\s*\n)\s*/g, ",\n");
     // collapse multiple blank lines
     v = v.replace(/\n{2,}/g, "\n");
     el.value = v;
