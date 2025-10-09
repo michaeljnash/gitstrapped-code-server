@@ -1,0 +1,184 @@
+#!/usr/bin/env sh
+# apply-anchored-diff.sh — fuzzy/whitespace-tolerant applier for the anchored patch
+# Usage: ./apply-anchored-diff.sh <target-file> <anchored.patch>
+set -eu
+
+fatal(){ printf '%s\n' "ERROR: $*" >&2; exit 2; }
+need(){ command -v "$1" >/dev/null 2>&1 || fatal "missing dependency: $1"; }
+[ $# -eq 2 ] || fatal "usage: $0 <target-file> <anchored.patch>"
+TGT="$1"; PATCH="$2"
+[ -f "$TGT" ]   || fatal "target not found: $TGT"
+[ -f "$PATCH" ] || fatal "patch not found: $PATCH"
+need awk; need sed
+
+BKP="${TGT}.bak.$(date +%Y%m%d-%H%M%S)"
+cp -f "$TGT" "$BKP"
+echo "Backup: $BKP"
+
+# parse anchored patch into a machine-friendly stream
+HUNKS="$(mktemp)"; : >"$HUNKS"
+awk '
+  BEGIN{inh=0}
+  function flush(){
+    if(!inh) return
+    print "---HUNK---"
+    print "OLD:"
+    for(i=1;i<=o;i++) print old[i]
+    print "NEW:"
+    for(i=1;i<=n;i++) print neu[i]
+    print "CTX_BEFORE:"; print ctxb
+    print "CTX_AFTER:";  print ctxa
+    inh=0; o=0; n=0; delete old; delete neu; ctxb=""; ctxa=""
+  }
+  /^@@[[:space:]]*$/ { flush(); inh=1; next }
+  {
+    if(!inh) next
+    L=$0
+    if(L ~ /^-/){ sub(/^-/, "", L); old[++o]=L }
+    else if(L ~ /^\+/){ sub(/^\+/, "", L); neu[++n]=L }
+    else { t=L; gsub(/^[ \t]+|[ \t]+$/,"",t); if(t!=""){ if(ctxb=="") ctxb=t; ctxa=t } }
+  }
+  END{ flush() }
+' "$PATCH" >>"$HUNKS"
+
+# apply one hunk
+apply_hunk() {
+  tgt="$1"; out="$2"; oldblock="$3"; newblock="$4"; ctxb="$5"; ctxa="$6"
+
+  o="$(printf '%s' "$oldblock" | awk "{print \$0}")"
+  n="$(printf '%s' "$newblock" | awk "{print \$0}")"
+
+  # Skip pure no-ops (OLD == NEW when normalized)
+  onorm="$(printf '%s\n' "$o" | awk '{s=$0; gsub(/[ \t]+$/,"",s); gsub(/^[ \t]+/,"",s); gsub(/[ \t][ \t]+/," ",s); if(s!="")print s}')"
+  nnorm="$(printf '%s\n' "$n" | awk '{s=$0; gsub(/[ \t]+$/,"",s); gsub(/^[ \t]+/,"",s); gsub(/[ \t][ \t]+/," ",s); if(s!="")print s}')"
+  if [ "$(printf '%s\n' "$onorm")" = "$(printf '%s\n' "$nnorm")" ]; then
+    echo "SKIP: no-op hunk"
+    cp -f "$tgt" "$out"
+    return 0
+  fi
+
+  awk -v OFS="" \
+      -v ctxb="$(printf '%s' "$ctxb" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      -v ctxa="$(printf '%s' "$ctxa" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      '
+    function trim(s){ gsub(/^[ \t]+|[ \t]+$/,"",s); return s }
+    function norm(s){ s=trim(s); gsub(/[ \t][ \t]+/," ",s); return s }
+    BEGIN{
+      # read STDIN blocks: first OLD then NEW, separated by a line of just "\t--SEP--\t"
+      mode=0
+    }
+    ' /dev/null > /dev/null 2>&1
+
+  TMPSEP="$(mktemp)"; printf '\t--SEP--\t\n' > "$TMPSEP"
+
+  TMPIN="$(mktemp)"
+  { printf '%s\n' "$o"; cat "$TMPSEP"; printf '%s\n' "$n"; } > "$TMPIN"
+
+  awk -v OFS="" \
+      -v ctxb="$(printf '%s' "$ctxb" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      -v ctxa="$(printf '%s' "$ctxa" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      -v TGTFILE="$tgt" '
+    function trim(s){ gsub(/^[ \t]+|[ \t]+$/,"",s); return s }
+    function norm(s){ s=trim(s); gsub(/[ \t][ \t]+/," ",s); return s }
+
+    BEGIN{
+      mode=0
+      # read OLD then NEW from stdin (split by TAB-SEP)
+      olen=0; nlen=0
+      while((getline L)<='"'"$TMPIN"'"'){ # overridden below by shell substitution
+        # no-op here (we replace by actual content in the next awk — keep structure readable)
+      }
+    }
+  ' > /dev/null 2>&1
+
+  # actually load OLD/NEW lines (two-pass to keep /bin/sh portable)
+  O_TMP="$(mktemp)"; N_TMP="$(mktemp)"
+  awk 'BEGIN{sep=0} { if($0=="\t--SEP--\t"){sep=1; next} if(!sep) print; }' "$TMPIN" > "$O_TMP"
+  awk 'BEGIN{sep=0} { if($0=="\t--SEP--\t"){sep=1; next} if(sep) print; }' "$TMPIN" > "$N_TMP"
+
+  awk -v OFS="" \
+      -v ctxb="$(printf '%s' "$ctxb" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      -v ctxa="$(printf '%s' "$ctxa" | sed -e 's/[[:space:]]\+$//' -e 's/^[[:space:]]\+//' -e 's/[[:space:]][[:space:]]\+/ /g')" \
+      -v OFILE="$O_TMP" -v NFILE="$N_TMP" \
+      '
+        function trim(s){ gsub(/^[ \t]+|[ \t]+$/,"",s); return s }
+        function norm(s){ s=trim(s); gsub(/[ \t][ \t]+/," ",s); return s }
+
+        BEGIN{
+          # load OLD
+          olen=0
+          while((getline L < OFILE)>0){ Lnorm=norm(L); if(Lnorm!=""){ O[++olen]=Lnorm; Oraw[olen]=L } }
+          close(OFIL E)
+          # load NEW
+          nlen=0
+          while((getline L < NFILE)>0){ Nraw[++nlen]=L }
+          close(NFILE)
+
+          # load target
+          R=0; N=0
+          while((getline Rline < ARGV[1])>0){
+            raw[++R]=Rline
+            t=norm(Rline)
+            if(t!=""){ NL[++N]=t; mapN[N]=R }
+          }
+          delete ARGV[1]
+          if(R==0){ print "FAIL: target empty" >"/dev/stderr"; exit 55 }
+
+          # find matches
+          cand=0; best=-1
+          for(s=1;s<=N-olen+1;s++){
+            ok=1
+            for(j=1;j<=olen;j++){ if(NL[s+j-1]!=O[j]){ ok=0; break } }
+            if(!ok) continue
+            score=0
+            if(ctxb!=""){bi=s-1; if(bi>=1 && NL[bi]==ctxb) score++}
+            if(ctxa!=""){ai=s+olen; if(ai<=N && NL[ai]==ctxa) score++}
+            C[++cand]=s; S[cand]=score
+            if(score>best) best=score
+          }
+
+          if(cand==0){ print "FAIL: no fuzzy match for hunk" >"/dev/stderr"; exit 52 }
+
+          kept=0
+          for(i=1;i<=cand;i++){ if(S[i]==best) K[++kept]=C[i] }
+          if(kept!=1){ printf "AMBIGUOUS: %d candidates; add more unchanged context.\n", kept >"/dev/stderr"; exit 53 }
+
+          s=K[1]; first=mapN[s]; last=mapN[s+olen-1]
+
+          # write output
+          for(i=1;i<first;i++) print raw[i]
+          for(i=1;i<=nlen;i++) print Nraw[i]
+          for(i=last+1;i<=R;i++) print raw[i]
+        }
+      ' "$tgt" > "$out" || return $?
+
+  rm -f "$TMPSEP" "$TMPIN" "$O_TMP" "$N_TMP" 2>/dev/null || true
+  return 0
+}
+
+H=0; OK=0; FAIL=0
+while IFS= read -r line; do
+  [ "$line" = "---HUNK---" ] || continue
+  read -r _ || true # OLD:
+  OLD=""; while IFS= read -r L && [ "$L" != "NEW:" ]; do OLD="${OLD}${L}\n"; done
+  NEW=""; while IFS= read -r L && [ "$L" != "CTX_BEFORE:" ]; do NEW="${NEW}${L}\n"; done
+  read -r CTXB || true
+  read -r _ || true # CTX_AFTER:
+  read -r CTXA || true
+  H=$((H+1)); echo "HUNK #$H…"
+  TMP_OUT="$(mktemp)"
+  if apply_hunk "$TGT" "$TMP_OUT" "$OLD" "$NEW" "$CTXB" "$CTXA"; then
+    if [ ! -s "$TMP_OUT" ]; then
+      echo "FAIL: guard — empty output; leaving original intact." >&2
+      rm -f "$TMP_OUT"; FAIL=$((FAIL+1)); continue
+    fi
+    mv -f "$TMP_OUT" "$TGT"; OK=$((OK+1))
+  else
+    rm -f "$TMP_OUT" 2>/dev/null || true
+    FAIL=$((FAIL+1))
+  fi
+done < "$HUNKS"
+
+rm -f "$HUNKS" 2>/dev/null || true
+echo "Done: applied=$OK failed=$FAIL"
+[ "$FAIL" -eq 0 ] || exit 1
