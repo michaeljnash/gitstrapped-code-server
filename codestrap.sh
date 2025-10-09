@@ -2738,8 +2738,6 @@ PHELP
         err "GitHub bootstrap failed"
         ROLLBACK=1
       fi
-    else
-      log "skipping GitHub bootstrap due to earlier errors"
     fi
   else
     [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
