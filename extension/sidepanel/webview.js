@@ -19,22 +19,7 @@ function setButtonLoading(btnId, isLoading) {
   }
 }
 
-// --- small helpers for repo field ---
-function csvToMultiline(s){
-  return (s||"")
-    .split(",")
-    .map(x=>x.trim())
-    .filter(Boolean)
-    .join("\n");
-}
-function multilineToCSV(s){
-  // accept commas OR newlines, collapse spaces, de-dupe empties
-  return (s||"")
-    .split(/\r?\n|,/)
-    .map(x=>x.trim())
-    .filter(Boolean)
-    .join(",");
-}
+// --- helper for repo field sizing ---
 function autoResizeTextarea(el){
   if (!el) return;
   el.style.height = "auto";                 // allow shrink
@@ -99,7 +84,11 @@ function setGhFields({user, token, name, email, repos, pull}, {disable=false} = 
   $("gh-token").value = token;
   $("git-name").value = name;
   $("git-email").value= email;
-  $("gh-repos").value = csvToMultiline(repos);
+  // In ENV (disabled) mode: show CSV as comma+newline to keep commas visible.
+  // In manual mode: show exactly what the user had typed (do not normalize).
+  $("gh-repos").value = disable
+    ? String(repos || "").replace(/,\s*/g, ",\n")
+    : String(repos || "");
   autoResizeTextarea($("gh-repos"));
   if (typeof pull === "boolean") $("gh-pull").checked = pull;
 
@@ -364,8 +353,8 @@ $("gh-run").onclick = () => {
     token:    fill_env ? "" : $("gh-token").value,
     name:     fill_env ? "" : $("git-name").value,
     email:    fill_env ? "" : $("git-email").value,
-    // CLI expects comma-separated specs
-    repos:    fill_env ? "" : multilineToCSV($("gh-repos").value),
+    // CLI expects comma-separated specs; strip newlines only.
+    repos:    fill_env ? "" : $("gh-repos").value.replace(/\s*\n\s*/g, ""),
     pull:     fill_env ? undefined : $("gh-pull").checked
   });
 };
