@@ -53,6 +53,21 @@ const ENV_GH = {
   })()
 };
 
+// If there’s nothing to fill from env, hide the "Use env vars" toggle entirely
+(() => {
+  const anyEnv =
+    !!(ENV_GH.user || ENV_GH.token || ENV_GH.name || ENV_GH.email || ENV_GH.repos ||
+       String(INITIAL.GITHUB_PULL || "").trim()); // presence of var, even if "false"
+  const row = $("gh-env-row");
+  if (row && !anyEnv) {
+    row.style.display = "none";
+    // also make sure inputs remain enabled
+    ["gh-user","gh-token","git-name","git-email","gh-repos","gh-pull"].forEach(id=>{
+      const el=$(id); if (el) el.disabled = false;
+    });
+  }
+})();
+
 // What the user has typed (persisted while "Use env vars" toggles on/off)
 const MANUAL_GH = { user:"", token:"", name:"", email:"", repos:"", pull:$("gh-pull").checked };
 

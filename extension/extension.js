@@ -215,7 +215,7 @@ class ViewProvider {
         }
         case 'github:run': {
           const args=['github'];
-          if (msg.auto) {
+          if (msg.fill_env || msg.auto) {
             args.push('--auto');
           } else {
             if (msg.username) args.push('-u', msg.username);
