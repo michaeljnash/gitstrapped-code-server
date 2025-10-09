@@ -24,10 +24,12 @@ is_tty(){ has_tty; }
 
 red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
 ylw(){ is_tty && printf "\033[33m%s\033[0m" "$1" || printf "%s" "$1"; }
+grn(){ is_tty && printf "\033[32m%s\033[0m" "$1" || printf "%s" "$1"; }
 
 log(){  printf "%s %s\n" "${CTX_TAG:-[codestrap]}" "$*"; }
 warn(){ printf "%s\n" "$(ylw "${CTX_TAG:-[codestrap]}[WARN] $*")" >&2; }
 err(){  printf "%s\n" "$(red "${CTX_TAG:-[codestrap]}[ERROR] $*")" >&2; }
+success(){  printf "%s\n" "$(grn "${CTX_TAG:-[codestrap]}[SUCCESS] $*")" >&2; }
 
 # ----- run-mode + generic helpers -----
 # Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
@@ -2723,8 +2725,8 @@ PHELP
   fi
 
   tx_commit
+  success "Loaded '${NAME}' profile successfully!"
   CTX_TAG=""
-  log "profile '${NAME}' applied"
   trigger_window_reload
   return 0
 }
