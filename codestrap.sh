@@ -356,65 +356,16 @@ prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool
 
 print_help(){
 cat <<'HLP'
-codestrap — bootstrap GitHub + manage code-server auth
+codestrap — apply a profile + manage auth
 
-Usage (subcommands):
-  codestrap                      # Interactive hub: ask GitHub? Config? Change password?
-  codestrap profile --load <name># NEW: Load a profile file: /config/codestrap/profiles/<name>.profile.json
-  codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--auto)
-  codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
-  codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
-  codestrap passwd               # Interactive password change (secure prompts)
-  codestrap passwd --set "<pw>" "<pw>"   # Non-interactive (pw + confirm)
-  codestrap -h | --help          # Help
-  codestrap -v | --version       # Version
-
-NOTE: For any flag that expects a boolean or scope value, you can use the first letter:
-  true/false → t/f, yes/no → y/n, all/missing → a/m.
-
-Flags for 'codestrap github' (hyphenated only; envs shown at right):
-  -u, --username <val>           → GITHUB_USERNAME
-  -t, --token <val>              → GITHUB_TOKEN   (classic; scopes: user:email, admin:public_key)
-  -n, --name <val>               → GIT_NAME
-  -e, --email <val>              → GIT_EMAIL
-  -r, --repos "<specs>"          → GITHUB_REPOS   (owner/repo, owner/repo#branch, https://github.com/owner/repo)
-  -p, --pull <true|false>        → GITHUB_PULL    (default: true)
-  -a, --auto                     Use environment variables only (no prompts)
-
-Env-only (no flags):
-  WORKSPACE_DIR (default: /config/workspace)
-  REPOS_SUBDIR  (default: repos; RELATIVE to WORKSPACE_DIR)
-
-Flags for 'codestrap config' (booleans; supply only the ones you want to skip prompts for):
-  -s, --settings <true|false>    Merge strapped settings.json into user settings.json
-  -k, --keybindings <true|false> Merge strapped keybindings.json into user keybindings.json
-  -e, --extensions <true|false>  Merge strapped extensions.json into user extensions.json
-                                 (Interactive default: ask; Non-interactive default: true)
-
-Flags for 'codestrap extensions':
-  -i, --install <all|missing|a|m>     Install/update extensions from merged extensions.json:
-                                      all/a     → install missing + update already-installed to latest
-                                      missing/m → install only those not yet installed
-  -u, --uninstall <all|missing|a|m>   Uninstall extensions:
-                                      all/a     → uninstall *all* installed extensions
-                                      missing/m → uninstall extensions NOT in recommendations (cleanup)
-  (No flags) → interactive: choose install or uninstall, then scope.
-
-Env vars (init-time automation; uninstall runs BEFORE install):
-  EXTENSIONS_UNINSTALL=<all|a|missing|m|none>   # default none
-  EXTENSIONS_INSTALL=<all|a|missing|m|none>     # default none
-
-Interactive tip (github):
-  At any 'github' prompt you can type -a or --auto to use the corresponding environment variable (the hint appears only if that env var is set).
-
-Examples:
-  codestrap
-  codestrap profile --load default
-  codestrap github -u alice -t ghp_xxx -r "alice/app#main, org/infra"
-  codestrap config -s t -k f -e t
-  codestrap extensions -i all
-  codestrap extensions -i m -u m          # sync to recommendations
-  codestrap passwd
+Usage:
+  codestrap profile --load <name>   # Load /config/codestrap/profiles/<name>.profile.json
+  codestrap passwd                  # Change code-server password (interactive)
+  codestrap passwd --set "<pw>" "<pw>"    # Non-interactive password set
+  codestrap sudopasswd              # Change sudo password (interactive; policy-permitting)
+  codestrap sudopasswd --set "<pw>" "<pw>"# Non-interactive sudo password set
+  codestrap -h | --help
+  codestrap -v | --version
 HLP
 }
 
@@ -1026,9 +977,13 @@ clone_one(){
 
 
 codestrap_run(){
-  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
-  GIT_NAME="${GIT_NAME:-${GITHUB_USERNAME:-}}"; GIT_EMAIL="${GIT_EMAIL:-}"
-  GITHUB_REPOS="${GITHUB_REPOS:-}"; GITHUB_PULL="${GITHUB_PULL:-true}"
+  # Use variables set by profile_cmd only; do not read env defaults.
+  : "${GITHUB_USERNAME:=}"
+  : "${GITHUB_TOKEN:=}"
+  : "${GIT_NAME:=${GITHUB_USERNAME}}"
+  : "${GIT_EMAIL:=}"
+  : "${GITHUB_REPOS:=}"
+  : "${GITHUB_PULL:=true}"
 
   if ! validate_github_username; then
     abort_or_continue "[Bootstrap GitHub]" "GitHub username validation failed."
@@ -2646,6 +2601,9 @@ PHELP
   J_EXTS="$(jq -c '."extensions" // empty' "$FILE")"
   J_GH="$(jq -c '."github" // empty' "$FILE")"
 
+  # Ensure no env leakage into GitHub/bootstrap path
+  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+
   CTX_TAG="[Profile: ${NAME}]"
 
   # Begin a transaction
@@ -2713,17 +2671,27 @@ PHELP
       ROLLBACK=1
     fi
 
-    # extract fields (username/name/email/repos/etc) as you already do...
+    # read profile values
+    GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
+    GIT_NAME="$(jq -r '.github.name // empty' "$FILE")"
+    GIT_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
+    # repos as comma-separated for our existing codestrap_run loop
+    GITHUB_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
+    REPOS_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
+    GITHUB_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
+
+    # recompute base path using the profile's repos-subdir (ignore env)
+    recompute_base
 
     # Always prompt for token (no env fallback)
     if [ $ROLLBACK -eq 0 ]; then
-      PROMPT_TAG="[Profile GitHub] ? "
-      TOKEN="$(prompt_secret "GitHub token (classic; scopes: user:email, admin:public_key): ")"
-      if [ -z "$TOKEN" ]; then
-        err "GitHub token required when github section is present in the profile."
+      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
+      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+      log "bootstrapping GitHub from profile"
+      if ! codestrap_run; then
+        err "GitHub bootstrap failed"
         ROLLBACK=1
-      else
-        GITHUB_TOKEN="$TOKEN"
       fi
     fi
 
