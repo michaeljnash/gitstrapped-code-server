@@ -2725,7 +2725,7 @@ PHELP
   fi
 
   tx_commit
-  success "Loaded '${NAME}' profile successfully!"
+  success "Loaded profile '${NAME}'"
   CTX_TAG=""
   trigger_window_reload
   return 0
