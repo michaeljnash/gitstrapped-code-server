@@ -40,19 +40,53 @@ $("sudo-pw-eye").onclick   = () => togglePw("sudo-pw");
 $("sudo-pw2-eye").onclick  = () => togglePw("sudo-pw2");
 $("gh-token-eye").onclick = () => togglePw("gh-token");
 
-// prefill GitHub fields from env if provided
-(function prefill(){
-  if (INITIAL.GITHUB_USERNAME) $("gh-user").value = INITIAL.GITHUB_USERNAME;
-  if (INITIAL.GITHUB_TOKEN)    $("gh-token").value = INITIAL.GITHUB_TOKEN;
-  if (INITIAL.GIT_NAME)        $("git-name").value = INITIAL.GIT_NAME;
-  if (INITIAL.GIT_EMAIL)       $("git-email").value = INITIAL.GIT_EMAIL;
-  if (INITIAL.GITHUB_REPOS)    $("gh-repos").value = INITIAL.GITHUB_REPOS;
+// --- GitHub env  manual snapshot handling ---
+const ENV_GH = {
+  user:  INITIAL.GITHUB_USERNAME || "",
+  token: INITIAL.GITHUB_TOKEN    || "",
+  name:  INITIAL.GIT_NAME        || "",
+  email: INITIAL.GIT_EMAIL       || "",
+  repos: INITIAL.GITHUB_REPOS    || "",
+  pull:  (()=>{
+    const v = String(INITIAL.GITHUB_PULL || "").trim().toLowerCase();
+    return ['1','y','yes','t','true','on'].includes(v);
+  })()
+};
 
-  if (INITIAL.GITHUB_PULL) {
-    const v = String(INITIAL.GITHUB_PULL).trim().toLowerCase();
-    $("gh-pull").checked = ['1','y','yes','t','true','on'].includes(v);
-  }
-})();
+// What the user has typed (persisted while "Use env vars" toggles on/off)
+const MANUAL_GH = { user:"", token:"", name:"", email:"", repos:"", pull:$("gh-pull").checked };
+
+function setGhFields({user, token, name, email, repos, pull}, {disable=false} = {}){
+  $("gh-user").value  = user;
+  $("gh-token").value = token;
+  $("git-name").value = name;
+  $("git-email").value= email;
+  $("gh-repos").value = repos;
+  if (typeof pull === "boolean") $("gh-pull").checked = pull;
+
+  // lock/unlock while env is active
+  ["gh-user","gh-token","git-name","git-email","gh-repos","gh-pull"].forEach(id=>{
+    const el=$(id); if (!el) return;
+    el.disabled = !!disable;
+  });
+}
+
+// Track manual edits only when NOT using env vars
+["gh-user","gh-token","git-name","git-email","gh-repos"].forEach(id=>{
+  const el = $(id);
+  el && el.addEventListener("input", () => {
+    if ($("gh-fill-env").checked) return;
+    MANUAL_GH.user  = $("gh-user").value;
+    MANUAL_GH.token = $("gh-token").value;
+    MANUAL_GH.name  = $("git-name").value;
+    MANUAL_GH.email = $("git-email").value;
+    MANUAL_GH.repos = $("gh-repos").value;
+  });
+});
+$("gh-pull").addEventListener("change", () => {
+  if ($("gh-fill-env").checked) return;
+  MANUAL_GH.pull = $("gh-pull").checked;
+});
 
 // submit on enter
 function setupEnterToSubmit(sectionId, buttonId) {
@@ -214,23 +248,43 @@ $("ext-run").onclick = () => {
 });
 
 
-//gh actions
-
-$("gh-auto").onchange = () => {
-  $("gh-fields").style.display = $("gh-auto").checked ? "none" : "block";
+// gh actions
+// Toggle: when ON → fill with env  disable; when OFF → restore manual  enable
+$("gh-fill-env").onchange = () => {
+  if ($("gh-fill-env").checked) {
+    // snapshot what user had before locking (only take if fields are enabled)
+    if (!$("gh-user").disabled) {
+      MANUAL_GH.user  = $("gh-user").value;
+      MANUAL_GH.token = $("gh-token").value;
+      MANUAL_GH.name  = $("git-name").value;
+      MANUAL_GH.email = $("git-email").value;
+      MANUAL_GH.repos = $("gh-repos").value;
+      MANUAL_GH.pull  = $("gh-pull").checked;
+    }
+    setGhFields({
+      user:  ENV_GH.user,
+      token: ENV_GH.token,
+      name:  ENV_GH.name,
+      email: ENV_GH.email,
+      repos: ENV_GH.repos,
+      pull:  ENV_GH.pull
+    }, { disable:true });
+  } else {
+    setGhFields(MANUAL_GH, { disable:false });
+  }
 };
 $("gh-run").onclick = () => {
   setButtonLoading("gh-run", true);
-  const auto = $("gh-auto").checked;
+  const fill_env = $("gh-fill-env").checked;
   vscode.postMessage({
     type: "github:run",
-    auto,
-    username: auto ? "" : $("gh-user").value,
-    token:    auto ? "" : $("gh-token").value,
-    name:     auto ? "" : $("git-name").value,
-    email:    auto ? "" : $("git-email").value,
-    repos:    auto ? "" : $("gh-repos").value,
-    pull:     auto ? undefined : $("gh-pull").checked
+    fill_env,
+    username: fill_env ? "" : $("gh-user").value,
+    token:    fill_env ? "" : $("gh-token").value,
+    name:     fill_env ? "" : $("git-name").value,
+    email:    fill_env ? "" : $("git-email").value,
+    repos:    fill_env ? "" : $("gh-repos").value,
+    pull:     fill_env ? undefined : $("gh-pull").checked
   });
 };
 
