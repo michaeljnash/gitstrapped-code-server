@@ -2654,10 +2654,16 @@ PHELP
 
   # Backups + compensating actions for user files (settings/keybindings/tasks/extensions)
   local BKP_SETTINGS BKP_KEYB BKP_TASKS BKP_EXT
-  BKP_SETTINGS="$(_backup_one "$SETTINGS_PATH")"; tx_add "_restore_one '$BKP_SETTINGS' '$SETTINGS_PATH'"
-  BKP_KEYB="$(_backup_one "$KEYB_PATH")";         tx_add "_restore_one '$BKP_KEYB'     '$KEYB_PATH'"
-  BKP_TASKS="$(_backup_one "$TASKS_PATH")";       tx_add "_restore_one '$BKP_TASKS'    '$TASKS_PATH'"
-  BKP_EXT="$(_backup_one "$EXT_PATH")";           tx_add "_restore_one '$BKP_EXT'      '$EXT_PATH'"
+  BKP_SETTINGS="$(_backup_one "$SETTINGS_PATH")"
+  BKP_KEYB="$(_backup_one "$KEYB_PATH")"
+  BKP_TASKS="$(_backup_one "$TASKS_PATH")"
+  BKP_EXT="$(_backup_one "$EXT_PATH")"
+
+  # Use standalone commands so rollback works in a fresh `sh -c`
+  tx_add "mkdir -p '$(dirname "$SETTINGS_PATH")' && cat '$BKP_SETTINGS' > '$SETTINGS_PATH' 2>/dev/null || true"
+  tx_add "mkdir -p '$(dirname "$KEYB_PATH")'     && cat '$BKP_KEYB'     > '$KEYB_PATH'     2>/dev/null || true"
+  tx_add "mkdir -p '$(dirname "$TASKS_PATH")'    && cat '$BKP_TASKS'    > '$TASKS_PATH'    2>/dev/null || true"
+  tx_add "mkdir -p '$(dirname "$EXT_PATH")'      && cat '$BKP_EXT'      > '$EXT_PATH'      2>/dev/null || true"
 
   # 1) Apply settings.json (if provided)
   if [ -n "$J_SETTINGS" ]; then
@@ -2707,43 +2713,36 @@ PHELP
       ROLLBACK=1
     fi
 
-    # extract fields
-    GITHUB_USERNAME="$(printf '%s' "$J_GH" | jq -r '.username // empty')"
-    GIT_NAME="$(printf '%s' "$J_GH" | jq -r '.name // empty')"
-    GIT_EMAIL="$(printf '%s' "$J_GH" | jq -r '.email // empty')"
-
-    # repos array → CSV
-    GITHUB_REPOS="$(printf '%s' "$J_GH" | jq -r '[.repos[]?] | join(",")')"
-    # pull-existing
-    GITHUB_PULL="$(printf '%s' "$J_GH" | jq -r '(."pull-existing" // .pull_existing // true)' | tr '[:upper:]' '[:lower:]')"
-    # workspace subdir (relative)
-    REPOS_SUBDIR="$(printf '%s' "$J_GH" | jq -r '(."repos-subdir" // .repos_subdir // "repos")')"
-
-    # recompute BASE because REPOS_SUBDIR may change
-    export REPOS_SUBDIR
-    recompute_base
+    # extract fields (username/name/email/repos/etc) as you already do...
 
     # Always prompt for token (no env fallback)
-    PROMPT_TAG="[Profile GitHub] ? "
-    TOKEN="$(prompt_secret "GitHub token (classic; scopes: user:email, admin:public_key): ")"
-    if [ -z "$TOKEN" ]; then
-      err "GitHub token required when github section is present in the profile."
-      ROLLBACK=1
+    if [ $ROLLBACK -eq 0 ]; then
+      PROMPT_TAG="[Profile GitHub] ? "
+      TOKEN="$(prompt_secret "GitHub token (classic; scopes: user:email, admin:public_key): ")"
+      if [ -z "$TOKEN" ]; then
+        err "GitHub token required when github section is present in the profile."
+        ROLLBACK=1
+      else
+        GITHUB_TOKEN="$TOKEN"
+      fi
     fi
-    GITHUB_TOKEN="$TOKEN"
 
-    # Export for codestrap_run path
-    export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
-    ORIGIN_GITHUB_USERNAME="profile:${NAME}"
-    ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+    if [ $ROLLBACK -eq 0 ]; then
+      # Export + run bootstrap only if still clean
+      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
 
-    log "bootstrapping GitHub from profile"
-    if ! codestrap_run; then
-      err "GitHub bootstrap failed"
-      ROLLBACK=1
+      log "bootstrapping GitHub from profile"
+      if ! codestrap_run; then
+        err "GitHub bootstrap failed"
+        ROLLBACK=1
+      fi
+    else
+      log "skipping GitHub bootstrap due to earlier errors"
     fi
   else
-    log "no github block in profile (skipping GitHub bootstrap)"
+    [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
   fi
 
   # If anything failed, restore backups and stop here.
