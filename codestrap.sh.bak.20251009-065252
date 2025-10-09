@@ -803,8 +803,8 @@ init_default_password_if_env(){
 
 # ===== GitHub validation (fatal on failure) =====
 # ===== GitHub validation (no env; args only) =====
-validate_github_username(){ # accept arg or fall back to $GITHUB_USERNAME
-  u="${1:-${GITHUB_USERNAME:-}}"; [ -n "$u" ] || return 0
+validate_github_username(){ # $1=username
+  u="$1"; [ -n "$u" ] || return 0
   code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${u}" || echo "000")"
   if [ "$code" = "404" ]; then
     err "GitHub username '${u}' appears invalid (HTTP 404)."
@@ -814,8 +814,8 @@ validate_github_username(){ # accept arg or fall back to $GITHUB_USERNAME
     return 1
   fi
 }
-validate_github_token(){ # accept arg or fall back to $GITHUB_TOKEN
-  t="${1:-${GITHUB_TOKEN:-}}"; [ -n "$t" ] || return 0
+validate_github_token(){ # $1=token
+  t="$1"; [ -n "$t" ] || return 0
   code="$(curl -s -o /dev/null -w "%{http_code}" \
     -H "Authorization: token ${t}" \
     -H "Accept: application/vnd.github+json" \
