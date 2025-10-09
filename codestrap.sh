@@ -337,6 +337,7 @@ codestrap — bootstrap GitHub + manage code-server auth
 
 Usage (subcommands):
   codestrap                      # Interactive hub: ask GitHub? Config? Change password?
+  codestrap profile --load <name># NEW: Load a profile file: /config/codestrap/profiles/<name>.profile.json
   codestrap github [flags...]    # GitHub bootstrap (interactive/flags/--auto)
   codestrap config [flags...]    # Config hub (interactive + flags to skip prompts)
   codestrap extensions [flags...]# Install/update/uninstall extensions from extensions.json
@@ -385,6 +386,7 @@ Interactive tip (github):
 
 Examples:
   codestrap
+  codestrap profile --load default
   codestrap github -u alice -t ghp_xxx -r "alice/app#main, org/infra"
   codestrap config -s t -k f -e t
   codestrap extensions -i all
@@ -448,6 +450,9 @@ if [ -z "$CODESTRAP_CONFIG_DIR" ]; then
     CODESTRAP_CONFIG_DIR="$HOME/codestrap"
   fi
 fi
+
+# Profiles dir
+PROFILE_DIR="/config/codestrap/profiles"
 
 # Source files from the resolved directory
 REPO_SETTINGS_SRC="${REPO_SETTINGS_SRC:-$CODESTRAP_CONFIG_DIR/settings.json}"
@@ -927,6 +932,16 @@ write_inplace(){
     install -m 644 -D "$tmp" "$dest"
     chown "${PUID:-1000}:${PGID:-1000}" "$dest" 2>/dev/null || true
   fi
+}
+
+# pretty-print JSON to a file (creates parent dir, preserves inode if exists)
+write_json_pretty(){ # usage: write_json_pretty '<json-string>' <dest>
+  _json="$1"; _dest="$2"
+  _tmp="$(mktemp)"
+  printf '%s' "$_json" | jq '.' >"$_tmp" 2>/dev/null || { rm -f "$_tmp"; err "invalid JSON for $_dest"; return 1; }
+  write_inplace "$_tmp" "$_dest"
+  rm -f "$_tmp" 2>/dev/null || true
+  chown "${PUID}:${PGID}" "$_dest" 2>/dev/null || true
 }
 
 # ===== top-of-file error banner =====
@@ -2358,6 +2373,154 @@ EHELP
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
 }
 
+# ===== profile loader =====
+profile_cmd(){
+  # flags: --load <name>
+  NAME=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help)
+        cat <<'PHELP'
+Usage:
+  codestrap profile --load <name>
+
+Loads: /config/codestrap/profiles/<name>.profile.json
+
+Profile shape:
+{
+  "settings": { ... },
+  "keybindings": [ ... ],
+  "tasks": { ... },
+  "extensions": [ "publisher.id", ... ],
+  "github": {
+    "username": "alice",
+    "name": "Alice",
+    "email": "alice@example.com",
+    "repos": ["owner/repo", "owner/repo#branch"],
+    "repos-subdir": "repos",
+    "pull-existing": true
+  }
+}
+
+Notes:
+- settings/keybindings/tasks/extensions overwrite current user files.
+- extensions are synced (uninstall non-recommended, then install/update recommended).
+- GitHub token is ALWAYS prompted (no env), and required if github block is present.
+PHELP
+        exit 0;;
+      --load)
+        shift || true; NAME="${1:-}";;
+      --load=*)
+        NAME="${1#*=}";;
+      *)
+        err "Unknown flag for 'profile': $1"; exit 1;;
+    esac
+    shift || true
+  done
+
+  [ -n "$NAME" ] || { err "'codestrap profile' requires --load <name>"; exit 2; }
+
+  FILE="${PROFILE_DIR}/${NAME}.profile.json"
+  [ -r "$FILE" ] || { err "profile not found: $FILE"; exit 2; }
+
+  # Validate and read once
+  jq -e . "$FILE" >/dev/null 2>&1 || { err "profile JSON invalid: $FILE"; exit 2; }
+
+  # Extract sections as compact JSON for writes
+  J_SETTINGS="$(jq -c '."settings" // empty' "$FILE")"
+  J_KEYB="$(jq -c '."keybindings" // empty' "$FILE")"
+  J_TASKS="$(jq -c '."tasks" // empty' "$FILE")"
+  J_EXTS="$(jq -c '."extensions" // empty' "$FILE")"
+  J_GH="$(jq -c '."github" // empty' "$FILE")"
+
+  CTX_TAG="[Profile: ${NAME}]"
+
+  # 1) Apply settings.json
+  if [ -n "$J_SETTINGS" ]; then
+    log "apply settings.json"
+    write_json_pretty "$J_SETTINGS" "$SETTINGS_PATH" || exit 1
+  else
+    log "no settings in profile (leaving existing)"
+  fi
+
+  # 2) Apply keybindings.json
+  if [ -n "$J_KEYB" ]; then
+    log "apply keybindings.json"
+    write_json_pretty "$J_KEYB" "$KEYB_PATH" || exit 1
+  else
+    log "no keybindings in profile (leaving existing)"
+  fi
+
+  # 3) Apply tasks.json
+  if [ -n "$J_TASKS" ]; then
+    log "apply tasks.json"
+    write_json_pretty "$J_TASKS" "$TASKS_PATH" || exit 1
+  else
+    log "no tasks in profile (leaving existing)"
+  fi
+
+  # 4) Apply extensions.json and sync
+  if [ -n "$J_EXTS" ]; then
+    log "apply extensions.json (recommendations)"
+    # profile gives an array → wrap to VS Code shape
+    TMP_E="$(mktemp)"
+    {
+      echo '{ "recommendations": '
+      printf '%s' "$J_EXTS"
+      echo ' }'
+    } > "$TMP_E"
+    write_inplace "$TMP_E" "$EXT_PATH"
+    rm -f "$TMP_E" 2>/dev/null || true
+    chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
+
+    # sync: uninstall non-recommended; then install+update recommended
+    extensions_cmd --uninstall missing --install all
+  else
+    log "no extensions in profile (skipping extensions sync)"
+  fi
+
+  # 5) GitHub bootstrap (prompt for token; never read from env)
+  if [ -n "$J_GH" ]; then
+    is_tty || { err "GitHub section present but no TTY available for token prompt."; exit 3; }
+
+    # extract fields
+    GITHUB_USERNAME="$(printf '%s' "$J_GH" | jq -r '.username // empty')"
+    GIT_NAME="$(printf '%s' "$J_GH" | jq -r '.name // empty')"
+    GIT_EMAIL="$(printf '%s' "$J_GH" | jq -r '.email // empty')"
+
+    # repos array → CSV
+    GITHUB_REPOS="$(printf '%s' "$J_GH" | jq -r '[.repos[]?] | join(",")')"
+    # pull-existing
+    GITHUB_PULL="$(printf '%s' "$J_GH" | jq -r '."pull-existing" // true' | tr '[:upper:]' '[:lower:]')"
+    # workspace subdir (relative)
+    REPOS_SUBDIR="$(printf '%s' "$J_GH" | jq -r '."repos-subdir" // "repos"')"
+
+    # recompute BASE because REPOS_SUBDIR may change
+    export REPOS_SUBDIR
+    recompute_base
+
+    # Always prompt for token (no env fallback)
+    PROMPT_TAG="[Profile GitHub] ? "
+    TOKEN="$(prompt_secret "GitHub token (classic; scopes: user:email, admin:public_key): ")"
+    [ -n "$TOKEN" ] || { err "GitHub token required when github section is present in the profile."; exit 2; }
+    GITHUB_TOKEN="$TOKEN"
+
+    # Export for codestrap_run path
+    export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+    ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+    ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+
+    log "bootstrapping GitHub from profile"
+    codestrap_run || { err "GitHub bootstrap failed"; exit 1; }
+  else
+    log "no github block in profile (skipping GitHub bootstrap)"
+  fi
+
+  CTX_TAG=""
+  log "profile '${NAME}' applied"
+}
+
+
 # ===== CLI helpers =====
 install_cli_shim(){
   # System-wide install when root, else user-level install into ~/.local/bin
@@ -2757,6 +2920,10 @@ cli_entry(){
       ;;
     --auto|-a)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
+    profile)
+      shift || true
+      profile_cmd "$@"
+      ;;
     passwd)
       shift || true
       case "${1:-}" in

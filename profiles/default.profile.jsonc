@@ -1,0 +1,43 @@
+{
+  "settings": {
+    "someSettingKey": "someSettingVal",
+    "workbench.colorTheme": "Default Dark+"
+  },
+  "keybindings": [
+    {
+      "key": "ctrl+7",
+      "command": "workbench.action.files.openFile"
+    }
+  ],
+  "tasks": {
+    "tasks": [
+      {
+        "label": "Echo User Input",
+        "type": "shell",
+        "command": "echo \"You entered: ${input:myPromptString}\"",
+        "problemMatcher": []
+      }
+    ],
+    "inputs": [
+      {
+        "id": "myPromptString",
+        "type": "promptString",
+        "description": "Please enter some text:"
+      }
+    ]
+  },
+  "extensions": [
+    "dbaeumer.vscode-eslint"
+  ],
+  "github": {
+    "username": "someUsername",
+    "name": "Some Name",
+    "email": "somename@somemail.com",
+    "repos": [
+      "someusername/somerepo",
+      "someusername/someotherrepo#prod"
+    ],
+    "repos-subdir": "/repos",
+    "pull-existing": true
+  }
+}

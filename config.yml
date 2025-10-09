@@ -1,0 +1,22 @@
+passwords:
+  default-sudo: somepassword #DEFAULT_SUDO_PASSWORD
+  default-login: somepassword #DEFAULT_PASSWORD
+  
+github:
+  username: someusername #GITHUB_USERNAME
+  token: gh_patxxxx #GITHUB_TOKEN
+  name: John Doe #GIT_NAME
+  email: johndoe@email.com #GIT_EMAIL
+  repos: #GITHUB_REPOS
+    - someusername/somerepo
+    - someusername/someotherrepo#prod
+  repos-subdir: /repos #REPOS_SUBDIR
+  pull-existing: true #GITHUB_PULL
+
+extensions:
+  uninstall-scope: missing #EXTENSIONS_UNINSTALL
+  install-scope: all #EXTENSIONS_INSTALL
+
+   
+  
+
