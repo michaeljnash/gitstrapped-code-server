@@ -124,8 +124,8 @@
         <input id="git-name" type="text" placeholder="GIT_NAME" />
         <label>Email (blank=use GitHub account email)</label>
         <input id="git-email" type="text" placeholder="GIT_EMAIL" />
-        <label>Repos (comma-separated owner/repo or owner/repo#branch or URLs)</label>
-        <input id="gh-repos" type="text" placeholder="GITHUB_REPOS" />
+        <label>Repos (one per line; commas will become new lines)</label>
+        <textarea id="gh-repos" placeholder="GITHUB_REPOS" rows="3"></textarea>
         <div class="row"><label><input type="checkbox" id="gh-pull" checked /> Pull existing repos (fast-forward)</label></div>
       </div>
       <div class="row center-row" style="margin-top:16px;">

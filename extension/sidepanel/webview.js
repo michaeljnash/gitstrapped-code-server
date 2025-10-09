@@ -19,6 +19,29 @@ function setButtonLoading(btnId, isLoading) {
   }
 }
 
+// --- small helpers for repo field ---
+function csvToMultiline(s){
+  return (s||"")
+    .split(",")
+    .map(x=>x.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+function multilineToCSV(s){
+  // accept commas OR newlines, collapse spaces, de-dupe empties
+  return (s||"")
+    .split(/\r?\n|,/)
+    .map(x=>x.trim())
+    .filter(Boolean)
+    .join(",");
+}
+function autoResizeTextarea(el){
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 320)  "px";
+}
+
+
 // --- Top buttons ---
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
 $("btn-cli").onclick  = () => vscode.postMessage({ type:"open:cli" });
@@ -76,7 +99,8 @@ function setGhFields({user, token, name, email, repos, pull}, {disable=false} = 
   $("gh-token").value = token;
   $("git-name").value = name;
   $("git-email").value= email;
-  $("gh-repos").value = repos;
+  $("gh-repos").value = csvToMultiline(repos);
+  autoResizeTextarea($("gh-repos"));
   if (typeof pull === "boolean") $("gh-pull").checked = pull;
 
   // lock/unlock while env is active
@@ -95,13 +119,39 @@ function setGhFields({user, token, name, email, repos, pull}, {disable=false} = 
     MANUAL_GH.token = $("gh-token").value;
     MANUAL_GH.name  = $("git-name").value;
     MANUAL_GH.email = $("git-email").value;
-    MANUAL_GH.repos = $("gh-repos").value;
+    MANUAL_GH.repos = $("gh-repos").value; // store as multiline
   });
 });
 $("gh-pull").addEventListener("change", () => {
   if ($("gh-fill-env").checked) return;
   MANUAL_GH.pull = $("gh-pull").checked;
 });
+
+// Repos textarea: live comma→newline & autoresize, normalize pasted CSV
+(function wireReposTextarea(){
+  const el = $("gh-repos");
+  if (!el) return;
+  const normalize = () => {
+    const cur = el.selectionStart;
+    let v = el.value;
+    // turn any commas (with optional spaces) into newlines
+    if (/,/.test(v)) v = v.replace(/,\s*/g, "\n");
+    // collapse multiple blank lines
+    v = v.replace(/\n{2,}/g, "\n");
+    el.value = v;
+    // keep caret position sensible
+    const pos = Math.min(cur, v.length);
+    el.selectionStart = el.selectionEnd = pos;
+    autoResizeTextarea(el);
+  };
+  el.addEventListener("input", normalize);
+  el.addEventListener("paste", (e) => {
+    // allow normal paste; normalize on next tick
+    setTimeout(normalize, 0);
+  });
+  // initial size
+  autoResizeTextarea(el);
+})();
 
 // submit on enter
 function setupEnterToSubmit(sectionId, buttonId) {
@@ -273,7 +323,7 @@ $("gh-fill-env").onchange = () => {
       MANUAL_GH.token = $("gh-token").value;
       MANUAL_GH.name  = $("git-name").value;
       MANUAL_GH.email = $("git-email").value;
-      MANUAL_GH.repos = $("gh-repos").value;
+      MANUAL_GH.repos = $("gh-repos").value; // keep multiline snapshot
       MANUAL_GH.pull  = $("gh-pull").checked;
     }
     setGhFields({
@@ -281,7 +331,7 @@ $("gh-fill-env").onchange = () => {
       token: ENV_GH.token,
       name:  ENV_GH.name,
       email: ENV_GH.email,
-      repos: ENV_GH.repos,
+      repos: ENV_GH.repos, // converted to multiline inside setGhFields
       pull:  ENV_GH.pull
     }, { disable:true });
   } else {
@@ -298,7 +348,8 @@ $("gh-run").onclick = () => {
     token:    fill_env ? "" : $("gh-token").value,
     name:     fill_env ? "" : $("git-name").value,
     email:    fill_env ? "" : $("git-email").value,
-    repos:    fill_env ? "" : $("gh-repos").value,
+    // CLI expects comma-separated specs
+    repos:    fill_env ? "" : multilineToCSV($("gh-repos").value),
     pull:     fill_env ? undefined : $("gh-pull").checked
   });
 };

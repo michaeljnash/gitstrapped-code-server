@@ -16,10 +16,11 @@ body{ margin:0; padding:0; overflow:hidden; font-family: var(--vscode-font-famil
 h3{ margin:12px 0 8px; font-size:13px; }
 .section{ border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:10px; }
 label{ font-size:12px; display:block; margin:6px 0 2px; color: var(--muted); }
-input[type="text"], input[type="password"], select{
+input[type="text"], input[type="password"], select, textarea{
   width:100%; max-width:100%; display:block; padding:8px 10px; background:var(--input); color:var(--fg);
   border:1px solid var(--border); border-radius:8px;
 }
+textarea{ min-height:72px; resize:vertical; }
 .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
 .toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }
