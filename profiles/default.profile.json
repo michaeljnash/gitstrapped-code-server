@@ -1,7 +1,7 @@
 {
   "settings": {
     "someSettingKey": "someSettingVal",
-    "workbench.colorTheme": "Default Dark+"
+    "workbench.colorTheme": "Monokai"
   },
   "keybindings": [
     {
