@@ -30,12 +30,9 @@
     "dbaeumer.vscode-eslint"
   ],
   "github": {
-    "username": "someUsername",
-    "name": "Some Name",
-    "email": "somename@somemail.com",
+    "username": "michaeljnash",
     "repos": [
-      "someusername/somerepo",
-      "someusername/someotherrepo#prod"
+      "michaeljnash/jekyll-asset-management"
     ],
     "repos-subdir": "/repos",
     "pull-existing": true
