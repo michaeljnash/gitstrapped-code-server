@@ -703,7 +703,17 @@ EOF
   printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/restartgate/finish && chmod +x /etc/services.d/restartgate/finish
   log "installed restart gate service"
 }
+
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
+
+# ===== window reload trigger (for the VS Code extension) =====
+trigger_window_reload(){
+  # The extension watches this file and calls 'workbench.action.reloadWindow'
+  local f="/run/codestrap/reload.flag"
+  mkdir -p "/run/codestrap" 2>/dev/null || true
+  # Write a timestamp to bump mtime (and leave content non-empty for extra signal)
+  printf '%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
+}
 
 # ===== first-boot default password =====
 init_default_password_if_env(){
@@ -2518,6 +2528,8 @@ PHELP
 
   CTX_TAG=""
   log "profile '${NAME}' applied"
+  trigger_window_reload
+  return 0
 }
 
 

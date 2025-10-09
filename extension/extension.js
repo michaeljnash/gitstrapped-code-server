@@ -4,6 +4,11 @@ const http = require('http');
 
 let cliTerminal = null;
 let outChan = null;
+let reloadWatcher = null;
+ 
+// Path the CLI will "touch" to request a window reload
+const RELOAD_FLAG = '/run/codestrap/reload.flag';
+const RELOAD_DIR  = '/run/codestrap';
 
 function shellQ(s){
   if (s === undefined || s === null) return "''";
@@ -93,6 +98,38 @@ function registerTerminalWatcher(context){
       if (cliTerminal && term === cliTerminal) cliTerminal = null;
     })
   );
+}
+
+function ensureReloadDir(){
+  try { fs.mkdirSync(RELOAD_DIR, { recursive: true }); } catch(_) {}
+}
+
+function setupReloadWatcher(context){
+  ensureReloadDir();
+  // Create file if missing so fs.watchFile has a target (cheap no-op)
+  try { if (!fs.existsSync(RELOAD_FLAG)) fs.writeFileSync(RELOAD_FLAG, '', { flag: 'w' }); } catch(_) {}
+  // Use watchFile (polling) — reliable across container fs / bind mounts
+  let pending = false;
+  fs.watchFile(RELOAD_FLAG, { interval: 500 }, async () => {
+    if (pending) return;
+    try {
+      // If file is non-empty OR mtime changed, treat as a trigger
+      const st = fs.statSync(RELOAD_FLAG);
+      if (!st || st.size < 0) return;
+      pending = true;
+      // Clear the flag before reload to avoid loops
+      try { fs.writeFileSync(RELOAD_FLAG, ''); } catch(_) {}
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    } catch(_) {
+      // ignore
+    } finally {
+      pending = false;
+    }
+  });
+  // Clean up on deactivate
+  context.subscriptions.push(new vscode.Disposable(() => {
+    try { fs.unwatchFile(RELOAD_FLAG); } catch(_) {}
+  }));
 }
 
 function getNonce(){ return Math.random().toString(36).slice(2); }
@@ -249,6 +286,7 @@ function activate(context){
   ));
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
   registerTerminalWatcher(context);
+  setupReloadWatcher(context);
 }
 function deactivate(){}
 
