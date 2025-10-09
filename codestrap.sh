@@ -77,6 +77,29 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
   fi
 }
 
+# ---- transaction core ----
+TX_STACK_FILE=""
+tx_begin(){
+  TX_STACK_FILE="$(mktemp)"
+  : >"$TX_STACK_FILE"
+}
+tx_add(){ # usage: tx_add "<bash_to_undo_this_step>"
+  [ -n "${TX_STACK_FILE:-}" ] || return 0
+  printf '%s\n' "$1" >>"$TX_STACK_FILE"
+}
+tx_rollback(){
+  [ -f "${TX_STACK_FILE:-}" ] || return 0
+  tac "$TX_STACK_FILE" | while IFS= read -r cmd; do
+    [ -n "$cmd" ] && sh -c "$cmd" || true
+  done
+}
+tx_commit(){
+  [ -n "${TX_STACK_FILE:-}" ] && rm -f "$TX_STACK_FILE" 2>/dev/null || true
+  TX_STACK_FILE=""
+}
+
+
+
 redact(){ echo "$1" | sed 's/[A-Za-z0-9_\-]\{12,\}/***REDACTED***/g'; }
 ensure_dir(){ mkdir -p "$1" 2>/dev/null || true; chown -R "${PUID:-1000}:${PGID:-1000}" "$1" 2>/dev/null || true; }
 
@@ -937,11 +960,26 @@ resolve_email(){
 git_upload_key(){
   GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GITHUB_KEY_TITLE="${GITHUB_KEY_TITLE:-codestrapped-code-server SSH Key}"
   [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
+
   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
   KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+
   echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
-  RESP="$(curl -fsS -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" -d "{\"title\":\"$GITHUB_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" https://api.github.com/user/keys || true)"
-  echo "$RESP" | grep -q '"id"' && log "SSH key added" || warn "Key upload failed: $(redact "$RESP")"
+
+  RESP="$(curl -fsS -X POST \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -d "{\"title\":\"$GITHUB_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" \
+    https://api.github.com/user/keys || true)"
+
+  KEY_ID="$(printf "%s" "$RESP" | jq -r '.id // empty' 2>/dev/null || true)"
+  if [ -n "$KEY_ID" ] && [ "$KEY_ID" != "null" ]; then
+    log "SSH key added (id=$KEY_ID)"
+    # register compensating action for profile transactions if active
+    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${GITHUB_TOKEN}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
+  else
+    warn "Key upload failed: $(redact "$RESP")"
+  fi
 }
 clone_one(){
   spec="$1"; PULL="${2:-true}"
@@ -956,7 +994,11 @@ clone_one(){
   esac
   dest="${BASE}/${name}"
   safe_url="$(echo "$url" | sed -E 's#(git@github\.com:).*#\1***.git#')"
+
   if [ -d "$dest/.git" ]; then
+    # register compensation: reset to previous HEAD
+    PREV_HEAD="$(git -C "$dest" rev-parse --verify HEAD 2>/dev/null || echo '')"
+    [ -n "$PREV_HEAD" ] && tx_add "git -C '$dest' reset --hard '$PREV_HEAD' >/dev/null 2>&1 || true"
     if [ "$(normalize_bool "$PULL")" = "true" ] && command -v git >/dev/null 2>&1; then
       log "pull: ${name}"
       git -C "$dest" fetch --all -p || warn "fetch failed for ${name}"
@@ -970,6 +1012,8 @@ clone_one(){
       log "skip pull: ${name}"
     fi
   else
+    # register compensation: delete created directory if we fail later
+    tx_add "rm -rf '$dest' >/dev/null 2>&1 || true"
     log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
     if [ -n "$branch" ]; then
       git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
@@ -979,6 +1023,7 @@ clone_one(){
   fi
   chown -R "$PUID:$PGID" "$dest" || true
 }
+
 
 codestrap_run(){
   GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
@@ -2277,6 +2322,34 @@ emit_installed_exts_with_versions(){
   "$CODE_BIN" --list-extensions --show-versions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
 }
 
+snapshot_extensions_state(){
+  local out="$1"
+  : >"$out"
+  emit_installed_exts_with_versions >>"$out" 2>/dev/null || true
+}
+
+restore_extensions_state(){
+  local in="$1"
+  local curf; curf="$(mktemp)"
+  emit_installed_exts_with_versions >"$curf" 2>/dev/null || true
+
+  # uninstall anything not in pre-state
+  awk -F'@' '{print $1}' "$curf" | sort >"$curf.ids"
+  awk -F'@' '{print $1}' "$in"   | sort >"$in.ids"
+  comm -23 "$curf.ids" "$in.ids" | while read -r id; do
+    [ -n "$id" ] && uninstall_one_ext "$id" || true
+  done
+
+  # reinstall exact versions from pre-state
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    install_one_ext "$line" "true" || true
+  done <"$in"
+
+  rm -f "$curf" "$curf.ids" "$in.ids" 2>/dev/null || true
+}
+
+
 install_one_ext(){
   ext="$1"; force="${2:-false}"
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot install ${ext}"; return 1; }
@@ -2575,13 +2648,16 @@ PHELP
 
   CTX_TAG="[Profile: ${NAME}]"
 
-  # === Transaction start: back up existing files ===
-  local BKP_SETTINGS BKP_KEYB BKP_TASKS BKP_EXT
-  BKP_SETTINGS="$(_backup_one "$SETTINGS_PATH")"
-  BKP_KEYB="$(_backup_one "$KEYB_PATH")"
-  BKP_TASKS="$(_backup_one "$TASKS_PATH")"
-  BKP_EXT="$(_backup_one "$EXT_PATH")"
+  # Begin a transaction
+  tx_begin
   local ROLLBACK=0
+
+  # Backups + compensating actions for user files (settings/keybindings/tasks/extensions)
+  local BKP_SETTINGS BKP_KEYB BKP_TASKS BKP_EXT
+  BKP_SETTINGS="$(_backup_one "$SETTINGS_PATH")"; tx_add "_restore_one '$BKP_SETTINGS' '$SETTINGS_PATH'"
+  BKP_KEYB="$(_backup_one "$KEYB_PATH")";         tx_add "_restore_one '$BKP_KEYB'     '$KEYB_PATH'"
+  BKP_TASKS="$(_backup_one "$TASKS_PATH")";       tx_add "_restore_one '$BKP_TASKS'    '$TASKS_PATH'"
+  BKP_EXT="$(_backup_one "$EXT_PATH")";           tx_add "_restore_one '$BKP_EXT'      '$EXT_PATH'"
 
   # 1) Apply settings.json (if provided)
   if [ -n "$J_SETTINGS" ]; then
@@ -2626,7 +2702,10 @@ PHELP
 
   # 5) GitHub bootstrap (prompt for token; never read from env)
   if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
-    is_tty || { err "GitHub section present but no TTY available for token prompt."; exit 3; }
+    if ! is_tty; then
+      err "GitHub section present but no TTY available for token prompt."
+      ROLLBACK=1
+    fi
 
     # extract fields
     GITHUB_USERNAME="$(printf '%s' "$J_GH" | jq -r '.username // empty')"
@@ -2647,7 +2726,10 @@ PHELP
     # Always prompt for token (no env fallback)
     PROMPT_TAG="[Profile GitHub] ? "
     TOKEN="$(prompt_secret "GitHub token (classic; scopes: user:email, admin:public_key): ")"
-    [ -n "$TOKEN" ] || { err "GitHub token required when github section is present in the profile."; exit 2; }
+    if [ -z "$TOKEN" ]; then
+      err "GitHub token required when github section is present in the profile."
+      ROLLBACK=1
+    fi
     GITHUB_TOKEN="$TOKEN"
 
     # Export for codestrap_run path
@@ -2666,11 +2748,8 @@ PHELP
 
   # If anything failed, restore backups and stop here.
   if [ $ROLLBACK -ne 0 ]; then
-    warn "error applying profile; rolling back user files"
-    _restore_one "$BKP_SETTINGS" "$SETTINGS_PATH"
-    _restore_one "$BKP_KEYB"     "$KEYB_PATH"
-    _restore_one "$BKP_TASKS"    "$TASKS_PATH"
-    _restore_one "$BKP_EXT"      "$EXT_PATH"
+    warn "error applying profile; rolling back"
+    tx_rollback
     CTX_TAG=""
     exit 1
   fi
@@ -2678,14 +2757,25 @@ PHELP
   # If we got here, everything (including GitHub) succeeded. Now do ext sync if needed.
   if [ "$EXT_FILE_APPLIED" -eq 1 ]; then
     log "sync extensions (uninstall non-recommended; installupdate recommended)"
+    # snapshot current installed extensions and register compensator
+    EXTS_SNAP="$(mktemp)"
+    snapshot_extensions_state "$EXTS_SNAP"
+    tx_add "restore_extensions_state '$EXTS_SNAP'; rm -f '$EXTS_SNAP' 2>/dev/null || true"
+
     if ! extensions_cmd --uninstall missing --install all; then
-      warn "extensions sync failed; restoring previous extensions.json"
-      _restore_one "$BKP_EXT" "$EXT_PATH"
-      CTX_TAG=""
-      exit 1
+      warn "extensions sync failed"
+      ROLLBACK=1
     fi
   fi
 
+  if [ $ROLLBACK -ne 0 ]; then
+    warn "error after sync; rolling back"
+    tx_rollback
+    CTX_TAG=""
+    exit 1
+  fi
+
+  tx_commit
   CTX_TAG=""
   log "profile '${NAME}' applied"
   trigger_window_reload
