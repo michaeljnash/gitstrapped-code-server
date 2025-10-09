@@ -500,6 +500,105 @@ merge_preserve_files_union(){
   rm -f "$tmp" 2>/dev/null || true
 }
 
+# ===== profile schema validation =====
+validate_profile_schema(){ # usage: validate_profile_schema </path/to/profile.json>
+  local file="$1"
+  # 1) Must parse as JSON (reject trailing commas etc.)
+  if ! jq -e . "$file" >/dev/null 2>&1; then
+    err "profile JSON is not valid (parse error)."
+    return 2
+  fi
+
+  # 2) Semantic checks → emit one error per violation (human friendly)
+  # Accept either "repos-subdir" or "repos_subdir" for compatibility.
+  local errors
+  errors="$(jq -r '
+    def isObj: type=="object";
+    def isArr: type=="array";
+    def isStr: type=="string";
+    def isBool: type=="boolean";
+
+    def objOrNull(okmsg):
+      if . == null then empty
+      elif isObj then empty
+      else "settings/keybindings/tasks/extensions/github must be correct types" # placeholder
+      end;
+
+    # Collect errors in an array:
+    [
+      # settings
+      (if has("settings") and (.settings != null) and ( .settings | type != "object")
+        then "settings must be an object" else empty end),
+
+      # keybindings
+      (if has("keybindings") and (.keybindings != null) and ( .keybindings | type != "array")
+        then "keybindings must be an array" else empty end),
+      (if ( .keybindings // [] ) | type == "array"
+        then
+          ((.keybindings // []) | to_entries[]
+            | select(.value | type != "object")
+            | "keybindings[" + ( .key|tostring ) + "] must be an object")
+        else empty end),
+
+      # tasks (object with tasks[], inputs[])
+      (if has("tasks") and (.tasks != null) and ( .tasks | type != "object")
+        then "tasks must be an object" else empty end),
+      (if (.tasks // null) != null and ((.tasks.tasks // []) | type != "array")
+        then "\"tasks.tasks\" must be an array" else empty end),
+      (if (.tasks // null) != null and ((.tasks.inputs // []) | type != "array")
+        then "\"tasks.inputs\" must be an array" else empty end),
+      (if (.tasks // null) != null
+        then
+          ((.tasks.tasks // []) | to_entries[]
+            | select(.value | type != "object")
+            | "\"tasks.tasks\"[" + ( .key|tostring ) + "] must be an object")
+        else empty end),
+      (if (.tasks // null) != null
+        then
+          ((.tasks.inputs // []) | to_entries[]
+            | select(.value | type != "object")
+            | "\"tasks.inputs\"[" + ( .key|tostring ) + "] must be an object")
+        else empty end),
+
+      # extensions
+      (if has("extensions") and (.extensions != null) and ( .extensions | type != "array")
+        then "extensions must be an array" else empty end),
+
+      # github (object; username required if block is present)
+      (if has("github") and (.github != null) and ( .github | type != "object")
+        then "github must be an object" else empty end),
+
+      # github.* fields typing (only if github is an object)
+      (if (.github // null) != null and ((.github.username // null) != null) and ((.github.username | type) != "string")
+        then "github.username must be a string" else empty end),
+      (if (.github // null) != null and ((.github.name // null) != null) and ((.github.name | type) != "string")
+        then "github.name must be a string" else empty end),
+      (if (.github // null) != null and ((.github.email // null) != null) and ((.github.email | type) != "string")
+        then "github.email must be a string" else empty end),
+      (if (.github // null) != null and ((.github.repos // null) != null) and ((.github.repos | type) != "array")
+        then "github.repos must be an array" else empty end),
+      (if (.github // null) != null and ((.github["repos-subdir"] // .github.repos_subdir // null) != null)
+           and (((.github["repos-subdir"] // .github.repos_subdir) | type) != "string")
+        then "github.repos-subdir must be a string" else empty end),
+      (if (.github // null) != null and ((.github["pull-existing"] // .github.pull_existing // null) != null)
+           and (((.github["pull-existing"] // .github.pull_existing) | type) != "boolean")
+        then "github.pull-existing must be a boolean" else empty end),
+
+      # require username if github block exists
+      (if (.github // null) != null and ((.github.username // null) == null)
+        then "github.username is required when the github block is present" else empty end)
+    ] | .[]
+  ' "$file")"
+
+  if [ -n "$errors" ]; then
+    err "profile schema validation failed:"
+    printf '%s\n' "$errors" | while IFS= read -r e; do [ -n "$e" ] && err " - $e"; done
+    return 2
+  fi
+
+  return 0
+}
+
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
 
@@ -952,6 +1051,35 @@ write_json_pretty(){ # usage: write_json_pretty '<json-string>' <dest>
   write_inplace "$_tmp" "$_dest"
   rm -f "$_tmp" 2>/dev/null || true
   chown "${PUID}:${PGID}" "$_dest" 2>/dev/null || true
+}
+
+# ===== transactional apply helpers =====
+_backup_one(){
+  # usage: _backup_one <path> -> prints backup path
+  local src="$1"; local bkp
+  bkp="$(mktemp)"
+  if [ -f "$src" ]; then
+    cat "$src" > "$bkp"
+  else
+    printf '' > "$bkp"
+  fi
+  echo "$bkp"
+}
+
+_restore_one(){
+  # usage: _restore_one <backup-path> <dest-path>
+  local bkp="$1" dest="$2"
+  write_inplace "$bkp" "$dest"
+}
+
+# Write pretty JSON to a temp file first (validate), then atomically apply
+_apply_json_transactional(){ # usage: _apply_json_transactional '<json>' <dest>
+  local json="$1" dest="$2" tmp
+  tmp="$(mktemp)"
+  printf '%s' "$json" | jq '.' > "$tmp" || { rm -f "$tmp"; return 1; }
+  write_inplace "$tmp" "$dest"
+  rm -f "$tmp"
+  return 0
 }
 
 # ===== top-of-file error banner =====
@@ -2433,8 +2561,10 @@ PHELP
   FILE="${PROFILE_DIR}/${NAME}.profile.json"
   [ -r "$FILE" ] || { err "profile not found: $FILE"; exit 2; }
 
-  # Validate and read once
-  jq -e . "$FILE" >/dev/null 2>&1 || { err "profile JSON invalid: $FILE"; exit 2; }
+  # 0) Validate JSON + schema BEFORE doing anything
+  if ! validate_profile_schema "$FILE"; then
+    exit 2
+  fi
 
   # Extract sections as compact JSON for writes
   J_SETTINGS="$(jq -c '."settings" // empty' "$FILE")"
@@ -2445,52 +2575,57 @@ PHELP
 
   CTX_TAG="[Profile: ${NAME}]"
 
-  # 1) Apply settings.json
+  # === Transaction start: back up existing files ===
+  local BKP_SETTINGS BKP_KEYB BKP_TASKS BKP_EXT
+  BKP_SETTINGS="$(_backup_one "$SETTINGS_PATH")"
+  BKP_KEYB="$(_backup_one "$KEYB_PATH")"
+  BKP_TASKS="$(_backup_one "$TASKS_PATH")"
+  BKP_EXT="$(_backup_one "$EXT_PATH")"
+  local ROLLBACK=0
+
+  # 1) Apply settings.json (if provided)
   if [ -n "$J_SETTINGS" ]; then
     log "apply settings.json"
-    write_json_pretty "$J_SETTINGS" "$SETTINGS_PATH" || exit 1
+    _apply_json_transactional "$J_SETTINGS" "$SETTINGS_PATH" || ROLLBACK=1
   else
     log "no settings in profile (leaving existing)"
   fi
 
-  # 2) Apply keybindings.json
-  if [ -n "$J_KEYB" ]; then
+  # 2) Apply keybindings.json (if provided)
+  if [ $ROLLBACK -eq 0 ] && [ -n "$J_KEYB" ]; then
     log "apply keybindings.json"
-    write_json_pretty "$J_KEYB" "$KEYB_PATH" || exit 1
-  else
+    _apply_json_transactional "$J_KEYB" "$KEYB_PATH" || ROLLBACK=1
+  elif [ $ROLLBACK -ne 0 ]; then :; else
     log "no keybindings in profile (leaving existing)"
   fi
 
-  # 3) Apply tasks.json
-  if [ -n "$J_TASKS" ]; then
+  # 3) Apply tasks.json (if provided)
+  if [ $ROLLBACK -eq 0 ] && [ -n "$J_TASKS" ]; then
     log "apply tasks.json"
-    write_json_pretty "$J_TASKS" "$TASKS_PATH" || exit 1
-  else
+    _apply_json_transactional "$J_TASKS" "$TASKS_PATH" || ROLLBACK=1
+  elif [ $ROLLBACK -ne 0 ]; then :; else
     log "no tasks in profile (leaving existing)"
   fi
 
-  # 4) Apply extensions.json and sync
-  if [ -n "$J_EXTS" ]; then
-    log "apply extensions.json (recommendations)"
-    # profile gives an array → wrap to VS Code shape
+  # 4) Apply extensions.json (file only; delay sync until we know everything passed)
+  local EXT_FILE_APPLIED=0
+  if [ $ROLLBACK -eq 0 ] && [ -n "$J_EXTS" ]; then
+    log "apply extensions.json (recommendations file only)"
     TMP_E="$(mktemp)"
-    {
-      echo '{ "recommendations": '
-      printf '%s' "$J_EXTS"
-      echo ' }'
-    } > "$TMP_E"
-    write_inplace "$TMP_E" "$EXT_PATH"
+    { echo '{ "recommendations": '; printf '%s' "$J_EXTS"; echo ' }'; } > "$TMP_E"
+    if write_inplace "$TMP_E" "$EXT_PATH"; then
+      chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
+      EXT_FILE_APPLIED=1
+    else
+      ROLLBACK=1
+    fi
     rm -f "$TMP_E" 2>/dev/null || true
-    chown "${PUID}:${PGID}" "$EXT_PATH" 2>/dev/null || true
-
-    # sync: uninstall non-recommended; then install+update recommended
-    extensions_cmd --uninstall missing --install all
-  else
-    log "no extensions in profile (skipping extensions sync)"
+  elif [ $ROLLBACK -ne 0 ]; then :; else
+    log "no extensions in profile (leaving existing)"
   fi
 
   # 5) GitHub bootstrap (prompt for token; never read from env)
-  if [ -n "$J_GH" ]; then
+  if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
     is_tty || { err "GitHub section present but no TTY available for token prompt."; exit 3; }
 
     # extract fields
@@ -2501,9 +2636,9 @@ PHELP
     # repos array → CSV
     GITHUB_REPOS="$(printf '%s' "$J_GH" | jq -r '[.repos[]?] | join(",")')"
     # pull-existing
-    GITHUB_PULL="$(printf '%s' "$J_GH" | jq -r '."pull-existing" // true' | tr '[:upper:]' '[:lower:]')"
+    GITHUB_PULL="$(printf '%s' "$J_GH" | jq -r '(."pull-existing" // .pull_existing // true)' | tr '[:upper:]' '[:lower:]')"
     # workspace subdir (relative)
-    REPOS_SUBDIR="$(printf '%s' "$J_GH" | jq -r '."repos-subdir" // "repos"')"
+    REPOS_SUBDIR="$(printf '%s' "$J_GH" | jq -r '(."repos-subdir" // .repos_subdir // "repos")')"
 
     # recompute BASE because REPOS_SUBDIR may change
     export REPOS_SUBDIR
@@ -2521,9 +2656,34 @@ PHELP
     ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
 
     log "bootstrapping GitHub from profile"
-    codestrap_run || { err "GitHub bootstrap failed"; exit 1; }
+    if ! codestrap_run; then
+      err "GitHub bootstrap failed"
+      ROLLBACK=1
+    fi
   else
     log "no github block in profile (skipping GitHub bootstrap)"
+  fi
+
+  # If anything failed, restore backups and stop here.
+  if [ $ROLLBACK -ne 0 ]; then
+    warn "error applying profile; rolling back user files"
+    _restore_one "$BKP_SETTINGS" "$SETTINGS_PATH"
+    _restore_one "$BKP_KEYB"     "$KEYB_PATH"
+    _restore_one "$BKP_TASKS"    "$TASKS_PATH"
+    _restore_one "$BKP_EXT"      "$EXT_PATH"
+    CTX_TAG=""
+    exit 1
+  fi
+
+  # If we got here, everything (including GitHub) succeeded. Now do ext sync if needed.
+  if [ "$EXT_FILE_APPLIED" -eq 1 ]; then
+    log "sync extensions (uninstall non-recommended; installupdate recommended)"
+    if ! extensions_cmd --uninstall missing --install all; then
+      warn "extensions sync failed; restoring previous extensions.json"
+      _restore_one "$BKP_EXT" "$EXT_PATH"
+      CTX_TAG=""
+      exit 1
+    fi
   fi
 
   CTX_TAG=""
