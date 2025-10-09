@@ -1,9 +1,175 @@
 @@
-git config --global --add safe.directory "*"
-git config --global user.name "${GIT_NAME:-codestrap}" || true
--if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
-+if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "$GITHUB_TOKEN" || true)"; fi
-git config --global user.email "$GIT_EMAIL" || true
-log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
-umask 077
+ MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
+ 
+-# ===== helpers for interactive -a/--auto =====
+-env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -a/--auto to use env %s)" "$1" || true; }
+-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
++# (Phase-1) Delete env-driven prompt helpers.
+ 
+ # ===== GitHub validation (fatal on failure) =====
 @@
+-validate_github_username(){
+-  [ -n "${GITHUB_USERNAME:-}" ] || return 0
+-  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || echo "000")"
+-  if [ "$code" = "404" ]; then
+-    src="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+-    err "GitHub username '${GITHUB_USERNAME}' appears invalid (HTTP 404). Check ${src}."
+-    return 1
+-  elif [ "$code" != "200" ]; then
+-    err "Could not verify GitHub username '${GITHUB_USERNAME}' (HTTP $code)."
+-    return 1
+-  fi
+-}
+-
+-validate_github_token(){
+-  [ -n "${GITHUB_TOKEN:-}" ] || return 0
+-  code="$(curl -s -o /dev/null -w "%{http_code}" \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
+-    -H "Accept: application/vnd.github+json" \
+-    -H "User-Agent: codestrap" \
+-    https://api.github.com/user || echo "000")"
+-  src="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+-  if [ "$code" = "401" ]; then
+-    err "Provided GITHUB_TOKEN (${src}) is invalid or expired (HTTP 401). Please provide a valid classic token with scopes: user:email, admin:public_key."
+-    return 1
+-  elif [ "$code" = "403" ]; then
+-    err "Provided GITHUB_TOKEN (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
+-    return 1
+-  elif [ "$code" != "200" ]; then
+-    err "Could not verify GITHUB_TOKEN (${src}) (HTTP $code)."
+-    return 1
+-  fi
+-  headers="$(curl -fsS -D - -o /dev/null \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
+-    -H "Accept: application/vnd.github+json" \
+-    -H "User-Agent: codestrap" \
+-    https://api.github.com/user 2>/dev/null || true)"
+-  scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
+-  if [ -n "$scopes" ]; then
+-    echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GITHUB_TOKEN may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: $scopes")"
+-    echo "$scopes" | grep -q 'user:email'       || warn "$(ylw "GITHUB_TOKEN may be missing 'user:email' (needed to resolve your primary email). Current scopes: $scopes")"
+-  fi
+-}
++# ===== GitHub validation (no env; args only) =====
++validate_github_username(){ # $1=username
++  u="$1"; [ -n "$u" ] || return 0
++  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${u}" || echo "000")"
++  if [ "$code" = "404" ]; then
++    err "GitHub username '${u}' appears invalid (HTTP 404)."
++    return 1
++  elif [ "$code" != "200" ]; then
++    err "Could not verify GitHub username '${u}' (HTTP $code)."
++    return 1
++  fi
++}
++validate_github_token(){ # $1=token
++  t="$1"; [ -n "$t" ] || return 0
++  code="$(curl -s -o /dev/null -w "%{http_code}" \
++    -H "Authorization: token ${t}" \
++    -H "Accept: application/vnd.github+json" \
++    -H "User-Agent: codestrap" \
++    https://api.github.com/user || echo "000")"
++  if [ "$code" = "401" ]; then
++    err "Provided GitHub token is invalid or expired (HTTP 401). Needs scopes: user:email, admin:public_key."
++    return 1
++  elif [ "$code" = "403" ]; then
++    err "Provided GitHub token is not authorized (HTTP 403). Missing scopes? user:email, admin:public_key."
++    return 1
++  elif [ "$code" != "200" ]; then
++    err "Could not verify GitHub token (HTTP $code)."
++    return 1
++  fi
++  headers="$(curl -fsS -D - -o /dev/null \
++    -H "Authorization: token ${t}" \
++    -H "Accept: application/vnd.github+json" \
++    -H "User-Agent: codestrap" \
++    https://api.github.com/user 2>/dev/null || true)"
++  scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
++  if [ -n "$scopes" ]; then
++    echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GITHUB_TOKEN may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: $scopes")"
++    echo "$scopes" | grep -q 'user:email'       || warn "$(ylw "GITHUB_TOKEN may be missing 'user:email' (needed to resolve your primary email). Current scopes: $scopes")"
++  fi
++}
+ 
+ # ===== password change =====
+@@
+-# ===== github bootstrap internals =====
+-resolve_email(){
+-  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+-  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
+-  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
+-  PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
+-  [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
+-  VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
+-  [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
+-  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
+-  PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
+-  [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
+-  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
+-}
+-git_upload_key(){
+-  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GITHUB_KEY_TITLE="${GITHUB_KEY_TITLE:-codestrapped-code-server SSH Key}"
+-  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
+-
+-  LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
+-  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+-
+-  echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
+-
+-  RESP="$(curl -fsS -X POST \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
+-    -H "Accept: application/vnd.github+json" \
+-    -d "{\"title\":\"$GITHUB_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" \
+-    https://api.github.com/user/keys || true)"
+-
+-  KEY_ID="$(printf "%s" "$RESP" | jq -r '.id // empty' 2>/dev/null || true)"
+-  if [ -n "$KEY_ID" ] && [ "$KEY_ID" != "null" ]; then
+-    log "SSH key added (id=$KEY_ID)"
+-    # register compensating action for profile transactions if active
+-    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${GITHUB_TOKEN}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
+-  else
+-    warn "Key upload failed: $(redact "$RESP")"
+-  fi
+-}
++# ===== github bootstrap internals =====
++resolve_email(){ # $1=username, $2=token
++  _u="$1"; _t="$2"
++  [ -n "$_t" ] || { echo "${_u:-unknown}@users.noreply.github.com"; return; }
++  EMAILS="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
++  PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
++  [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
++  VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
++  [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
++  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${_u}" || true)"
++  PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
++  [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
++  echo "${_u:-unknown}@users.noreply.github.com"
++}
++git_upload_key(){ # $1=token, $2=title
++  _t="$1"; _title="${2:-codestrapped-code-server SSH Key}"
++  [ -n "$_t" ] || { warn "GitHub token empty; cannot upload SSH key"; return 0; }
++
++  LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
++  KEYS_JSON="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
++
++  echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
++
++  RESP="$(curl -fsS -X POST \
++    -H "Authorization: token ${_t}" \
++    -H "Accept: application/vnd.github+json" \
++    -d "{\"title\":\"$_title\",\"key\":\"$LOCAL_KEY\"}" \
++    https://api.github.com/user/keys || true)"
++
++  KEY_ID="$(printf "%s" "$RESP" | jq -r '.id // empty' 2>/dev/null || true)"
++  if [ -n "$KEY_ID" ] && [ "$KEY_ID" != "null" ]; then
++    log "SSH key added (id=$KEY_ID)"
++    # register compensating action for profile transactions if active
++    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${_t}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
++  else
++    warn "Key upload failed: $(redact "$RESP")"
++  fi
++}
+ 
+ clone_one(){
