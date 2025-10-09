@@ -19,6 +19,7 @@ has_tty(){
   : </dev/tty    2>/dev/null || return 1
   : >/dev/tty    2>/dev/null || return 1
   return 0
+}
 is_tty(){ has_tty; }
 
 red(){ is_tty && printf "\033[31m%s\033[0m" "$1" || printf "%s" "$1"; }
@@ -52,7 +53,10 @@ safe_run(){ # usage: safe_run "<ctx-tag>" <command> [args...]
       err "step failed (continuing): $*"
       CTX_TAG=""
       return 0
+    fi
+  fi
   CTX_TAG=""
+}
 
 # Use this *inside* functions when you detect a condition that should
 # abort the current function:
@@ -66,26 +70,33 @@ abort_or_continue(){ # usage: abort_or_continue "<ctx-tag>" "message..."
     err "$_msg"
     CTX_TAG=""
     exit 1
+  else
     err "$_msg"
     CTX_TAG=""
     return 0
+  fi
+}
 
 # ---- transaction core ----
 TX_STACK_FILE=""
 tx_begin(){
   TX_STACK_FILE="$(mktemp)"
   : >"$TX_STACK_FILE"
+}
 tx_add(){ # usage: tx_add "<bash_to_undo_this_step>"
   [ -n "${TX_STACK_FILE:-}" ] || return 0
   printf '%s\n' "$1" >>"$TX_STACK_FILE"
+}
 tx_rollback(){
   [ -f "${TX_STACK_FILE:-}" ] || return 0
   tac "$TX_STACK_FILE" | while IFS= read -r cmd; do
     [ -n "$cmd" ] && sh -c "$cmd" || true
   done
+}
 tx_commit(){
   [ -n "${TX_STACK_FILE:-}" ] && rm -f "$TX_STACK_FILE" 2>/dev/null || true
   TX_STACK_FILE=""
+}
 
 
 
@@ -108,6 +119,7 @@ chown_necessary_dirs(){
     "$HOME/.config/code-server" \
     "$HOME/data" \
     "$HOME/extensions" 2>/dev/null || true
+}
 
 install_codestrap_extension(){
   EXTBASE_DEFAULT="${CODESTRAP_EXTBASE:-$HOME/extensions}"
@@ -124,9 +136,11 @@ install_codestrap_extension(){
   if [ ! -d "$SRC_DIR" ]; then
     warn "extension source not found at $SRC_DIR (mount ./extension → /config/codestrap/extension)"
     return 0
+  fi
   if [ ! -f "$SRC_DIR/package.json" ]; then
     warn "extension source missing package.json at: $SRC_DIR"
     return 0
+  fi
 
   # Read id/version from package.json (publisher.name + version)
   PUBLISHER="$(jq -r '.publisher // empty' "$SRC_DIR/package.json" 2>/dev/null || true)"
@@ -135,6 +149,7 @@ install_codestrap_extension(){
   if [ -z "$PUBLISHER" ] || [ -z "$NAME" ] || [ -z "$VERSION" ]; then
     warn "package.json must include publisher, name, and version. ($SRC_DIR)"
     return 0
+  fi
 
   NEW_ID="${PUBLISHER}.${NAME}"
   NEW_VER="${VERSION}"
@@ -187,6 +202,7 @@ install_codestrap_extension(){
   for d in $CANDIDATES; do
     case " $seen " in *" $d "*) : ;; *) write_one "$d"; seen="$seen $d" ;; esac
   done
+}
 
 write_codestrap_login() {
   # Path inside the linuxserver/code-server image
@@ -268,10 +284,12 @@ HTML_EOF
   --accent: #3f83f8;
   --input-bg: #0b1220;
   --input-br: #4b5563;
+}
 html, body { background: var(--bg); color: var(--text); }
 body {
   min-height: 568px; min-width: 320px; overflow: auto;
   font-family: system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Noto Sans","Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";
+}
 .cs-card { background: var(--panel)!important; border: 1px solid var(--border)!important; border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.35); }
 .header .main.cs-title { color: var(--text); }
 .header .sub.cs-sub { color: var(--muted); }
@@ -285,6 +303,7 @@ body {
 .login-form > .field > .password.cs-input {
   background: var(--input-bg); border-radius:10px; border:1px solid var(--input-br);
   color: var(--text); box-sizing:border-box; flex:1; padding:14px 16px;
+}
 .login-form > .field > .password.cs-input::placeholder { color:#94a3b8; }
 .login-form > .field > .password.cs-input:focus { outline:2px solid var(--accent); outline-offset:2px; }
 
@@ -294,6 +313,7 @@ body {
   margin-left:16px; background:#1f2937; color:var(--text);
   border:1px solid var(--border); border-radius:10px; padding:0 18px; height:48px; cursor:pointer;
   transition: background .15s ease, border-color .15s ease, transform .02s ease-in;
+}
 .login-form > .field > .submit.cs-button:hover { background:#111827; border-color:var(--input-br); }
 .login-form > .field > .submit.cs-button:active { transform: translateY(1px); }
 @media (max-width:600px){ .login-form > .field > .submit.cs-button { margin-left:0; margin-top:12px; } }
@@ -303,15 +323,18 @@ CSS_EOF
 
   # permissions (non-root-friendly)
   chown -R "${PUID:-1000}:${PGID:-1000}" "$PAGES_DIR" 2>/dev/null || true
+}
 
 # ===== prompts (prefix each with PROMPT_TAG) =====
 read_line(){
   if has_tty; then IFS= read -r _l </dev/tty || true; else IFS= read -r _l || true; fi
   printf "%s" "${_l:-}"
+}
 prompt(){
   msg="$1"
   if has_tty; then printf "%s%s" "$PROMPT_TAG" "$msg" >/dev/tty; else printf "%s%s" "$PROMPT_TAG" "$msg"; fi
   read_line
+}
 prompt_def(){ v="$(prompt "$1")"; [ -n "$v" ] && printf "%s" "$v" || printf "%s" "$2"; }
 prompt_secret(){
   if has_tty; then
@@ -320,10 +343,13 @@ prompt_secret(){
     IFS= read -r s </dev/tty || true
     stty echo </dev/tty >/dev/tty 2>/dev/null || true
     printf "\n" >/dev/tty 2>/dev/null || true
+  else
     # non-interactive: read from stdin; no /dev/tty touches
     printf "%s%s" "$PROMPT_TAG" "$1"
     IFS= read -r s || true
+  fi
   printf "%s" "${s:-}"
+}
 yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
 normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
 prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
@@ -341,6 +367,7 @@ Usage:
   codestrap -h | --help
   codestrap -v | --version
 HLP
+}
 
 print_version(){ echo "codestrap ${VERSION}"; }
 
@@ -393,7 +420,9 @@ CODESTRAP_CONFIG_DIR="${CODESTRAP_CONFIG_DIR:-}"
 if [ -z "$CODESTRAP_CONFIG_DIR" ]; then
   if [ -d "$HOME/codestrap/config" ]; then
     CODESTRAP_CONFIG_DIR="$HOME/codestrap/config"
+  else
     CODESTRAP_CONFIG_DIR="$HOME/codestrap"
+  fi
 fi
 
 # Profiles dir
@@ -407,7 +436,9 @@ REPO_TASKS_SRC="${REPO_TASKS_SRC:-$CODESTRAP_CONFIG_DIR/tasks.json}"
 
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
-# (Phase-1) No ORIGIN_* tracking; we’re removing env-based bootstrap.
+# Track origins for nicer errors
+ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
+ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
 
 # ===== external preserve store =====
 PRESERVE_MAIN="$HOME/codestrap/codestrap_preserve.json"
@@ -418,7 +449,10 @@ read_preserve_array_json(){ # usage: read_preserve_array_json settings|keybindin
   [ -f "$PRESERVE_MAIN" ] || { echo '[]'; return 0; }
   if jq -e . "$PRESERVE_MAIN" >/dev/null 2>&1; then
     jq -c --arg k "$kind" '.[$k] // []' "$PRESERVE_MAIN" 2>/dev/null || echo '[]'
+  else
     echo '[]'
+  fi
+}
 
 merge_preserve_files_union(){
   # If both a user copy and a main copy exist (and are valid JSON), union arrays per key.
@@ -430,11 +464,15 @@ merge_preserve_files_union(){
       reduce (keys_all[]) as $k ({}; .[$k] = ( (arr($U[0][$k]) + arr($M[0][$k])) | unique ))
     ' >"$tmp" || cp -f "$m" "$tmp"
     mv -f "$tmp" "$m"
+  else
     # prefer the one that parses; otherwise create empty
     if jq -e . "$u" >/dev/null 2>&1; then cp -f "$u" "$m"
     elif jq -e . "$m" >/dev/null 2>&1; then : # keep main
     else echo '{}' >"$m"
+    fi
+  fi
   rm -f "$tmp" 2>/dev/null || true
+}
 
 # ===== profile schema validation =====
 validate_profile_schema(){ # usage: validate_profile_schema </path/to/profile.json>
@@ -443,6 +481,7 @@ validate_profile_schema(){ # usage: validate_profile_schema </path/to/profile.js
   if ! jq -e . "$file" >/dev/null 2>&1; then
     err "profile JSON is not valid (parse error)."
     return 2
+  fi
 
   # 2) Semantic checks → emit one error per violation (human friendly)
   # Accept either "repos-subdir" or "repos_subdir" for compatibility.
@@ -529,8 +568,10 @@ validate_profile_schema(){ # usage: validate_profile_schema </path/to/profile.js
     err "profile schema validation failed:"
     printf '%s\n' "$errors" | while IFS= read -r e; do [ -n "$e" ] && err " - $e"; done
     return 2
+  fi
 
   return 0
+}
 
 # ===== root guard =====
 require_root(){ if [ "$(id -u)" != "0" ]; then warn "not root; skipping system install step"; return 1; fi; return 0; }
@@ -544,6 +585,7 @@ bool_from_token(){
     f|false|0|n|no|'') echo 0 ;;
     *) echo 0 ;;
   esac
+}
 
 policy_allow_sudo_change(){
   # default deny if file missing/unreadable
@@ -552,6 +594,7 @@ policy_allow_sudo_change(){
   if command -v yq >/dev/null 2>&1; then
     # yq: read scalar, could be true/false/"true"/"false"
     v="$(yq -r '."allow-sudo-password-change" // ""' "$POLICY_YAML" 2>/dev/null || true)"
+  else
     # Fallback: naive "key: value" line parser
     v="$(
       awk -F: '
@@ -562,14 +605,17 @@ policy_allow_sudo_change(){
           print; exit
         }' "$POLICY_YAML" 2>/dev/null
     )"
+  fi
 
   bool_from_token "$v"
+}
 
 sudo_hash_pw(){
   # usage: sudo_hash_pw "<plain>" -> prints $6$<salt>$<hash>
   _pw="$1"
   _salt="$(head -c 12 /dev/urandom | base64 | tr -dc 'A-Za-z0-9./' | cut -c1-16)"
   openssl passwd -6 -salt "$_salt" "$_pw"
+}
 
 apply_sudo_hash_if_present(){
   # Apply the hash from $SUDO_PASS_HASH_PATH to $SUDO_USER if allowed by policy.
@@ -591,6 +637,9 @@ apply_sudo_hash_if_present(){
     # Fallback to usermod -p
     elif command -v usermod >/dev/null 2>&1; then
       usermod -p "$HASH" "$SUDO_USER" >/dev/null 2>&1 || true
+    fi
+  fi
+}
 
 enforce_policy_permissions(){
   allow="$(policy_allow_sudo_change)"
@@ -610,12 +659,15 @@ enforce_policy_permissions(){
 
     chown "${PUID:-1000}:${PGID:-1000}" "$PASS_HASH_PATH" 2>/dev/null || true
     chmod 640 "$PASS_HASH_PATH" 2>/dev/null || true
+  else
     # Locked down when not allowed
     chown root:root "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
     chmod 600 "$SUDO_PASS_HASH_PATH" 2>/dev/null || true
 
     chown root:root "$PASS_HASH_PATH" 2>/dev/null || true
     chmod 600 "$PASS_HASH_PATH" 2>/dev/null || true
+  fi
+}
 
 init_default_sudo_password_if_env(){
   DEFAULT_SUDO_PASSWORD="${DEFAULT_SUDO_PASSWORD:-}"
@@ -627,6 +679,7 @@ init_default_sudo_password_if_env(){
   printf '%s' "$_hash" > "$SUDO_PASS_HASH_PATH"
   log "wrote default sudo password hash → $SUDO_PASS_HASH_PATH"
   enforce_policy_permissions
+}
 
 sudo_password_change_interactive(){
   if [ "$(policy_allow_sudo_change)" != "1" ]; then
@@ -634,6 +687,7 @@ sudo_password_change_interactive(){
     err "Changing sudo password is disabled by policy (see $POLICY_YAML → allow-sudo-password-change: false)."
     CTX_TAG=""
     return 1
+  fi
 
   _OLD_PROMPT_TAG="$PROMPT_TAG"; _OLD_CTX_TAG="$CTX_TAG"
   PROMPT_TAG="[Change sudo password] ? "; CTX_TAG="[Change sudo password]"
@@ -655,6 +709,7 @@ sudo_password_change_interactive(){
   trigger_restart_gate
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"; CTX_TAG="$_OLD_CTX_TAG"
+}
 
 sudo_password_set_noninteractive(){
   PW="${1:-}"; CONF="${2:-}"
@@ -664,6 +719,7 @@ sudo_password_set_noninteractive(){
     err "Changing sudo password is disabled by policy (see $POLICY_YAML → allow-sudo-password-change: false)."
     CTX_TAG=""
     return 1
+  fi
 
   [ -n "$PW" ]   || { CTX_TAG="[Change sudo password]"; err "empty password not allowed"; CTX_TAG=""; return 1; }
   [ -n "$CONF" ] || { CTX_TAG="[Change sudo password]"; err "confirmation required"; CTX_TAG=""; return 1; }
@@ -678,6 +734,7 @@ sudo_password_set_noninteractive(){
   sleep 0.3
   trigger_restart_gate
   return 0
+}
 
 # ===== restart gate (root-only) =====
 install_restart_gate(){
@@ -692,6 +749,7 @@ const PORT = 9000, HOST = '127.0.0.1';
 function supervisedRestart(){
   const cmd = "sh -c 'for i in 1 2 3 4 5; do [ -p /run/s6/scan-control ] && break; sleep 0.4; done; s6-svscanctl -t /run/s6 >/dev/null 2>&1 || kill -TERM 1 >/dev/null 2>&1'";
   exec(cmd, () => {});
+}
 http.createServer((req,res)=>{
   const url=(req.url||'/').split('?')[0];
   if(url==='/health'){ res.writeHead(200,{'Content-Type':'text/plain'}).end('OK'); return; }
@@ -717,6 +775,7 @@ EOF
   chmod +x /etc/services.d/restartgate/run
   printf '%s\n' '#!/usr/bin/env sh' 'exit 0' >/etc/services.d/restartgate/finish && chmod +x /etc/services.d/restartgate/finish
   log "installed restart gate service"
+}
 
 trigger_restart_gate(){ command -v curl >/dev/null 2>&1 && curl -fsS --max-time 3 "http://127.0.0.1:9000/restart" >/dev/null 2>&1 || true; }
 
@@ -727,6 +786,7 @@ trigger_window_reload(){
   mkdir -p "/run/codestrap" 2>/dev/null || true
   # Write a command the extension explicitly recognizes, with a monotonic nonce
   printf 'RELOAD:%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
+}
 
 # ===== first-boot default password =====
 init_default_password_if_env(){
@@ -739,35 +799,48 @@ init_default_password_if_env(){
   hash="$(printf '%s' "$DEFAULT_PASSWORD" | argon2 "$salt" -id -e)"
   printf '%s' "$hash" > "$PASS_HASH_PATH"; chmod 644 "$PASS_HASH_PATH" || true; chown "${PUID}:${PGID}" "$PASS_HASH_PATH" 2>/dev/null || true
   : > "$FIRSTBOOT_MARKER"; log "wrote initial password hash"
+}
 
 # ===== helpers for interactive -a/--auto =====
-# (Phase-1) Delete env-driven prompt helpers.
+env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -a/--auto to use env %s)" "$1" || true; }
+read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
 
-# ===== GitHub validation (no env; args only) =====
+# ===== GitHub validation (fatal on failure) =====
+validate_github_username(){
+  [ -n "${GITHUB_USERNAME:-}" ] || return 0
+  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || echo "000")"
   if [ "$code" = "404" ]; then
-    err "GitHub username '${u}' appears invalid (HTTP 404)."
+    src="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+    err "GitHub username '${GITHUB_USERNAME}' appears invalid (HTTP 404). Check ${src}."
     return 1
   elif [ "$code" != "200" ]; then
-    err "Could not verify GitHub username '${u}' (HTTP $code)."
+    err "Could not verify GitHub username '${GITHUB_USERNAME}' (HTTP $code)."
     return 1
+  fi
+}
 
-validate_github_token(){ # $1=token
+validate_github_token(){
+  [ -n "${GITHUB_TOKEN:-}" ] || return 0
   code="$(curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: token ${_t}" \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: codestrap" \
     https://api.github.com/user || echo "000")"
+  src="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
   if [ "$code" = "401" ]; then
-    err "Provided GitHub token is invalid or expired (HTTP 401). Needs scopes: user:email, admin:public_key."
+    err "Provided GITHUB_TOKEN (${src}) is invalid or expired (HTTP 401). Please provide a valid classic token with scopes: user:email, admin:public_key."
     return 1
   elif [ "$code" = "403" ]; then
-    err "Provided GitHub token is not authorized (HTTP 403). Missing scopes? user:email, admin:public_key."
+    err "Provided GITHUB_TOKEN (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
     return 1
   elif [ "$code" != "200" ]; then
-    err "Could not verify GitHub token (HTTP $code)."
+    err "Could not verify GITHUB_TOKEN (${src}) (HTTP $code)."
     return 1
+  fi
   headers="$(curl -fsS -D - -o /dev/null \
-    -H "Authorization: token ${_t}" \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
     -H "User-Agent: codestrap" \
     https://api.github.com/user 2>/dev/null || true)"
@@ -775,6 +848,8 @@ validate_github_token(){ # $1=token
   if [ -n "$scopes" ]; then
     echo "$scopes" | grep -q 'admin:public_key' || warn "$(ylw "GITHUB_TOKEN may be missing 'admin:public_key' (needed to upload SSH key). Current scopes: $scopes")"
     echo "$scopes" | grep -q 'user:email'       || warn "$(ylw "GITHUB_TOKEN may be missing 'user:email' (needed to resolve your primary email). Current scopes: $scopes")"
+  fi
+}
 
 # ===== password change =====
 password_change_interactive(){
@@ -801,6 +876,7 @@ password_change_interactive(){
 
   PROMPT_TAG="$_OLD_PROMPT_TAG"
   CTX_TAG="$_OLD_CTX_TAG"
+}
 
 password_set_noninteractive(){
   # usage: codestrap passwd --set "<password>" "<confirm>"
@@ -816,35 +892,46 @@ password_set_noninteractive(){
   log "password updated (non-interactive)"
   trigger_restart_gate
   return 0
+}
 
-resolve_email(){ # $1=username, $2=token
+# ===== github bootstrap internals =====
+resolve_email(){
+  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
+  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
   PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
   [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
   VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
   [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
-  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${_u}" || true)"
+  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
   PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
   [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
-  echo "${_u:-unknown}@users.noreply.github.com"
-git_upload_key(){ # $1=token, $2=title
+  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
+}
+git_upload_key(){
+  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GITHUB_KEY_TITLE="${GITHUB_KEY_TITLE:-codestrapped-code-server SSH Key}"
+  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
 
   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
-  KEYS_JSON="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
 
   echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
 
   RESP="$(curl -fsS -X POST \
-    -H "Authorization: token ${_t}" \
+    -H "Authorization: token ${GITHUB_TOKEN}" \
     -H "Accept: application/vnd.github+json" \
-    -d "{\"title\":\"$_title\",\"key\":\"$LOCAL_KEY\"}" \
+    -d "{\"title\":\"$GITHUB_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" \
     https://api.github.com/user/keys || true)"
 
   KEY_ID="$(printf "%s" "$RESP" | jq -r '.id // empty' 2>/dev/null || true)"
   if [ -n "$KEY_ID" ] && [ "$KEY_ID" != "null" ]; then
     log "SSH key added (id=$KEY_ID)"
     # register compensating action for profile transactions if active
-    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${_t}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
+    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${GITHUB_TOKEN}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
+  else
     warn "Key upload failed: $(redact "$RESP")"
+  fi
+}
 clone_one(){
   spec="$1"; PULL="${2:-true}"
   spec="$(echo "$spec" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"; [ -n "$spec" ] || return 0
@@ -871,8 +958,11 @@ clone_one(){
         git -C "$dest" reset --hard "origin/${branch}" || warn "hard reset origin/${branch} failed for ${name}"
       else
         git -C "$dest" pull --ff-only || warn "pull --ff-only failed for ${name}"
+      fi
     else
       log "skip pull: ${name}"
+    fi
+  else
     # register compensation: delete created directory if we fail later
     tx_add "rm -rf '$dest' >/dev/null 2>&1 || true"
     log "clone: ${safe_url} -> ${dest} (branch='${branch:-default}')"
@@ -880,24 +970,36 @@ clone_one(){
       git clone --branch "$branch" --single-branch "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
     else
       git clone "$url" "$dest" || { err "Clone failed for '$spec'"; return 1; }
+    fi
+  fi
   chown -R "$PUID:$PGID" "$dest" || true
+}
 
 
-github_bootstrap(){ # $1=user $2=token $3=name $4=email $5=repos_csv $6=pull_bool $7=workspace_dir $8=repos_subdir
+codestrap_run(){
+  # Use variables set by profile_cmd only; do not read env defaults.
+  : "${GITHUB_USERNAME:=}"
+  : "${GITHUB_TOKEN:=}"
+  : "${GIT_NAME:=${GITHUB_USERNAME}}"
+  : "${GIT_EMAIL:=}"
+  : "${GITHUB_REPOS:=}"
+  : "${GITHUB_PULL:=true}"
 
-  if ! validate_github_username "$GITHUB_USERNAME"; then
+  if ! validate_github_username; then
     abort_or_continue "[Bootstrap GitHub]" "GitHub username validation failed."
     return 0
-  if ! validate_github_token "$GITHUB_TOKEN"; then
+  fi
+  if ! validate_github_token; then
     abort_or_continue "[Bootstrap GitHub]" "GitHub token validation failed."
     return 0
+  fi
 
   git config --global init.defaultBranch main || true
   git config --global pull.ff only || true
   git config --global advice.detachedHead false || true
   git config --global --add safe.directory "*"
   git config --global user.name "${GIT_NAME:-codestrap}" || true
-  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "$GITHUB_TOKEN" || true)"; fi
+  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
   git config --global user.email "$GIT_EMAIL" || true
   log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
   umask 077
@@ -905,6 +1007,7 @@ github_bootstrap(){ # $1=user $2=token $3=name $4=email $5=repos_csv $6=pull_boo
   touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
   if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
   git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
+  git_upload_key || true
 
   if [ -n "${GITHUB_REPOS:-}" ]; then
     IFS=,; set -- $GITHUB_REPOS; unset IFS
@@ -912,10 +1015,16 @@ github_bootstrap(){ # $1=user $2=token $3=name $4=email $5=repos_csv $6=pull_boo
     for spec in "$@"; do
       if ! clone_one "$spec" "$GITHUB_PULL"; then
         CLONE_ERRORS=$((CLONE_ERRORS+1))
+      fi
     done
     if [ "$CLONE_ERRORS" -gt 0 ]; then
       abort_or_continue "[Bootstrap GitHub]" "One or more repositories failed to clone ($CLONE_ERRORS)."
       return 0
+    fi
+  else
+    log "GITHUB_REPOS empty; skip clone"
+  fi
+}
 
 # ===== JSONC → JSON (comments only) =====
 strip_jsonc_to_json(){ sed -e 's://[^\r\n]*$::' -e '/\/\*/,/\*\//d' "$1"; }
@@ -927,9 +1036,12 @@ write_inplace(){
   if [ -f "$dest" ]; then
     # Overwrite contents without replacing the inode (keeps watchers alive)
     cat "$tmp" > "$dest"
+  else
     # First-time create (sets perms/owner once)
     install -m 644 -D "$tmp" "$dest"
     chown "${PUID:-1000}:${PGID:-1000}" "$dest" 2>/dev/null || true
+  fi
+}
 
 # pretty-print JSON to a file (creates parent dir, preserves inode if exists)
 write_json_pretty(){ # usage: write_json_pretty '<json-string>' <dest>
@@ -939,6 +1051,7 @@ write_json_pretty(){ # usage: write_json_pretty '<json-string>' <dest>
   write_inplace "$_tmp" "$_dest"
   rm -f "$_tmp" 2>/dev/null || true
   chown "${PUID}:${PGID}" "$_dest" 2>/dev/null || true
+}
 
 # ===== transactional apply helpers =====
 _backup_one(){
@@ -947,13 +1060,17 @@ _backup_one(){
   bkp="$(mktemp)"
   if [ -f "$src" ]; then
     cat "$src" > "$bkp"
+  else
     printf '' > "$bkp"
+  fi
   echo "$bkp"
+}
 
 _restore_one(){
   # usage: _restore_one <backup-path> <dest-path>
   local bkp="$1" dest="$2"
   write_inplace "$bkp" "$dest"
+}
 
 # Write pretty JSON to a temp file first (validate), then atomically apply
 _apply_json_transactional(){ # usage: _apply_json_transactional '<json>' <dest>
@@ -963,11 +1080,13 @@ _apply_json_transactional(){ # usage: _apply_json_transactional '<json>' <dest>
   write_inplace "$tmp" "$dest"
   rm -f "$tmp"
   return 0
+}
 
 # ===== top-of-file error banner =====
 _banner_strip_first_if_error(){
   # strip the first line if it is our banner
   awk 'NR==1 && $0 ~ /^\/\/ CODESTRAP-ERROR:/ { next } { print }'
+}
 
 put_error_banner_with_hint(){ # usage: put_error_banner_with_hint <file> "<base-msg>" "<hint>"
   file="$1"; shift; base="$1"; shift; hint="$*"
@@ -980,14 +1099,17 @@ put_error_banner_with_hint(){ # usage: put_error_banner_with_hint <file> "<base-
   } >"$tmp"
   write_inplace "$tmp" "$file"
   rm -f "$tmp" 2>/dev/null || true
+}
 
 put_error_banner_this(){ # usage: put_error_banner_this <file> "<base-msg>"
   put_error_banner_with_hint "$1" "$2" "Fix errors in this file and run \`codestrap config\` again!"
+}
 
 put_error_banner_repo(){ # usage: put_error_banner_repo <file> "<base-msg>" "<repo-kind>" "<repo-abs-path>"
   # repo-kind examples: "repo settings.json", "repo keybindings.json", "repo extensions.json"
   # repo-abs-path is the actual $REPO_*_SRC path we tried to read (already absolute via $HOME)
   put_error_banner_with_hint "$1" "$2" "Fix errors in ${3} file or ${4} file and run \`codestrap config\` again!"
+}
 
 clear_error_banner(){ # usage: clear_error_banner <file>
   file="$1"
@@ -996,6 +1118,7 @@ clear_error_banner(){ # usage: clear_error_banner <file>
   _banner_strip_first_if_error <"$file" >"$tmp"
   write_inplace "$tmp" "$file"
   rm -f "$tmp" 2>/dev/null || true
+}
 
 # ===== settings.json merge =====
 merge_codestrap_settings(){
@@ -1029,6 +1152,7 @@ merge_codestrap_settings(){
         }
       }
     ' | awk 'NF' | awk '!seen[$0]++' >"$tmp_preserve_keys"
+  fi
 
   # ---- Load USER (allow comments only) ----
   tmp_user_json="$(mktemp)"
@@ -1043,12 +1167,17 @@ merge_codestrap_settings(){
         abort_or_continue "[Bootstrap config]" "user settings.json is malformed; skipped merge to avoid data loss."
         rm -f "$tmp_preserve_keys" 2>/dev/null || true
         return 0
+      fi
+    fi
+  else
     printf '{}\n' >"$tmp_user_json"
+  fi
 
   # ---- Load REPO (allow comments only) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_SETTINGS_SRC" >/dev/null 2>&1; then
     cp "$REPO_SETTINGS_SRC" "$tmp_repo_json"
+  else
     strip_jsonc_to_json "$REPO_SETTINGS_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
@@ -1056,12 +1185,16 @@ merge_codestrap_settings(){
       abort_or_continue "[Bootstrap config]" "repo settings JSON invalid → $REPO_SETTINGS_SRC; skipped merge."
       rm -f "$tmp_preserve_keys" 2>/dev/null || true
       return 0
+    fi
+  fi
 
   # keys managed by repo (in order) + previously managed snapshot
   RS_KEYS_JSON="$(jq 'keys' "$tmp_repo_json")"
   if [ -f "$MANAGED_KEYS_FILE" ] && jq -e . "$MANAGED_KEYS_FILE" >/dev/null 2>&1; then
     OLD_KEYS_JSON="$(cat "$MANAGED_KEYS_FILE")"
+  else
     OLD_KEYS_JSON='[]'
+  fi
 
   # ----- merge honoring inline //preserve -----
   # Build a JSON array of preserve keys from the temp file
@@ -1183,6 +1316,7 @@ merge_codestrap_settings(){
       }
     ' "$managed_with_preserve" > "$managed_final2"
     managed_final="$managed_final2"
+  fi
 
   # ----- compose final with bracket comments -----
   tmp_with_comments="$(mktemp)"
@@ -1205,6 +1339,7 @@ merge_codestrap_settings(){
         "$extras_body" "$tmp_with_comments" "$tmp_preserve_keys" 2>/dev/null || true
 
   log "merged settings.json → $SETTINGS_PATH"
+}
 
 # ===== keybindings.json merge =====
 merge_codestrap_keybindings(){
@@ -1233,18 +1368,25 @@ merge_codestrap_keybindings(){
           abort_or_continue "[Bootstrap config]" "user keybindings.json is malformed; skipped merge to avoid data loss."
           return 0
         fi
+      fi
+    fi
+  else
     printf '[]\n' > "$tmp_user_json"
+  fi
 
   # ---- Load REPO (allow comments only) ----
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_KEYB_SRC" >/dev/null 2>&1; then
     cp "$REPO_KEYB_SRC" "$tmp_repo_json"
+  else
     strip_jsonc_to_json "$REPO_KEYB_SRC" >"$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
       rm -f "$tmp_user_json" "$tmp_repo_json" 2>/dev/null || true
       put_error_banner_repo "$KEYB_PATH" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge." "repo keybindings.json" "$REPO_KEYB_SRC"
       abort_or_continue "[Bootstrap config]" "repo keybindings JSON invalid → $REPO_KEYB_SRC; skipped merge."
       return 0
+    fi
+  fi
 
   # === PASS 1: scan RAW user file to capture arrayIndex→id and (id,prop) preserved ===
   tmp_id_by_index="$(mktemp)"      # "<idx>\t<id>"
@@ -1320,13 +1462,16 @@ merge_codestrap_keybindings(){
         }
       }
     '
+  fi
 
   # Build JSON: id -> [props...]
   tmp_preserve_json="$(mktemp)"
   if [ -s "$tmp_preserve_pairs" ]; then
     awk -F'\t' 'NF==2{printf("{\"id\":\"%s\",\"prop\":\"%s\"}\n",$1,$2)}' "$tmp_preserve_pairs" \
       | jq -s 'reduce .[] as $e ({}; .[$e.id] = ((.[$e.id] // []) + [$e.prop]))' > "$tmp_preserve_json"
+  else
     printf '{}\n' > "$tmp_preserve_json"
+  fi
 
   # Build JSON: id -> full user object (found by array index)
   tmp_user_id_map="$(mktemp)"; printf '{}\n' > "$tmp_user_id_map"
@@ -1336,6 +1481,7 @@ merge_codestrap_keybindings(){
       uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_json" 2>/dev/null || printf '{}')"
       jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$tmp_user_id_map" > "$tmp_user_id_map.tmp" && mv -f "$tmp_user_id_map.tmp" "$tmp_user_id_map"
     done < "$tmp_id_by_index"
+  fi
 
   # === Build repo list with temp id markers only (we will move them to comments) ===
   tmp_repo_with_ids="$(mktemp)"
@@ -1393,7 +1539,9 @@ merge_codestrap_keybindings(){
     awk 'NF{print $0}' "$tmp_seen_idx" \
       | jq -s 'map(tonumber) | map(tostring) | reduce .[] as $k ({}; .[$k]=true)' \
       > "$tmp_seen_map"
+  else
     printf '{}\n' > "$tmp_seen_map"
+  fi
 
   tmp_extras="$(mktemp)"
   jq -n \
@@ -1574,6 +1722,7 @@ merge_codestrap_keybindings(){
       }
     ' "$managed_with_preserve" > "$managed_final2"
     managed_final="$managed_final2"
+  fi
 
   # --- Compose final array with section comments (only id comments inside objects)
   tmp_with_comments="$(mktemp)"
@@ -1597,6 +1746,7 @@ merge_codestrap_keybindings(){
         "$extras_body" "$tmp_with_comments" "$tmp_seen_idx" "$tmp_seen_map" 2>/dev/null || true
 
   log "merged keybindings.json → $KEYB_PATH"
+}
 
 # ===== tasks.json merge (tasks + inputs arrays; id comments + //preserve) =====
 merge_codestrap_tasks(){
@@ -1625,18 +1775,25 @@ merge_codestrap_tasks(){
           abort_or_continue "[Bootstrap config]" "user tasks.json is malformed; skipped merge to avoid data loss."
           return 0
         fi
+      fi
+    fi
+  else
     printf '{ "version": "2.0.0", "tasks": [], "inputs": [] }\n' > "$tmp_user_obj"
+  fi
 
   # --- Load REPO (allow comments only) ---
   tmp_repo_obj="$(mktemp)"
   if jq -e . "$REPO_TASKS_SRC" >/dev/null 2>&1; then
     cp "$REPO_TASKS_SRC" "$tmp_repo_obj"
+  else
     strip_jsonc_to_json "$REPO_TASKS_SRC" >"$tmp_repo_obj" || true
     if ! jq -e . "$tmp_repo_obj" >/dev/null 2>&1; then
       rm -f "$tmp_user_obj" "$tmp_repo_obj" 2>/dev/null || true
       put_error_banner_repo "$TASKS_PATH" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge." "repo tasks.json" "$REPO_TASKS_SRC"
       abort_or_continue "[Bootstrap config]" "repo tasks JSON invalid → $REPO_TASKS_SRC; skipped merge."
       return 0
+    fi
+  fi
 
   # ---- helper to merge one top-level array: "tasks" or "inputs" ----
   merge_one_array(){ # arg1=array name ("tasks" or "inputs")
@@ -1717,6 +1874,7 @@ merge_codestrap_tasks(){
           }
         }
       '
+    fi
 
     # Build JSON: id -> [props...]
     preserve_json="$(mktemp)"
@@ -1725,6 +1883,7 @@ merge_codestrap_tasks(){
         | jq -s 'reduce .[] as $e ({}; .[$e.id] = ((.[$e.id] // []) + [$e.prop]))' > "$preserve_json"
     else
       printf '{}\n' > "$preserve_json"
+    fi
 
     # Build JSON: id -> user object (from user array by index)
     user_id_map="$(mktemp)"; printf '{}\n' > "$user_id_map"
@@ -1734,6 +1893,7 @@ merge_codestrap_tasks(){
         uobj="$(jq -c --argjson i "$idx" '.[ $i ]' "$tmp_user_arr" 2>/dev/null || printf '{}')"
         jq --arg id "$id" --argjson obj "$uobj" '. + {($id): $obj}' "$user_id_map" > "$user_id_map.tmp" && mv -f "$user_id_map.tmp" "$user_id_map"
       done < "$id_by_index"
+    fi
 
     # Repo with temp ids
     repo_with_ids="$(mktemp)"
@@ -1750,6 +1910,7 @@ merge_codestrap_tasks(){
         | jq -s 'map(tostring) | reduce .[] as $k ({}; .[$k]=true)' > "$seen_map"
     else
       printf '{}\n' > "$seen_map"
+    fi
 
     # Merge (managed by id), compute extras via seen index map (no tonumber)
     merged_tmp="$(mktemp)"
@@ -1909,6 +2070,7 @@ merge_codestrap_tasks(){
         }
       ' "$managed_with_preserve" > "$managed_final2"
       managed_final="$managed_final2"
+    fi
 
     # Compose this array BODY (no brackets; no pre-indent)
     out_body="$(mktemp)"
@@ -1966,6 +2128,7 @@ merge_codestrap_tasks(){
   rm -f "$tmp_user_obj" "$tmp_repo_obj" "$tmp_final" "$OUT_tasks" "$OUT_inputs" 2>/dev/null || true
 
   log "merged tasks.json → $TASKS_PATH"
+}
 
 # ===== extensions.json merge (recommendations array, repo-first, de-duped) =====
 merge_codestrap_extensions(){
@@ -1995,12 +2158,17 @@ merge_codestrap_extensions(){
         put_error_banner_this "$EXT_PATH" "user extensions.json is malformed; skipped merge to avoid data loss."
         abort_or_continue "[Bootstrap config]" "user extensions.json is malformed; skipped merge to avoid data loss."
         return 0
+      fi
+    fi
+  else
     printf '{ "recommendations": [] }\n' > "$tmp_user_json"
+  fi
 
   # Load REPO (allow comments + trailing commas; validate after repair)
   tmp_repo_json="$(mktemp)"
   if jq -e . "$REPO_EXT_SRC" >/dev/null 2>&1; then
     cp "$REPO_EXT_SRC" "$tmp_repo_json"
+  else
     # repo extensions invalid → skip on init, exit on cli
     _strip_jsonc_trailing "$REPO_EXT_SRC" > "$tmp_repo_json" || true
     if ! jq -e . "$tmp_repo_json" >/dev/null 2>&1; then
@@ -2008,6 +2176,8 @@ merge_codestrap_extensions(){
       put_error_banner_repo "$EXT_PATH" "repo extensions JSON invalid → $REPO_EXT_SRC; skipped merge." "repo extensions.json" "$REPO_EXT_SRC"
       abort_or_continue "[Bootstrap config]" "repo extensions JSON invalid → $REPO_EXT_SRC; skipped merge."
       return 0
+    fi
+  fi
 
   # Extract repo list (de-dup preserving order)
   tmp_repo_list="$(mktemp)"
@@ -2035,6 +2205,7 @@ merge_codestrap_extensions(){
       [ -n "$item" ] || continue
       if [ $first -eq 0 ]; then
         printf ",\n"
+      fi
       printf "    %s" "$item"
       first=0
     done < "$tmp_repo_list"
@@ -2046,6 +2217,8 @@ merge_codestrap_extensions(){
         printf ",\n"
       else
         printf "\n"
+      fi
+    fi
 
     echo '    //user defined extensions:'
 
@@ -2055,6 +2228,7 @@ merge_codestrap_extensions(){
       [ -n "$item" ] || continue
       if [ $first_e -eq 0 ]; then
         printf ",\n"
+      fi
       printf "    %s" "$item"
       first_e=0
     done < "$tmp_user_extras"
@@ -2071,35 +2245,43 @@ merge_codestrap_extensions(){
   clear_error_banner "$EXT_PATH"
   rm -f "$tmp_user_json" "$tmp_repo_json" "$tmp_repo_list" "$tmp_user_extras" "$tmp_with_comments" 2>/dev/null || true
   log "merged extensions.json → $EXT_PATH"
+}
 
 # ===== extension management (install/update/uninstall using code-server/VS Code CLI) =====
 detect_code_cli(){
   if command -v code-server >/dev/null 2>&1; then echo "code-server"; return 0; fi
   if command -v code >/dev/null 2>&1; then echo "code"; return 0; fi
   echo ""
+}
 
 emit_recommended_exts(){
   [ -f "$EXT_PATH" ] || return 0
   tmp="$(mktemp)"
   if jq -e . "$EXT_PATH" >/dev/null 2>&1; then
     cp "$EXT_PATH" "$tmp"
+  else
     strip_jsonc_to_json "$EXT_PATH" >"$tmp" || true
     jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 0; }
+  fi
   jq -r '.recommendations // [] | .[] | strings' "$tmp" 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
   rm -f "$tmp" 2>/dev/null || true
+}
 
 emit_installed_exts(){
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || return 0
   "$CODE_BIN" --list-extensions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
+}
 
 emit_installed_exts_with_versions(){
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || return 0
   "$CODE_BIN" --list-extensions --show-versions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
+}
 
 snapshot_extensions_state(){
   local out="$1"
   : >"$out"
   emit_installed_exts_with_versions >>"$out" 2>/dev/null || true
+}
 
 restore_extensions_state(){
   local in="$1"
@@ -2120,6 +2302,7 @@ restore_extensions_state(){
   done <"$in"
 
   rm -f "$curf" "$curf.ids" "$in.ids" 2>/dev/null || true
+}
 
 
 install_one_ext(){
@@ -2127,12 +2310,16 @@ install_one_ext(){
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot install ${ext}"; return 1; }
   if [ "$force" = "true" ]; then
     "$CODE_BIN" --install-extension "$ext" --force >/dev/null 2>&1
+  else
     "$CODE_BIN" --install-extension "$ext" >/dev/null 2>&1
+  fi
+}
 
 uninstall_one_ext(){
   ext="$1"
   CODE_BIN="$(detect_code_cli)"; [ -n "$CODE_BIN" ] || { warn "code CLI not found; cannot uninstall ${ext}"; return 1; }
   "$CODE_BIN" --uninstall-extension "$ext" >/dev/null 2>&1
+}
 
 in_file(){ needle="$1"; file="$2"; grep -F -x -q -- "$needle" "$file" 2>/dev/null; }
 
@@ -2207,12 +2394,14 @@ EHELP
       echo "$ext" >>"$tmp_present_rec"
     else
       echo "$ext" >>"$tmp_not_recommended"
+    fi
   done <"$tmp_installed"
 
   while IFS= read -r ext; do
     [ -n "$ext" ] || continue
     if ! in_file "$ext" "$tmp_installed"; then
       echo "$ext" >>"$tmp_missing"
+    fi
   done <"$tmp_recs"
 
   do_uninstall(){
@@ -2336,14 +2525,19 @@ EHELP
       if [ "$UNMODE" = "all" ]; then
         conf="$(prompt_def "This will remove ALL installed extensions (protected skipped). Continue? (y/N) " "n")"
         [ "$(yn_to_bool "$conf")" = "true" ] || { log "aborted uninstall all"; PROMPT_TAG=""; CTX_TAG=""; rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended"; exit 0; }
+      fi
       do_uninstall "$UNMODE"
+    fi
     PROMPT_TAG=""
     CTX_TAG=""
+  else
     # Non-interactive: ALWAYS uninstall first (if requested), then install (if requested)
     if [ -n "$UNMODE" ]; then do_uninstall "$UNMODE"; fi
     if [ -n "$MODE" ]; then do_install "$MODE"; fi
+  fi
 
   rm -f "$tmp_recs" "$tmp_installed" "$tmp_missing" "$tmp_present_rec" "$tmp_not_recommended" 2>/dev/null || true
+}
 
 # ===== profile loader =====
 profile_cmd(){
@@ -2372,6 +2566,7 @@ Profile shape:
     "repos-subdir": "repos",
     "pull-existing": true
   }
+}
 
 Notes:
 - settings/keybindings/tasks/extensions overwrite current user files.
@@ -2397,6 +2592,7 @@ PHELP
   # 0) Validate JSON + schema BEFORE doing anything
   if ! validate_profile_schema "$FILE"; then
     exit 2
+  fi
 
   # Extract sections as compact JSON for writes
   J_SETTINGS="$(jq -c '."settings" // empty' "$FILE")"
@@ -2405,7 +2601,8 @@ PHELP
   J_EXTS="$(jq -c '."extensions" // empty' "$FILE")"
   J_GH="$(jq -c '."github" // empty' "$FILE")"
 
-  # No env leakage; we’ll pass args.
+  # Ensure no env leakage into GitHub/bootstrap path
+  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
 
   CTX_TAG="[Profile: ${NAME}]"
 
@@ -2430,7 +2627,9 @@ PHELP
   if [ -n "$J_SETTINGS" ]; then
     log "apply settings.json"
     _apply_json_transactional "$J_SETTINGS" "$SETTINGS_PATH" || ROLLBACK=1
+  else
     log "no settings in profile (leaving existing)"
+  fi
 
   # 2) Apply keybindings.json (if provided)
   if [ $ROLLBACK -eq 0 ] && [ -n "$J_KEYB" ]; then
@@ -2438,6 +2637,7 @@ PHELP
     _apply_json_transactional "$J_KEYB" "$KEYB_PATH" || ROLLBACK=1
   elif [ $ROLLBACK -ne 0 ]; then :; else
     log "no keybindings in profile (leaving existing)"
+  fi
 
   # 3) Apply tasks.json (if provided)
   if [ $ROLLBACK -eq 0 ] && [ -n "$J_TASKS" ]; then
@@ -2445,6 +2645,7 @@ PHELP
     _apply_json_transactional "$J_TASKS" "$TASKS_PATH" || ROLLBACK=1
   elif [ $ROLLBACK -ne 0 ]; then :; else
     log "no tasks in profile (leaving existing)"
+  fi
 
   # 4) Apply extensions.json (file only; delay sync until we know everything passed)
   local EXT_FILE_APPLIED=0
@@ -2457,25 +2658,58 @@ PHELP
       EXT_FILE_APPLIED=1
     else
       ROLLBACK=1
+    fi
     rm -f "$TMP_E" 2>/dev/null || true
   elif [ $ROLLBACK -ne 0 ]; then :; else
     log "no extensions in profile (leaving existing)"
+  fi
 
-  # 5) GitHub bootstrap (prompt for token; pass args only)
+  # 5) GitHub bootstrap (prompt for token; never read from env)
   if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
     if ! is_tty; then
       err "GitHub section present but no TTY available for token prompt."
       ROLLBACK=1
+    fi
 
     # read profile values
-    GH_USER="$(jq -r '.github.username' "$FILE")"
+    GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
+    GIT_NAME="$(jq -r '.github.name // empty' "$FILE")"
+    GIT_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
+    # repos as comma-separated for our existing codestrap_run loop
+    GITHUB_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
+    REPOS_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
+    GITHUB_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
 
     # recompute base path using the profile's repos-subdir (ignore env)
+    recompute_base
 
     # Always prompt for token (no env fallback)
+    if [ $ROLLBACK -eq 0 ]; then
+      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
+      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+      log "bootstrapping GitHub from profile"
+      if ! codestrap_run; then
+        err "GitHub bootstrap failed"
+        ROLLBACK=1
+      fi
+    fi
 
+    if [ $ROLLBACK -eq 0 ]; then
+      # Export + run bootstrap only if still clean
+      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
 
+      log "bootstrapping GitHub from profile"
+      if ! codestrap_run; then
+        err "GitHub bootstrap failed"
+        ROLLBACK=1
+      fi
+    fi
+  else
     [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
+  fi
 
   # If anything failed, restore backups and stop here.
   if [ $ROLLBACK -ne 0 ]; then
@@ -2483,6 +2717,7 @@ PHELP
     tx_rollback
     CTX_TAG=""
     exit 1
+  fi
 
   # If we got here, everything (including GitHub) succeeded. Now do ext sync if needed.
   if [ "$EXT_FILE_APPLIED" -eq 1 ]; then
@@ -2495,18 +2730,22 @@ PHELP
     if ! extensions_cmd --uninstall missing --install all; then
       warn "extensions sync failed"
       ROLLBACK=1
+    fi
+  fi
 
   if [ $ROLLBACK -ne 0 ]; then
     warn "error after sync; rolling back"
     tx_rollback
     CTX_TAG=""
     exit 1
+  fi
 
   tx_commit
   CTX_TAG=""
   log "profile '${NAME}' applied"
   trigger_window_reload
   return 0
+}
 
 
 # ===== CLI helpers =====
@@ -2523,6 +2762,8 @@ for TARGET in /custom-cont-init.d/10-codestrap.sh; do
       exec "$TARGET" cli "$@"
     else
       exec sh "$TARGET" cli "$@"
+    fi
+  fi
 done
 echo "[codestrap][ERROR] launcher script not found." >&2
 exit 127
@@ -2530,6 +2771,7 @@ EOF
     chmod 755 /usr/local/bin/codestrap
     echo "${CODESTRAP_VERSION:-0.3.8}" >/etc/codestrap-version 2>/dev/null || true
     log "installed CLI shim → /usr/local/bin/codestrap"
+  else
     # Non-root fallback: user-level install
     mkdir -p "$HOME/.local/bin"
     cat >"$HOME/.local/bin/codestrap" <<'EOF'
@@ -2541,6 +2783,8 @@ for TARGET in /custom-cont-init.d/10-codestrap.sh; do
       exec "$TARGET" cli "$@"
     else
       exec sh "$TARGET" cli "$@"
+    fi
+  fi
 done
 echo "[codestrap][ERROR] launcher script not found." >&2
 exit 127
@@ -2548,20 +2792,47 @@ EOF
     chmod 755 "$HOME/.local/bin/codestrap"
     case ":$PATH:" in *":$HOME/.local/bin:"*) : ;; *) log "note: ensure \$HOME/.local/bin is on PATH to use 'codestrap' command";; esac
     log "installed CLI shim → $HOME/.local/bin/codestrap"
+  fi
+}
 
 bootstrap_banner(){ if has_tty; then printf "[codestrap] Interactive bootstrap — press Ctrl+C to abort.\n" >/dev/tty; else log "No TTY; use flags or --auto."; fi; }
 
+# --- interactive GitHub flow ---
+bootstrap_interactive(){
+  GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
+  GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
+  GIT_NAME="$(read_or_env "Git name (blank=use GitHub account username) [${GIT_NAME:-${GITHUB_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GITHUB_USERNAME:-}}")"
+  GIT_EMAIL="$(read_or_env "Git email (blank=use GitHub account email)" GIT_EMAIL "")"
+  GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
+  GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required." >&2; exit 2; }
+  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  codestrap_run; log "bootstrap complete"
+}
 
+bootstrap_env_only(){
+  ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+  ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (env)." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (env)." >&2; exit 2; }
+  export ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  codestrap_run; log "bootstrap complete (env)"
+}
 
-recompute_base(){ # uses current WORKSPACE_DIR & REPOS_SUBDIR values (set by caller)
+recompute_base(){
+  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
   WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
   ensure_dir "$WORKSPACE_DIR"
   REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
   REPOS_SUBDIR="$(printf '%s' "$REPOS_SUBDIR" | sed 's:^/*::; s:/*$::')"
   if [ -n "$REPOS_SUBDIR" ]; then
     BASE="${WORKSPACE_DIR}/${REPOS_SUBDIR}"
+  else
     BASE="${WORKSPACE_DIR}"
+  fi
   ensure_dir "$BASE"
+}
 
 # --- interactive config flow (manual flow) ---
 config_interactive(){
@@ -2569,23 +2840,32 @@ config_interactive(){
   CTX_TAG="[Bootstrap config]"
   if [ "$(prompt_yn "merge codestrap settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_settings
+  else
     log "skipped settings merge"
+  fi
 
   if [ "$(prompt_yn "merge codestrap keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_keybindings
+  else
     log "skipped keybindings merge"
+  fi
 
   if [ "$(prompt_yn "merge codestrap tasks.json to user tasks.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_tasks
+  else
     log "skipped tasks merge"
+  fi
 
   if [ "$(prompt_yn "merge codestrap extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
     merge_codestrap_extensions
+  else
     log "skipped extensions merge"
+  fi
 
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
+}
 
 # --- hybrid / flag-aware config flow ---
 config_hybrid(){
@@ -2598,10 +2878,14 @@ config_hybrid(){
       merge_codestrap_settings
     else
       log "skipped settings merge"
+    fi
+  else
     if [ "$(prompt_yn "merge strapped settings.json to user settings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_settings
     else
       log "skipped settings merge"
+    fi
+  fi
 
   # --keybindings
   if [ -n "${CFG_KEYB+x}" ]; then
@@ -2609,10 +2893,14 @@ config_hybrid(){
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
+    fi
+  else
     if [ "$(prompt_yn "merge strapped keybindings.json to user keybindings.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_keybindings
     else
       log "skipped keybindings merge"
+    fi
+  fi
 
   # --tasks
   if [ -n "${CFG_TASKS+x}" ]; then
@@ -2620,10 +2908,14 @@ config_hybrid(){
       merge_codestrap_tasks
     else
       log "skipped tasks merge"
+    fi
+  else
     if [ "$(prompt_yn "merge strapped tasks.json to user tasks.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_tasks
     else
       log "skipped tasks merge"
+    fi
+  fi
 
   # --extensions
   if [ -n "${CFG_EXT+x}" ]; then
@@ -2631,22 +2923,30 @@ config_hybrid(){
       merge_codestrap_extensions
     else
       log "skipped extensions merge"
+    fi
+  else
     if [ "$(prompt_yn "merge strapped extensions.json to user extensions.json? (Y/n)" "y")" = "true" ]; then
       merge_codestrap_extensions
     else
       log "skipped extensions merge"
+    fi
+  fi
 
   log "Bootstrap config completed"
   PROMPT_TAG=""
   CTX_TAG=""
+}
 
 # ===== github flags handler =====
-bootstrap_from_args(){ # used by: codestrap github [flags...], args only
+bootstrap_from_args(){ # used by: codestrap github [flags...]
+  USE_ENV=false
+  # Clear any old values (so flags fully control when provided)
+  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
   while [ $# -gt 0 ]; do
     case "$1" in
       -h|--help)     print_help; exit 0;;
       -v|--version)  print_version; exit 0;;
-      -a|--auto)     USE_ENV=true;;  # kept for UX; now just means "non-interactive only"
+      -a|--auto)     USE_ENV=true;;
       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
       -n|--name)     shift || true; GIT_NAME="${1:-}";;
@@ -2659,11 +2959,19 @@ bootstrap_from_args(){ # used by: codestrap github [flags...], args only
     shift || true
   done
 
+  recompute_base
 
+  if [ "$USE_ENV" = "true" ]; then
+    ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+    ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+  else
     if ! is_tty; then
-      echo "No TTY for prompts. Provide flags. Example:
+      echo "No TTY available for prompts. Use flags or --auto. Examples:
+  GITHUB_USERNAME=alice GITHUB_TOKEN=ghp_xxx codestrap github --auto
+  codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
 " >&2
       exit 3
+    fi
     bootstrap_banner
     PROMPT_TAG="[Bootstrap GitHub] ? "
     CTX_TAG="[Bootstrap GitHub]"
@@ -2671,12 +2979,17 @@ bootstrap_from_args(){ # used by: codestrap github [flags...], args only
     PROMPT_TAG=""
     CTX_TAG=""
     return 0
+  fi
 
-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "--username required." >&2; exit 2; }
+  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (flag/env/prompt)." >&2; exit 2; }
+  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (flag/env/prompt)." >&2; exit 2; }
 
   CTX_TAG="[Bootstrap GitHub]"
+  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+  codestrap_run
   log "bootstrap complete"
   CTX_TAG=""
+}
 
 # ===== top-level CLI entry with subcommands =====
 cli_entry(){
@@ -2690,6 +3003,7 @@ cli_entry(){
   codestrap passwd
 " >&2
       exit 3
+    fi
 
     # Show banner BEFORE first hub question
     bootstrap_banner
@@ -2706,12 +3020,14 @@ cli_entry(){
       CTX_TAG="[Bootstrap GitHub]"
       log "skipped bootstrap GitHub"
       CTX_TAG=""
+    fi
     # 2) Config?
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
     if [ "$(prompt_yn "Bootstrap config? (Y/n)" "y")" = "true" ]; then
       config_interactive
     else
       CTX_TAG="[Bootstrap config]"; log "skipped bootstrap config"; CTX_TAG=""
+    fi
 
     # 3) Password?  (no prefix on question; default YES)
     if has_tty; then printf "\n" >/dev/tty; else printf "\n"; fi
@@ -2720,9 +3036,11 @@ cli_entry(){
       password_change_interactive
     else
       log "skipped change password"
+    fi
     PROMPT_TAG=""
     CTX_TAG=""
     exit 0
+  fi
 
   # Subcommands
   case "$1" in
@@ -2743,6 +3061,7 @@ cli_entry(){
         fi
       else
         bootstrap_from_args "$@"
+      fi
       ;;
     config)
       shift || true
@@ -2820,6 +3139,7 @@ cli_entry(){
         fi
         log "Bootstrap config completed"
         CTX_TAG=""
+      fi
       ;;
     extensions)
       shift || true
@@ -2881,6 +3201,7 @@ cli_entry(){
     *)
       err "Unknown subcommand: $1"; print_help; exit 1;;
   esac
+}
 
 # ===== autorun at container start (env-driven) =====
 bootstrap_github_if_envs(){
@@ -2889,8 +3210,12 @@ bootstrap_github_if_envs(){
     log "env present and no lock → running bootstrap"
     if ! codestrap_run; then
       CTX_TAG="[Bootstrap GitHub]"; err "env bootstrap failed (continuing)"; CTX_TAG=""
+    fi
+  else
     [ -f "$LOCK_FILE" ] && log "init lock present → skip duplicate autorun"
     { [ -z "${GITHUB_USERNAME:-}" ] || [ -z "${GITHUB_TOKEN:-}" ] ; } && log "GITHUB_USERNAME/GITHUB_TOKEN missing → no autorun"
+  fi
+}
 
 # ===== init-time extensions automation via env (UNINSTALL then INSTALL) =====
 manage_extensions_if_envs(){
@@ -2908,6 +3233,7 @@ manage_extensions_if_envs(){
       log "env automation → codestrap extensions$args"
       CTX_TAG=""
       extensions_cmd $args
+    fi
   }
 
   case "$uninst_mode" in all|a|missing|m|none|"") : ;; *) CTX_TAG="[Extensions]"; warn "EXTENSIONS_UNINSTALL invalid: '$uninst_mode' (use all|missing|none)"; CTX_TAG=""; uninst_mode="";; esac
@@ -2919,6 +3245,7 @@ manage_extensions_if_envs(){
   [ -z "$uninst_mode$inst_mode" ] && return 0
 
   run_noninteractive "$uninst_mode" "$inst_mode"
+}
 
 # ===== entrypoint =====
 case "${1:-init}" in
@@ -2949,45 +3276,3 @@ case "${1:-init}" in
     if [ $# -gt 0 ]; then set -- cli "$@"; exec "$0" "$@"; else set -- init; exec "$0" "$@"; fi
     ;;
 esac
-validate_github_username(){ # $1=username
-  u="$1"; [ -n "$u" ] || return 0
-  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${u}" || echo "000")"
-  t="$1"; [ -n "$t" ] || return 0
-  _u="$1"; _t="$2"
-  [ -n "$_t" ] || { echo "${_u:-unknown}@users.noreply.github.com"; return; }
-  EMAILS="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
-  _t="$1"; _title="${2:-codestrapped-code-server SSH Key}"
-  [ -n "$_t" ] || { warn "GitHub token empty; cannot upload SSH key"; return 0; }
-  GITHUB_USERNAME="$1"; GITHUB_TOKEN="$2"; GIT_NAME="$3"; GIT_EMAIL="$4"; GITHUB_REPOS="$5"; GITHUB_PULL="$6"
-  _WS="${7:-$WORKSPACE_DIR}"; _SUB="${8:-$REPOS_SUBDIR}"
-  # compute BASE from explicit args (no env leakage)
-  WORKSPACE_DIR="$_WS"; REPOS_SUBDIR="$_SUB"; recompute_base
-  git_upload_key "$GITHUB_TOKEN" "codestrapped-code-server SSH Key" || true
-    log "no repos provided; skip clone"
-  fi
-}
-  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
-bootstrap_interactive(){
-  GITHUB_USERNAME="$(prompt_def "GitHub username: " "")"
-  GITHUB_TOKEN="$(prompt_secret "GitHub token (classic: user:email, admin:public_key): ")"
-  GIT_NAME="$(prompt_def "Git name (blank=use account username) [${GITHUB_USERNAME:-}]: " "${GITHUB_USERNAME:-}")"
-  GIT_EMAIL="$(prompt_def "Git email (blank=use GitHub account email): " "")"
-  GITHUB_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]) [blank=skip]: " "")"
-  GITHUB_PULL="$(prompt_def "Pull existing repos? (Y/n) " "y")"
-  GITHUB_PULL="$(yn_to_bool "$GITHUB_PULL")"
-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "username required." >&2; exit 2; }
-  [ -n "${GITHUB_TOKEN:-}" ]    || { echo "token required." >&2; exit 2; }
-  github_bootstrap "$GITHUB_USERNAME" "$GITHUB_TOKEN" "$GIT_NAME" "$GIT_EMAIL" "$GITHUB_REPOS" "$GITHUB_PULL" "$WORKSPACE_DIR" "$REPOS_SUBDIR"
-  USE_ENV=false
-  GITHUB_USERNAME=""; GITHUB_TOKEN=""; GIT_NAME=""; GIT_EMAIL=""; GITHUB_REPOS=""; GITHUB_PULL="true"
-  if [ "$USE_ENV" = "false" ] && [ -z "$GITHUB_USERNAME$GITHUB_TOKEN" ]; then
-  codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
-  [ -n "${GITHUB_TOKEN:-}" ]    || { echo "--token required." >&2; exit 2; }
-    GH_NAME="$(jq -r '.github.name // empty' "$FILE")"
-    GH_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
-    GH_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
-    GH_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
-    GH_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
-    WORKSPACE_DIR="$WORKSPACE_DIR"; REPOS_SUBDIR="$GH_SUBDIR"; recompute_base
-      log "bootstrapping GitHub from profile"
-      if ! github_bootstrap "$GH_USER" "$GH_TOKEN" "$GH_NAME" "$GH_EMAIL" "$GH_REPOS" "$GH_PULL" "$WORKSPACE_DIR" "$GH_SUBDIR"; then
