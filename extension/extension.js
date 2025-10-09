@@ -140,7 +140,12 @@ function setupReloadWatcher(context){
   }));
 }
 
-// ===== Profile switch watcher =====
+// ===== Profile switch helper =====
+async function execMaybe(cmd, ...args) {
+  try { await vscode.commands.executeCommand(cmd, ...args); return true; }
+  catch { return false; }
+}
+
 async function trySwitchProfile(profileName){
   if (!profileName || !profileName.trim()) return false;
   const name = profileName.trim();
@@ -149,30 +154,41 @@ async function trySwitchProfile(profileName){
   outChan.show(true);
   outChan.appendLine(`[codestrap] profile switch requested → "${name}"`);
 
-  // We’ll try a few built-in commands in order; they may or may not exist
-  const cmds = [
-    // If the profile exists, this should switch directly if supported:
-    { id: 'workbench.profiles.actions.switchProfile', args: [{ profileName: name, transient: false }] },
-    // If not, try "create and switch" in one go (some builds support this):
-    { id: 'workbench.profiles.actions.createAndSwitchProfile', args: [{ name, useDefaultFlags: true }] },
-    // Fallback: create profile, then switch:
-    { id: 'workbench.profiles.actions.createProfile', args: [{ name, transient: false }] },
-    { id: 'workbench.profiles.actions.switchProfile', args: [{ profileName: name, transient: false }] },
-  ];
-
+  // Strategy:
+  // 1) Try to switch (string → object → no-arg UI fallback avoided).
+  // 2) If that likely didn’t work, try createswitch (string → object → no-arg).
+  // 3) As a final fallback: create, then switch (various arg shapes).
+  // NOTE: Some variants resolve without error even if they do nothing; we attempt several in sequence.
   let ok = false;
-  for (const c of cmds) {
-    try {
-      // Some commands resolve instantly without throwing even if they no-op; we still try the sequence.
-      await vscode.commands.executeCommand(c.id, ...(c.args || []));
-      outChan.appendLine(`[codestrap] executed: ${c.id}`);
-      // Heuristic: mark success after first callable cmd; the next commands would refine state anyway.
-      ok = true;
-      // Do not break immediately if the first was "switchProfile"—continue to ensure existence if needed
-      // but keep it lightweight by short-circuiting after createswitch sequence.
-      if (c.id === 'workbench.profiles.actions.createAndSwitchProfile') break;
-    } catch (e) {
-      outChan.appendLine(`[codestrap] command failed (ignored): ${c.id} :: ${e?.message || e}`);
+  const SWITCH = 'workbench.profiles.actions.switchProfile';
+  const CREATE_SWITCH = 'workbench.profiles.actions.createAndSwitchProfile';
+  const CREATE = 'workbench.profiles.actions.createProfile';
+
+  // (1) Try switch first (existing profile)
+  ok = await execMaybe(SWITCH, name)
+    || await execMaybe(SWITCH, { profileName: name })
+    || false; // avoid no-arg to prevent UI
+  if (ok) outChan.appendLine(`[codestrap] executed: ${SWITCH} (switch attempt)`);
+
+  // (2) If not ok yet, try create  switch in one go
+  if (!ok) {
+    ok = await execMaybe(CREATE_SWITCH, name)
+      || await execMaybe(CREATE_SWITCH, { name })
+      || false; // avoid no-arg UI
+    if (ok) outChan.appendLine(`[codestrap] executed: ${CREATE_SWITCH} (createswitch)`);
+  }
+
+  // (3) If still not ok, try create then switch (two-step)
+  if (!ok) {
+    const created = await execMaybe(CREATE, name)
+                 || await execMaybe(CREATE, { name })
+                 || false; // avoid no-arg UI
+    if (created) {
+      outChan.appendLine(`[codestrap] executed: ${CREATE} (created)`);
+      ok = await execMaybe(SWITCH, name)
+        || await execMaybe(SWITCH, { profileName: name })
+        || false;
+      if (ok) outChan.appendLine(`[codestrap] executed: ${SWITCH} (switch after create)`);
     }
   }
 
@@ -185,6 +201,24 @@ async function trySwitchProfile(profileName){
   // Best-effort ACK so the initiator knows we acted
   try { fs.writeFileSync(PROFILE_SWITCH_FLAG, `ACK:${name}\n`, { flag: 'w' }); } catch(_) {}
   return ok;
+}
+
+async function afterProfileSwitchedApplyCodestrap(){
+  // Give VS Code a short breath to settle profile context before applying ops
+  await new Promise(r => setTimeout(r, 500));
+  // Run config merge (all) and extension sync (uninstall missing, install/update all)
+  // We ACK each to the UI output (not required by CLI sequencing).
+  return new Promise(resolve => {
+    let done = 0; const mark = () => { done; if (done >= 2) resolve(); };
+    runCodestrap('config', ['config','-s','true','-k','true','-t','true','-e','true'], {
+      expectAck: true,
+      postAck: () => mark()
+    });
+    runCodestrap('extensions', ['extensions','-u','missing','-i','all'], {
+      expectAck: true,
+      postAck: () => mark()
+    });
+  });
 }
 
 function setupProfileSwitchWatcher(context){
@@ -202,7 +236,11 @@ function setupProfileSwitchWatcher(context){
       if (!txt || txt === 'IDLE' || txt.startsWith('ACK:')) { busy = false; return; }
       if (txt === lastProfileSwitchSeen) { busy = false; return; }
       lastProfileSwitchSeen = txt;
-      await trySwitchProfile(txt);
+      const switched = await trySwitchProfile(txt);
+      if (switched) {
+        // Once we’re in the target profile, apply codestrap flow here
+        await afterProfileSwitchedApplyCodestrap();
+      }
     } catch(_) {
       // ignore
     } finally {
