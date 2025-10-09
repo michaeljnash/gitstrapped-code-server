@@ -20,7 +20,13 @@ input[type="text"], input[type="password"], select, textarea{
   width:100%; max-width:100%; display:block; padding:8px 10px; background:var(--input); color:var(--fg);
   border:1px solid var(--border); border-radius:8px;
 }
-textarea{ min-height:72px; resize:vertical; }
+/* textarea starts as a single line and auto-grows; hide scrollbar while we control height */
+textarea{
+  min-height: 0;
+  overflow-y: hidden;
+  resize: none; /* user can still rely on auto-grow; set to 'vertical' if you want manual resize too */
+  line-height: 1.4; /* keep similar height to inputs */
+}
 .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
 .toprow{ display:flex; gap:8px; margin-bottom:8px; justify-content:center; flex-direction: row; }

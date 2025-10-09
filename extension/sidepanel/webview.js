@@ -37,10 +37,10 @@ function multilineToCSV(s){
 }
 function autoResizeTextarea(el){
   if (!el) return;
-  el.style.height = "auto";
-  el.style.height = Math.min(el.scrollHeight, 320)  "px";
+  el.style.height = "auto";                 // allow shrink
+  const maxPx = 320;                        // soft cap
+  el.style.height = Math.min(el.scrollHeight, maxPx) + "px";
 }
-
 
 // --- Top buttons ---
 $("btn-docs").onclick = () => vscode.postMessage({ type:"open:docs" });
@@ -135,7 +135,7 @@ $("gh-pull").addEventListener("change", () => {
     const cur = el.selectionStart;
     let v = el.value;
     // turn any commas (with optional spaces) into newlines
-    if (/,/.test(v)) v = v.replace(/,\s*/g, "\n");
+    if (/,/.test(v)) v = v.replace(/,+\s*/g, "\n");
     // collapse multiple blank lines
     v = v.replace(/\n{2,}/g, "\n");
     el.value = v;
