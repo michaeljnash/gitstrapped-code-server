@@ -711,8 +711,8 @@ trigger_window_reload(){
   # The extension watches this file and calls 'workbench.action.reloadWindow'
   local f="/run/codestrap/reload.flag"
   mkdir -p "/run/codestrap" 2>/dev/null || true
-  # Write a timestamp to bump mtime (and leave content non-empty for extra signal)
-  printf '%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
+  # Write a command the extension explicitly recognizes, with a monotonic nonce
+  printf 'RELOAD:%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
 }
 
 # ===== first-boot default password =====

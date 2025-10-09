@@ -9,6 +9,7 @@ let reloadWatcher = null;
 // Path the CLI will "touch" to request a window reload
 const RELOAD_FLAG = '/run/codestrap/reload.flag';
 const RELOAD_DIR  = '/run/codestrap';
+let lastReloadNonce = 0;
 
 function shellQ(s){
   if (s === undefined || s === null) return "''";
@@ -106,19 +107,22 @@ function ensureReloadDir(){
 
 function setupReloadWatcher(context){
   ensureReloadDir();
-  // Create file if missing so fs.watchFile has a target (cheap no-op)
-  try { if (!fs.existsSync(RELOAD_FLAG)) fs.writeFileSync(RELOAD_FLAG, '', { flag: 'w' }); } catch(_) {}
+  // Create file with a benign marker so the first mtime doesn't trigger
+  try { if (!fs.existsSync(RELOAD_FLAG)) fs.writeFileSync(RELOAD_FLAG, 'IDLE\n', { flag: 'w' }); } catch(_) {}
   // Use watchFile (polling) — reliable across container fs / bind mounts
   let pending = false;
   fs.watchFile(RELOAD_FLAG, { interval: 500 }, async () => {
     if (pending) return;
     try {
-      // If file is non-empty OR mtime changed, treat as a trigger
-      const st = fs.statSync(RELOAD_FLAG);
-      if (!st || st.size < 0) return;
+      const buf = fs.readFileSync(RELOAD_FLAG, 'utf8');
+      const m = /^RELOAD:(\d+)\s*$/m.exec(buf);
+      if (!m) return;                        // not a valid command → ignore
+      const nonce = Number(m[1] || 0);
+      if (!(nonce > lastReloadNonce)) return; // only act on strictly newer nonce
       pending = true;
-      // Clear the flag before reload to avoid loops
-      try { fs.writeFileSync(RELOAD_FLAG, ''); } catch(_) {}
+      lastReloadNonce = nonce;
+      // Acknowledge before reloading to avoid repeated triggers
+      try { fs.writeFileSync(RELOAD_FLAG, `ACK:${nonce}\n`); } catch(_) {}
       await vscode.commands.executeCommand('workbench.action.reloadWindow');
     } catch(_) {
       // ignore
