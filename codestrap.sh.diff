@@ -1,0 +1,360 @@
+@@
+-VERSION="${CODESTRAP_VERSION:-0.3.8}"
++VERSION="${CODESTRAP_VERSION:-0.3.8}"
+
+@@
+-# ===== prompts (prefix each with PROMPT_TAG) =====
++# ===== prompts (prefix each with PROMPT_TAG) =====
+ read_line(){
+@@
+ }
+-yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
++yn_to_bool(){ case "$(printf "%s" "$1" | tr '[:upper:]' '[:lower:]')" in y|yes|t|true|1) echo "true";; *) echo "false";; esac; }
+ normalize_bool(){ v="${1:-true}"; [ "$(printf '%s' "$v" | cut -c1 | tr '[:upper:]' '[:lower:]')" = "f" ] && echo false || echo true; }
+ prompt_yn(){ q="$1"; def="${2:-y}"; ans="$(prompt_def "$q " "$def")"; yn_to_bool "$ans"; }
+ 
+@@
+-# Track origins for nicer errors
+-ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-}"
+-ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-}"
++# (Phase-1) No ORIGIN_* tracking; we’re removing env-based bootstrap.
+
+@@
+-# ===== prompts that read from env (legacy; will delete) =====
+-env_hint(){ eval "tmp=\${$1:-}"; [ -n "${tmp:-}" ] && printf " (type -a/--auto to use env %s)" "$1" || true; }
+-read_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint: " "$3")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+-read_secret_or_env(){ hint="$(env_hint "$2")"; val="$(prompt_secret "$1$hint: ")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$tmp";; *) printf "%s" "$val";; esac; }
+-read_bool_or_env(){ def="${3:-y}"; hint="$(env_hint "$2")"; val="$(prompt_def "$1$hint " "$def")"; case "$val" in -a|--auto) eval "tmp=\${$2:-}"; [ -z "${tmp:-}" ] && { err "$2 requested via --auto at prompt, but $2 is not set."; exit 2; }; printf "%s" "$(normalize_bool "$tmp")";; *) printf "%s" "$(yn_to_bool "$val")";; esac; }
++# (Phase-1) Delete env-driven prompt helpers.
+ 
+@@
+-# ===== GitHub validation (fatal on failure) =====
+-validate_github_username(){
+-  [ -n "${GITHUB_USERNAME:-}" ] || return 0
+-  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || echo "000")"
++# ===== GitHub validation (no env; args only) =====
++validate_github_username(){ # $1=username
++  u="$1"; [ -n "$u" ] || return 0
++  code="$(curl -s -o /dev/null -w "%{http_code}" -H "Accept: application/vnd.github+json" "https://api.github.com/users/${u}" || echo "000")"
+   if [ "$code" = "404" ]; then
+-    src="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+-    err "GitHub username '${GITHUB_USERNAME}' appears invalid (HTTP 404). Check ${src}."
++    err "GitHub username '${u}' appears invalid (HTTP 404)."
+     return 1
+   elif [ "$code" != "200" ]; then
+-    err "Could not verify GitHub username '${GITHUB_USERNAME}' (HTTP $code)."
++    err "Could not verify GitHub username '${u}' (HTTP $code)."
+     return 1
+   fi
+ }
+ 
+-validate_github_token(){
+-  [ -n "${GITHUB_TOKEN:-}" ] || return 0
++validate_github_token(){ # $1=token
++  t="$1"; [ -n "$t" ] || return 0
+   code="$(curl -s -o /dev/null -w "%{http_code}" \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
++    -H "Authorization: token ${t}" \
+     -H "Accept: application/vnd.github+json" \
+     -H "User-Agent: codestrap" \
+     https://api.github.com/user || echo "000")"
+-  src="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+   if [ "$code" = "401" ]; then
+-    err "Provided GITHUB_TOKEN (${src}) is invalid or expired (HTTP 401). Please provide a valid classic token with scopes: user:email, admin:public_key."
++    err "Provided GitHub token is invalid or expired (HTTP 401). Needs scopes: user:email, admin:public_key."
+     return 1
+   elif [ "$code" = "403" ]; then
+-    err "Provided GITHUB_TOKEN (${src}) is not authorized (HTTP 403). It may be missing required scopes: user:email, admin:public_key."
++    err "Provided GitHub token is not authorized (HTTP 403). Missing scopes? user:email, admin:public_key."
+     return 1
+   elif [ "$code" != "200" ]; then
+-    err "Could not verify GITHUB_TOKEN (${src}) (HTTP $code)."
++    err "Could not verify GitHub token (HTTP $code)."
+     return 1
+   fi
+   headers="$(curl -fsS -D - -o /dev/null \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
++    -H "Authorization: token ${t}" \
+     -H "Accept: application/vnd.github+json" \
+     -H "User-Agent: codestrap" \
+     https://api.github.com/user 2>/dev/null || true)"
+   scopes="$(printf "%s" "$headers" | awk -F': ' '/^[Xx]-[Oo]Auth-[Ss]copes:/ {gsub(/\r/,"",$2); print $2}')"
+   if [ -n "$scopes" ]; then
+@@
+-# ===== github bootstrap internals =====
+-resolve_email(){
+-  GITHUB_USERNAME="${GITHUB_USERNAME:-}"; GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+-  [ -n "$GITHUB_TOKEN" ] || { echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"; return; }
+-  EMAILS="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
++resolve_email(){ # $1=username, $2=token
++  _u="$1"; _t="$2"
++  [ -n "$_t" ] || { echo "${_u:-unknown}@users.noreply.github.com"; return; }
++  EMAILS="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/emails || true)"
+   PRIMARY="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"primary": *true/ {print e; exit}')"
+   [ -n "${PRIMARY:-}" ] && { echo "$PRIMARY"; return; }
+   VERIFIED="$(printf "%s" "$EMAILS" | awk -F\" '/"email":/ {e=$4} /"verified": *true/ {print e; exit}')"
+   [ -n "${VERIFIED:-}" ] && { echo "$VERIFIED"; return; }
+-  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${GITHUB_USERNAME}" || true)"
++  PUB_JSON="$(curl -fsS -H "Accept: application/vnd.github+json" "https://api.github.com/users/${_u}" || true)"
+   PUB_EMAIL="$(printf "%s" "$PUB_JSON" | awk -F\" '/"email":/ {print $4; exit}')"
+   [ -n "${PUB_EMAIL:-}" ] && [ "$PUB_EMAIL" != "null" ] && { echo "$PUB_EMAIL"; return; }
+-  echo "${GITHUB_USERNAME:-unknown}@users.noreply.github.com"
++  echo "${_u:-unknown}@users.noreply.github.com"
+ }
+-git_upload_key(){
+-  GITHUB_TOKEN="${GITHUB_TOKEN:-}"; GITHUB_KEY_TITLE="${GITHUB_KEY_TITLE:-codestrapped-code-server SSH Key}"
+-  [ -n "$GITHUB_TOKEN" ] || { warn "GITHUB_TOKEN empty; cannot upload SSH key"; return 0; }
++git_upload_key(){ # $1=token, $2=title
++  _t="$1"; _title="${2:-codestrapped-code-server SSH Key}"
++  [ -n "$_t" ] || { warn "GitHub token empty; cannot upload SSH key"; return 0; }
+ 
+   LOCAL_KEY="$(awk '{print $1" "$2}' "$PUBLIC_KEY_PATH")"
+-  KEYS_JSON="$(curl -fsS -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
++  KEYS_JSON="$(curl -fsS -H "Authorization: token ${_t}" -H "Accept: application/vnd.github+json" https://api.github.com/user/keys || true)"
+ 
+   echo "$KEYS_JSON" | grep -q "\"key\": *\"$LOCAL_KEY\"" && { log "SSH key already on GitHub"; return 0; }
+ 
+   RESP="$(curl -fsS -X POST \
+-    -H "Authorization: token ${GITHUB_TOKEN}" \
++    -H "Authorization: token ${_t}" \
+     -H "Accept: application/vnd.github+json" \
+-    -d "{\"title\":\"$GITHUB_KEY_TITLE\",\"key\":\"$LOCAL_KEY\"}" \
++    -d "{\"title\":\"$_title\",\"key\":\"$LOCAL_KEY\"}" \
+     https://api.github.com/user/keys || true)"
+@@
+-    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${GITHUB_TOKEN}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
++    tx_add "curl -fsS -X DELETE -H 'Authorization: token ${_t}' -H 'Accept: application/vnd.github+json' https://api.github.com/user/keys/${KEY_ID} >/dev/null 2>&1 || true"
+   else
+     warn "Key upload failed: $(redact "$RESP")"
+   fi
+ }
+ 
+@@
+-codestrap_run(){
+-  # Use variables set by profile_cmd only; do not read env defaults.
+-  : "${GITHUB_USERNAME:=}"
+-  : "${GITHUB_TOKEN:=}"
+-  : "${GIT_NAME:=${GITHUB_USERNAME}}"
+-  : "${GIT_EMAIL:=}"
+-  : "${GITHUB_REPOS:=}"
+-  : "${GITHUB_PULL:=true}"
++github_bootstrap(){ # $1=user $2=token $3=name $4=email $5=repos_csv $6=pull_bool $7=workspace_dir $8=repos_subdir
++  GITHUB_USERNAME="$1"; GITHUB_TOKEN="$2"; GIT_NAME="$3"; GIT_EMAIL="$4"; GITHUB_REPOS="$5"; GITHUB_PULL="$6"
++  _WS="${7:-$WORKSPACE_DIR}"; _SUB="${8:-$REPOS_SUBDIR}"
+ 
+-  if ! validate_github_username; then
++  if ! validate_github_username "$GITHUB_USERNAME"; then
+     abort_or_continue "[Bootstrap GitHub]" "GitHub username validation failed."
+     return 0
+   fi
+-  if ! validate_github_token; then
++  if ! validate_github_token "$GITHUB_TOKEN"; then
+     abort_or_continue "[Bootstrap GitHub]" "GitHub token validation failed."
+     return 0
+   fi
++
++  # compute BASE from explicit args (no env leakage)
++  WORKSPACE_DIR="$_WS"; REPOS_SUBDIR="$_SUB"; recompute_base
+ 
+   git config --global init.defaultBranch main || true
+@@
+-  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
++  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "$GITHUB_TOKEN" || true)"; fi
+   git config --global user.email "$GIT_EMAIL" || true
+   log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
+@@
+-  git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
+-  git_upload_key || true
++  git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
++  git_upload_key "$GITHUB_TOKEN" "codestrapped-code-server SSH Key" || true
+ 
+   if [ -n "${GITHUB_REPOS:-}" ]; then
+@@
+-  else
+-    log "GITHUB_REPOS empty; skip clone"
+-  fi
+-}
++  else
++    log "no repos provided; skip clone"
++  fi
++}
+ 
+@@
+-recompute_base(){
+-  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
++recompute_base(){ # uses current WORKSPACE_DIR & REPOS_SUBDIR values (set by caller)
++  WORKSPACE_DIR="${WORKSPACE_DIR:-$HOME/workspace}"
+   WORKSPACE_DIR="$(printf '%s' "$WORKSPACE_DIR" | sed 's:/*$::')"
+   ensure_dir "$WORKSPACE_DIR"
+   REPOS_SUBDIR="${REPOS_SUBDIR:-repos}"
+@@
+-# --- interactive GitHub flow ---
+-bootstrap_interactive(){
+-  GITHUB_USERNAME="$(read_or_env "GitHub username" GITHUB_USERNAME "")"; ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-prompt}"
+-  GITHUB_TOKEN="$(read_secret_or_env "GitHub token (classic: user:email, admin:public_key)" GITHUB_TOKEN)"; ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-prompt}"
+-  GIT_NAME="$(read_or_env "Git name (blank=use GitHub account username) [${GIT_NAME:-${GITHUB_USERNAME:-}}]" GIT_NAME "${GIT_NAME:-${GITHUB_USERNAME:-}}")"
+-  GIT_EMAIL="$(read_or_env "Git email (blank=use GitHub account email)" GIT_EMAIL "")"
+-  GITHUB_REPOS="$(read_or_env "Repos (comma-separated owner/repo[#branch])" GITHUB_REPOS "${GITHUB_REPOS:-}")"
+-  GITHUB_PULL="$(read_bool_or_env "Pull existing repos? [Y/n]" GITHUB_PULL "y")"
+-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required." >&2; exit 2; }
+-  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required." >&2; exit 2; }
+-  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+-  codestrap_run; log "bootstrap complete"
+-}
+-
+-bootstrap_env_only(){
+-  ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+-  ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (env)." >&2; exit 2; }
+-  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (env)." >&2; exit 2; }
+-  export ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+-  codestrap_run; log "bootstrap complete (env)"
+-}
++# --- interactive GitHub flow (no env fallbacks) ---
++bootstrap_interactive(){
++  GITHUB_USERNAME="$(prompt_def "GitHub username: " "")"
++  GITHUB_TOKEN="$(prompt_secret "GitHub token (classic: user:email, admin:public_key): ")"
++  GIT_NAME="$(prompt_def "Git name (blank=use account username) [${GITHUB_USERNAME:-}]: " "${GITHUB_USERNAME:-}")"
++  GIT_EMAIL="$(prompt_def "Git email (blank=use GitHub account email): " "")"
++  GITHUB_REPOS="$(prompt_def "Repos (comma-separated owner/repo[#branch]) [blank=skip]: " "")"
++  GITHUB_PULL="$(prompt_def "Pull existing repos? (Y/n) " "y")"
++  GITHUB_PULL="$(yn_to_bool "$GITHUB_PULL")"
++  [ -n "${GITHUB_USERNAME:-}" ] || { echo "username required." >&2; exit 2; }
++  [ -n "${GITHUB_TOKEN:-}" ]    || { echo "token required." >&2; exit 2; }
++  github_bootstrap "$GITHUB_USERNAME" "$GITHUB_TOKEN" "$GIT_NAME" "$GIT_EMAIL" "$GITHUB_REPOS" "$GITHUB_PULL" "$WORKSPACE_DIR" "$REPOS_SUBDIR"
++  log "bootstrap complete"
++}
+ 
+@@
+-bootstrap_from_args(){ # used by: codestrap github [flags...]
+-  USE_ENV=false
+-  # Clear any old values (so flags fully control when provided)
+-  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
++bootstrap_from_args(){ # used by: codestrap github [flags...], args only
++  USE_ENV=false
++  GITHUB_USERNAME=""; GITHUB_TOKEN=""; GIT_NAME=""; GIT_EMAIL=""; GITHUB_REPOS=""; GITHUB_PULL="true"
+   while [ $# -gt 0 ]; do
+     case "$1" in
+       -h|--help)     print_help; exit 0;;
+       -v|--version)  print_version; exit 0;;
+-      -a|--auto)     USE_ENV=true;;
++      -a|--auto)     USE_ENV=true;;  # kept for UX; now just means "non-interactive only"
+       -u|--username) shift || true; GITHUB_USERNAME="${1:-}";;
+       -t|--token)    shift || true; GITHUB_TOKEN="${1:-}";;
+       -n|--name)     shift || true; GIT_NAME="${1:-}";;
+       -e|--email)    shift || true; GIT_EMAIL="${1:-}";;
+       -r|--repos)    shift || true; GITHUB_REPOS="${1:-}";;
+       -p|--pull)     shift || true; GITHUB_PULL="${1:-true}";;
+       --*)           err "Unknown flag '$1'"; print_help; exit 1;;
+       *)             err "Unknown argument: $1"; print_help; exit 1;;
+     esac
+     shift || true
+   done
+ 
+-  recompute_base
+-
+-  if [ "$USE_ENV" = "true" ]; then
+-    ORIGIN_GITHUB_USERNAME="${ORIGIN_GITHUB_USERNAME:-env GITHUB_USERNAME}"
+-    ORIGIN_GITHUB_TOKEN="${ORIGIN_GITHUB_TOKEN:-env GITHUB_TOKEN}"
+-  else
++  recompute_base
++
++  if [ "$USE_ENV" = "false" ] && [ -z "$GITHUB_USERNAME$GITHUB_TOKEN" ]; then
+     if ! is_tty; then
+-      echo "No TTY available for prompts. Use flags or --auto. Examples:
+-  GITHUB_USERNAME=alice GITHUB_TOKEN=ghp_xxx codestrap github --auto
+-  codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
++      echo "No TTY for prompts. Provide flags. Example:
++  codestrap github -u alice -t ghp_xxx -r \"alice/app#main\"
+ " >&2
+       exit 3
+     fi
+     bootstrap_banner
+     PROMPT_TAG="[Bootstrap GitHub] ? "
+     CTX_TAG="[Bootstrap GitHub]"
+     bootstrap_interactive
+     PROMPT_TAG=""
+     CTX_TAG=""
+     return 0
+   fi
+ 
+-  [ -n "${GITHUB_USERNAME:-}" ] || { echo "GITHUB_USERNAME or --username required (flag/env/prompt)." >&2; exit 2; }
+-  [ -n "${GITHUB_TOKEN:-}" ]     || { echo "GITHUB_TOKEN or --token required (flag/env/prompt)." >&2; exit 2; }
++  [ -n "${GITHUB_USERNAME:-}" ] || { echo "--username required." >&2; exit 2; }
++  [ -n "${GITHUB_TOKEN:-}" ]    || { echo "--token required." >&2; exit 2; }
+ 
+-  CTX_TAG="[Bootstrap GitHub]"
+-  export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL BASE WORKSPACE_DIR REPOS_SUBDIR ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+-  codestrap_run
++  CTX_TAG="[Bootstrap GitHub]"
++  github_bootstrap "$GITHUB_USERNAME" "$GITHUB_TOKEN" "$GIT_NAME" "$GIT_EMAIL" "$GITHUB_REPOS" "$GITHUB_PULL" "$WORKSPACE_DIR" "$REPOS_SUBDIR"
+   log "bootstrap complete"
+   CTX_TAG=""
+ }
+ 
+@@
+   J_GH="$(jq -c '."github" // empty' "$FILE")"
+ 
+-  # Ensure no env leakage into GitHub/bootstrap path
+-  unset GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
++  # No env leakage; we’ll pass args.
+ 
+@@
+-  # 5) GitHub bootstrap (prompt for token; never read from env)
++  # 5) GitHub bootstrap (prompt for token; pass args only)
+   if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
+     if ! is_tty; then
+       err "GitHub section present but no TTY available for token prompt."
+       ROLLBACK=1
+     fi
+ 
+     # read profile values
+-    GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
+-    GIT_NAME="$(jq -r '.github.name // empty' "$FILE")"
+-    GIT_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
+-    # repos as comma-separated for our existing codestrap_run loop
+-    GITHUB_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
+-    REPOS_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
+-    GITHUB_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
++    GH_USER="$(jq -r '.github.username' "$FILE")"
++    GH_NAME="$(jq -r '.github.name // empty' "$FILE")"
++    GH_EMAIL="$(jq -r '.github.email // empty' "$FILE")"
++    GH_REPOS="$(jq -r '.github.repos // [] | join(",")' "$FILE")"
++    GH_SUBDIR="$(jq -r '.github["repos-subdir"] // .github.repos_subdir // "repos"' "$FILE")"
++    GH_PULL="$(jq -r '(.github["pull-existing"] // .github.pull_existing // true) | tostring' "$FILE")"
+ 
+-    # recompute base path using the profile's repos-subdir (ignore env)
+-    recompute_base
++    # recompute base path using the profile's repos-subdir (ignore env)
++    WORKSPACE_DIR="$WORKSPACE_DIR"; REPOS_SUBDIR="$GH_SUBDIR"; recompute_base
+ 
+     # Always prompt for token (no env fallback)
+     if [ $ROLLBACK -eq 0 ]; then
+-      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
+-      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+-      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+-      log "bootstrapping GitHub from profile"
+-      if ! codestrap_run; then
+-        err "GitHub bootstrap failed"
+-        ROLLBACK=1
+-      fi
+-    fi
+-
+-    if [ $ROLLBACK -eq 0 ]; then
+-      # Export + run bootstrap only if still clean
+-      export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL ORIGIN_GITHUB_USERNAME ORIGIN_GITHUB_TOKEN
+-      ORIGIN_GITHUB_USERNAME="profile:${NAME}"
+-      ORIGIN_GITHUB_TOKEN="prompt (profile:${NAME})"
+-
+-      log "bootstrapping GitHub from profile"
+-      if ! codestrap_run; then
++      GH_TOKEN="$(prompt_secret "[Profile GitHub] Token (classic; scopes user:email, admin:public_key): ")"
++      log "bootstrapping GitHub from profile"
++      if ! github_bootstrap "$GH_USER" "$GH_TOKEN" "$GH_NAME" "$GH_EMAIL" "$GH_REPOS" "$GH_PULL" "$WORKSPACE_DIR" "$GH_SUBDIR"; then
+         err "GitHub bootstrap failed"
+         ROLLBACK=1
+       fi
+     fi
+   else
+     [ -n "$J_GH" ] || log "no github block in profile (skipping GitHub bootstrap)"
+   fi
