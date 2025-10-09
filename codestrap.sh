@@ -788,6 +788,18 @@ trigger_window_reload(){
   printf 'RELOAD:%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
 }
 
+# ===== code-server profile switch request (extension reads localStorage) =====
+# We cannot write browser localStorage from here; instead, hand off a request
+# the codestrap extension can consume and then create/switch the VS Code
+# profile in localStorage. Name convention: "codestrap:<profileName>"
+request_profile_switch(){ # usage: request_profile_switch "<profile-name>"
+  local name="$1"
+  local dir="/run/codestrap"
+  mkdir -p "$dir" 2>/dev/null || true
+  # simple plaintext for the extension to pick up
+  printf '%s\n' "$name" > "${dir}/profile.switch"
+}
+
 # ===== first-boot default password =====
 init_default_password_if_env(){
   DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-}"
@@ -2704,6 +2716,14 @@ PHELP
   fi
 
   # If we got here, everything (including GitHub) succeeded. Now do ext sync if needed.
+  # First request a UI profile switch so the browser uses an isolated VS Code profile
+  # (stored in localStorage) for this codestrap profile run. The extension will
+  # read /run/codestrap/profile.switch and create/switch to that profile.
+  CS_PROFILE_NAME="codestrap:${NAME}"
+  log "requesting code-server profile switch → ${CS_PROFILE_NAME}"
+  request_profile_switch "$CS_PROFILE_NAME"
+  #trigger_window_reload
+
   if [ "$EXT_FILE_APPLIED" -eq 1 ]; then
     log "sync extensions (uninstall non-recommended; installupdate recommended)"
     # snapshot current installed extensions and register compensator

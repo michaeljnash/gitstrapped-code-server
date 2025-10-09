@@ -11,6 +11,10 @@ const RELOAD_FLAG = '/run/codestrap/reload.flag';
 const RELOAD_DIR  = '/run/codestrap';
 let lastReloadNonce = 0;
 
+// Path the CLI will "touch" to request a VS Code profile switch
+const PROFILE_SWITCH_FLAG = '/run/codestrap/profile.switch';
+let lastProfileSwitchSeen = '';
+
 function shellQ(s){
   if (s === undefined || s === null) return "''";
   s = String(s); if (s === '') return "''";
@@ -133,6 +137,81 @@ function setupReloadWatcher(context){
   // Clean up on deactivate
   context.subscriptions.push(new vscode.Disposable(() => {
     try { fs.unwatchFile(RELOAD_FLAG); } catch(_) {}
+  }));
+}
+
+// ===== Profile switch watcher =====
+async function trySwitchProfile(profileName){
+  if (!profileName || !profileName.trim()) return false;
+  const name = profileName.trim();
+  // Open output channel lazily so user can see what happened
+  if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+  outChan.show(true);
+  outChan.appendLine(`[codestrap] profile switch requested → "${name}"`);
+
+  // We’ll try a few built-in commands in order; they may or may not exist
+  const cmds = [
+    // If the profile exists, this should switch directly if supported:
+    { id: 'workbench.profiles.actions.switchProfile', args: [{ profileName: name, transient: false }] },
+    // If not, try "create and switch" in one go (some builds support this):
+    { id: 'workbench.profiles.actions.createAndSwitchProfile', args: [{ name, useDefaultFlags: true }] },
+    // Fallback: create profile, then switch:
+    { id: 'workbench.profiles.actions.createProfile', args: [{ name, transient: false }] },
+    { id: 'workbench.profiles.actions.switchProfile', args: [{ profileName: name, transient: false }] },
+  ];
+
+  let ok = false;
+  for (const c of cmds) {
+    try {
+      // Some commands resolve instantly without throwing even if they no-op; we still try the sequence.
+      await vscode.commands.executeCommand(c.id, ...(c.args || []));
+      outChan.appendLine(`[codestrap] executed: ${c.id}`);
+      // Heuristic: mark success after first callable cmd; the next commands would refine state anyway.
+      ok = true;
+      // Do not break immediately if the first was "switchProfile"—continue to ensure existence if needed
+      // but keep it lightweight by short-circuiting after createswitch sequence.
+      if (c.id === 'workbench.profiles.actions.createAndSwitchProfile') break;
+    } catch (e) {
+      outChan.appendLine(`[codestrap] command failed (ignored): ${c.id} :: ${e?.message || e}`);
+    }
+  }
+
+  if (ok) {
+    vscode.window.showInformationMessage(`Switched to profile: ${name}`);
+  } else {
+    vscode.window.showWarningMessage(`Could not switch to VS Code profile "${name}" automatically. You can switch it manually from the Profiles menu.`);
+  }
+
+  // Best-effort ACK so the initiator knows we acted
+  try { fs.writeFileSync(PROFILE_SWITCH_FLAG, `ACK:${name}\n`, { flag: 'w' }); } catch(_) {}
+  return ok;
+}
+
+function setupProfileSwitchWatcher(context){
+  ensureReloadDir();
+  // Ensure the file exists so the first poll baseline is stable
+  try { if (!fs.existsSync(PROFILE_SWITCH_FLAG)) fs.writeFileSync(PROFILE_SWITCH_FLAG, 'IDLE\n', { flag: 'w' }); } catch(_) {}
+
+  let busy = false;
+  fs.watchFile(PROFILE_SWITCH_FLAG, { interval: 500 }, async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const txt = fs.readFileSync(PROFILE_SWITCH_FLAG, 'utf8').trim();
+      // Expect a plain profile name, ignore ACK lines and empty/IDLE content
+      if (!txt || txt === 'IDLE' || txt.startsWith('ACK:')) { busy = false; return; }
+      if (txt === lastProfileSwitchSeen) { busy = false; return; }
+      lastProfileSwitchSeen = txt;
+      await trySwitchProfile(txt);
+    } catch(_) {
+      // ignore
+    } finally {
+      busy = false;
+    }
+  });
+
+  context.subscriptions.push(new vscode.Disposable(() => {
+    try { fs.unwatchFile(PROFILE_SWITCH_FLAG); } catch(_) {}
   }));
 }
 
@@ -291,6 +370,7 @@ function activate(context){
   context.subscriptions.push(vscode.commands.registerCommand('codestrap.refresh', () => {}));
   registerTerminalWatcher(context);
   setupReloadWatcher(context);
+  setupProfileSwitchWatcher(context);
 }
 function deactivate(){}
 
