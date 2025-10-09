@@ -131,11 +131,27 @@ $("gh-pull").addEventListener("change", () => {
 (function wireReposTextarea(){
   const el = $("gh-repos");
   if (!el) return;
+  // When typing a comma, immediately add a newline and place caret after it.
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "," && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      const start = el.selectionStart;
+      const end   = el.selectionEnd;
+      const before = el.value.slice(0, start);
+      const after  = el.value.slice(end);
+      // Insert ",\n" exactly at the caret/selection
+      el.value = before + ",\n" + after;
+      // Move caret to just after the newline
+      const pos = start + 2; // comma + newline
+      el.selectionStart = el.selectionEnd = pos;
+      autoResizeTextarea(el);
+    }
+  });
+
   const normalize = () => {
     const cur = el.selectionStart;
     let v = el.value;
-    // turn commas into "comma + newline", but only add a newline if there isn't one already after the comma
-    if (/,/.test(v)) v = v.replace(/,(?!\s*\n)\s*/g, ",\n");
+    // We add newlines on keydown; here we just keep things tidy.
     // collapse multiple blank lines
     v = v.replace(/\n{2,}/g, "\n");
     el.value = v;

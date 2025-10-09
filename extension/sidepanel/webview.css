@@ -25,8 +25,7 @@ textarea{
   min-height: 0;
   overflow-y: hidden;
   resize: none; /* user can still rely on auto-grow; set to 'vertical' if you want manual resize too */
-  font-size: inherit;    /* match input font size */
-  line-height: normal;   /* match input vertical rhythm */
+  font: inherit;         /* match input font family/size/line-height exactly */
 }
 .row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
