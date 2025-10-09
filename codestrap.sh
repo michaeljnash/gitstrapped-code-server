@@ -359,7 +359,7 @@ cat <<'HLP'
 codestrap — apply a profile + manage auth
 
 Usage:
-  codestrap profile --load <name> [--ghpat <token>]   # Load /config/codestrap/profiles/<name>.profile.json
+  codestrap profile --load <name> [--ghp <token>]   # Load /config/codestrap/profiles/<name>.profile.json
   codestrap passwd                  # Change code-server password (interactive)
   codestrap passwd --set "<pw>" "<pw>"    # Non-interactive password set
   codestrap sudopasswd              # Change sudo password (interactive; policy-permitting)
@@ -2533,7 +2533,7 @@ EHELP
 
 # ===== profile loader =====
 profile_cmd(){
-  # flags: --load <name> [--ghpat <token>]
+  # flags: --load <name> [--ghp <token>]
   NAME=""; GH_PAT=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -2563,16 +2563,16 @@ Profile shape:
 Notes:
 - settings/keybindings/tasks/extensions overwrite current user files.
 - extensions are synced (uninstall non-recommended, then install/update recommended).
-- If the profile includes a "github" section, you MUST pass --ghpat <token>.
+- If the profile includes a "github" section, you MUST pass --ghp <token>.
 PHELP
         exit 0;;
       --load)
          shift || true; NAME="${1:-}";;
        --load=*)
          NAME="${1#*=}";;
-      --ghpat)
+      --ghp)
         shift || true; GH_PAT="${1:-}";;
-      --ghpat=*)
+      --ghp=*)
         GH_PAT="${1#*=}";;
       *)
         err "Unknown flag for 'profile': $1"; exit 1;;
@@ -2660,7 +2660,7 @@ PHELP
     log "no extensions in profile (leaving existing)"
   fi
 
-  # 5) GitHub bootstrap (require --ghpat when github block present)
+  # 5) GitHub bootstrap (require --ghp when github block present)
   if [ $ROLLBACK -eq 0 ] && [ -n "$J_GH" ]; then
     # read profile values
     GITHUB_USERNAME="$(jq -r '.github.username' "$FILE")"
@@ -2674,15 +2674,15 @@ PHELP
     # recompute base path using the profile's repos-subdir (ignore env)
     recompute_base
 
-    # require token via --ghpat
+    # require token via --ghp
     if [ -z "${GH_PAT:-}" ]; then
-      err "Profile '${NAME}' includes a github section but no token was provided. Pass --ghpat <token>."
+      err "Profile '${NAME}' includes a github section but no token was provided. Pass --ghp <token>."
       ROLLBACK=1
     else
       GITHUB_TOKEN="$GH_PAT"
       export GITHUB_USERNAME GITHUB_TOKEN GIT_NAME GIT_EMAIL GITHUB_REPOS GITHUB_PULL
       ORIGIN_GITHUB_USERNAME="profile:${NAME}"
-      ORIGIN_GITHUB_TOKEN="arg --ghpat (profile:${NAME})"
+      ORIGIN_GITHUB_TOKEN="arg --ghp (profile:${NAME})"
       log "bootstrapping GitHub from profile"
       if ! codestrap_run; then
         err "GitHub bootstrap failed"
