@@ -10,7 +10,7 @@ CTX_TAG=""        # shown before status/warn/error lines
 
 has_tty(){
   # hard override from env (used by VS Code extension spawn path)
-  [ "${CODESTRAP_FORCE_NO_TTY:-0}" = "1" ] && return 1
+  [ "${CODESTRAP_FORCE_NO_TTY}" = "1" ] && return 1
   # prefer descriptor checks
   if [ -t 0 ] && [ -t 1 ]; then return 0; fi
   # conservative fallback: only claim TTY if /dev/tty can actually be opened
@@ -997,7 +997,7 @@ codestrap_run(){
   git config --global advice.detachedHead false || true
   git config --global --add safe.directory "*"
   git config --global user.name "${GIT_NAME:-codestrap}" || true
-if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "$GITHUB_TOKEN" || true)"; fi
+  if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email || true)"; fi
   git config --global user.email "$GIT_EMAIL" || true
   log "identity: ${GIT_NAME:-} <${GIT_EMAIL:-}>"
   umask 077
@@ -1005,7 +1005,7 @@ if [ -z "${GIT_EMAIL:-}" ]; then GIT_EMAIL="$(resolve_email "$GITHUB_USERNAME" "
   touch "$SSH_DIR/known_hosts"; chmod 644 "$SSH_DIR/known_hosts" || true
   if command -v ssh-keyscan >/dev/null 2>&1 && ! grep -q "^github.com" "$SSH_DIR/known_hosts" 2>/dev/null; then ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true; fi
   git config --global core.sshCommand "ssh -i $PRIVATE_KEY_PATH -F /dev/null -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=accept-new"
-  git_upload_key "$GITHUB_TOKEN" || true
+  git_upload_key || true
 
   if [ -n "${GITHUB_REPOS:-}" ]; then
     IFS=,; set -- $GITHUB_REPOS; unset IFS
