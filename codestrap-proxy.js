@@ -275,44 +275,47 @@ function shouldInjectWatchdog(reqUrl){
 }
 
 /* --------------------- HTTP server --------------------- */
-const server = http.createServer((req, res) => {
+const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
   // ******** PROFILE BOOTSTRAP: ABSOLUTE FIRST STEP ********
-  // For any non-internal path (i.e., not starting with /__), if a profile switch
-  // file exists, short-circuit and serve the bootstrap HTML that seeds localStorage
-  // and then redirects with query params for that profile.
+  // If any NON-internal request arrives and a switch is queued, short-circuit and
+  // serve the bootstrap HTML (spinner + localStorage seeding + redirect).
   if (!u.pathname.startsWith('/__')) {
-    const prof = readAndClearProfileSwitch();
-    if (prof) {
-      pushLog(`profile bootstrap → ${prof}`);
+    const profNow = readAndClearProfileSwitch();
+    if (profNow) {
+      pushLog(`profile bootstrap (immediate) → ${profNow}`);
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
       });
-      // makeProfileBootstrapHtml already shows a spinner and seeds localStorage.
-      // It will redirect to /?payload=...; augment to also include &profile=<name>.
-      return res.end(makeProfileBootstrapHtml(prof)
-        .replace('location.replace(base + \'?payload=\' + payload);',
-                 'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'));
+      // Ensure redirect includes both ?profile= and the payload param.
+      return res.end(
+        makeProfileBootstrapHtml(profNow).replace(
+          'location.replace(base + \'?payload=\' + payload);',
+          'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'
+        )
+      );
     }
   }
 
   // Health
   if (u.pathname === '/__up') {
-    return probeAndNote(ok => {
-      res.writeHead(ok ? 200 : 503, { 'content-type': 'text/plain', 'cache-control': 'no-store' })
-         .end(ok ? 'OK' : 'DOWN');
+    return probeAndNote(ok=>{
+      res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
     });
   }
 
   // Watchdog JS (external script)
+  // - Keeps your original outage polling
+  // - PLUS: opens an SSE stream to /__events to listen for "profile" pushes
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
+      // --- outage watchdog (unchanged) ---
       var delay=1500, max=6000;
       function next(){ delay=Math.min(max, Math.round(delay*1.4)); setTimeout(ping, delay); }
       async function ping(){
@@ -323,16 +326,32 @@ const server = http.createServer((req, res) => {
         next();
       }
       setTimeout(ping, delay);
+
+      // --- profile switch push: listen for SSE "profile" events ---
+      try{
+        var es = new EventSource('/__events');
+        es.addEventListener('profile', function(ev){
+          try{
+            var name = (ev && ev.data) ? String(ev.data) : '';
+            if (name) {
+              // Go to a dedicated bootstrap endpoint that seeds localStorage and redirects
+              location.replace('/__profile_bootstrap?name='+encodeURIComponent(name));
+            }
+          }catch(_){}
+        });
+      }catch(_){}
     })();`);
   }
 
   // Logs (ring buffer)
   if (u.pathname === '/__logs') {
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Debug events
+  // Debug events (SSE)
+  // Also: poll for /config/.codestrap/profile.switch while this SSE is open.
+  // If it appears, emit a custom "profile" event so clients can navigate immediately.
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -343,18 +362,57 @@ const server = http.createServer((req, res) => {
     sseClients.add(res);
     res.write(`data: [sse] connected ${new Date().toISOString()}\n\n`);
     if (lastUp !== null) res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
-    req.on('close', () => { try { sseClients.delete(res); } catch (_) {} });
+
+    // Per-connection poller for profile switch file
+    let closed = false;
+    const iv = setInterval(()=>{
+      if (closed) return;
+      try{
+        const prof = readAndClearProfileSwitch();
+        if (prof) {
+          pushLog(\`profile bootstrap (SSE push) → \${prof}\`);
+          // Custom named event so the client handler can catch it explicitly
+          res.write(`event: profile\ndata: ${prof}\n\n`);
+        }
+      }catch(_){}
+    }, 1000);
+
+    req.on('close', ()=>{
+      closed = true;
+      clearInterval(iv);
+      try{sseClients.delete(res);}catch(_){}
+    });
     return;
+  }
+
+  // A direct endpoint to serve the bootstrap page on demand (from SSE-triggered nav)
+  if (u.pathname === '/__profile_bootstrap') {
+    const name = (u.query && u.query.name) ? String(u.query.name) : readAndClearProfileSwitch();
+    if (!name) {
+      res.writeHead(404, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+      return res.end('no pending profile switch\n');
+    }
+    pushLog(`profile bootstrap (endpoint) → ${name}`);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    return res.end(
+      makeProfileBootstrapHtml(name).replace(
+        'location.replace(base + \'?payload=\' + payload);',
+        'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'
+      )
+    );
   }
 
   // Code logs snapshot
   if (u.pathname === '/__code_logs') {
-    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+    res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end('[codelogs] disabled in this build\n');
   }
 
   // ---------- Normal proxy flow ----------
-  probeAndNote(ok => {
+  probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
       res.writeHead(503, noStoreHeaders());
@@ -397,7 +455,7 @@ const server = http.createServer((req, res) => {
         }
         res.writeHead(status, hdrs);
         pr.pipe(res);
-        pr.on('end', () => pushLog(`${req.method} ${req.url} → ${status}`));
+        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
         return;
       }
 
@@ -422,7 +480,7 @@ const server = http.createServer((req, res) => {
       let buffer = '';
       sourceStream.setEncoding('utf8');
 
-      sourceStream.on('data', chunk => {
+      sourceStream.on('data', chunk=>{
         buffer += chunk;
         if (!injected) {
           const i = buffer.toLowerCase().indexOf('</head>');
@@ -431,13 +489,13 @@ const server = http.createServer((req, res) => {
             const out = buffer.slice(0, i) + TAG + buffer.slice(i);
             res.write(out); buffer = '';
           } else if (buffer.length > 128 * 1024) {
-            res.write(buffer); buffer = '';
+            res.write(buffer); buffer='';
           }
         } else {
           res.write(chunk);
         }
       });
-      sourceStream.on('end', () => {
+      sourceStream.on('end', ()=>{
         if (!injected) {
           const j = buffer.toLowerCase().lastIndexOf('</body>');
           if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
@@ -446,10 +504,10 @@ const server = http.createServer((req, res) => {
         res.end();
         pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc||'identity'}]`);
       });
-      sourceStream.on('error', e => { pushLog(`error in injection stream: ${e.message}`); try { res.end(); } catch (_) {} });
+      sourceStream.on('error', e=>{ pushLog(`error in injection stream: ${e.message}`); try{res.end();}catch(_){} });
     });
 
-    p.on('error', (e) => {
+    p.on('error', (e)=>{
       pushLog(`error piping to upstream: ${e.message}`);
       res.writeHead(503, noStoreHeaders());
       res.end(makeSplashHtml());
