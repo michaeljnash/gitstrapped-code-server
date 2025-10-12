@@ -445,22 +445,24 @@ const server = http.createServer((req,res)=>{
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      // Fetch list of profile names from the proxy, then ensure userDataProfiles exists.
+      function safeParseProfiles(raw){
+        if (!raw) return [];
+        try {
+          const v = JSON.parse(raw);
+          return Array.isArray(v) ? v : [];
+        } catch { return []; }
+      }
       function seed(names){
         try{
           const key = 'userDataProfiles';
-          const raw = localStorage.getItem(key);
-          let arr = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
-          if (!Array.isArray(arr)) arr = [];
-          // Build a set of existing names
+          let arr = safeParseProfiles(localStorage.getItem(key));
           const have = new Set(arr.map(x => (x && x.name) || ''));
-          // Find current max $mid
           let maxMid = 0;
           for (const x of arr) {
             const mid = x && x.location && typeof x.location["$mid"] === 'number' ? x.location["$mid"] : 0;
             if (mid > maxMid) maxMid = mid;
           }
-          // Append any missing profiles
+          let added = 0;
           for (const name of names || []) {
             if (!name || have.has(name)) continue;
             maxMid += 1;
@@ -473,17 +475,22 @@ const server = http.createServer((req,res)=>{
               },
               "name": name
             });
+            added++;
           }
           localStorage.setItem(key, JSON.stringify(arr));
-        }catch(e){ /* best-effort */ }
+          console.log('[codestrap] seeded profiles:', {names, added, total: arr.length});
+        } catch(e){
+          console.warn('[codestrap] seed profiles failed:', e);
+        }
       }
-      // Kick off
       try{
         fetch('/__profiles?ts='+Date.now(), { cache: 'no-store', credentials: 'same-origin' })
           .then(r => r.ok ? r.json() : {names:[]})
           .then(j => seed((j && j.names) || []))
-          .catch(()=>{ /* ignore */ });
-      }catch(_){}
+          .catch(e => console.warn('[codestrap] /__profiles fetch failed:', e));
+      }catch(e){
+        console.warn('[codestrap] seed bootstrap failed:', e);
+      }
     })();`);
   }
 
