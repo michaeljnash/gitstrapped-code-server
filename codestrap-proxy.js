@@ -148,7 +148,7 @@ function streamDockerLogs(containerId, res, sinceSec){
 }
 
 /* --------------------- splash (503) --------------------- */
-function makeSplashHtml(){
+function makeSplashHtml() {
   return `<!doctype html><meta charset="utf-8">
 <title>Codestrap — connecting…</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -159,18 +159,140 @@ html,body{height:100%;margin:0;font:16px system-ui;background:#0f172a;color:#e5e
 @keyframes spin{to{transform:rotate(360deg)}}
 .small{opacity:.8;font-size:13px;margin-top:8px}
 .subtitle{margin-top:-12.5px;font-weight:750}
-kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,Menlo,monospace}
+.container{width:100%;max-width:1024px;margin-top:18px}
+.card{background:#111827;border:1px solid #374151;border-radius:12px;overflow:hidden}
+.head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary{display:flex;align-items:center;gap:.5rem}
+.badge{font-size:11px;opacity:.8;border:1px solid #374151;border-radius:999px;padding:2px 8px}
+pre{margin:0;padding:12px 14px;border-top:1px solid #374151;max-height:300px;overflow:auto;font-size:12px;line-height:1.35;background:#0b1220}
+kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.chev{display:inline-block;transition:transform .15s ease}
+details[open] .chev{transform:rotate(90deg)}
+
+/* --- dot animation that does NOT reflow --- */
+.tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
+.dots{
+  display:inline-grid;
+  grid-auto-flow:column;
+  grid-template-columns:repeat(3,1ch);
+  width:3ch;               /* fixed width so the line never shifts */
+}
+.dots span{
+  display:inline-block;
+  width:1ch; text-align:left;
+  opacity:0;
+  animation: steps(1,end) 1.2s infinite dotReset;
+}
+/* 1st dot visible the whole cycle */
+.dots span:nth-child(1){ animation-name: dot1; }
+/* 2nd dot becomes visible after 1/3 */
+.dots span:nth-child(2){ animation-name: dot2; }
+/* 3rd dot becomes visible after 2/3 */
+.dots span:nth-child(3){ animation-name: dot3; }
+
+@keyframes dot1 { 0%,100% { opacity:1 } }
+@keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
+@keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
+/* Just a placeholder so we can set defaults above; not used directly */
+@keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-  <div class="small" style="opacity:.65;margin-top:10px">
-    This page auto-reloads when code-server is ready. You can also press <kbd>⌘/Ctrl</kbd>+<kbd>R</kbd>.
+
+  <div class="small tip-line" id="tip">
+    <span id="tip-base">Starting services</span>
+    <span class="dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+  </div>
+
+  <div class="container">
+    <details class="card" id="logsbox">
+      <summary class="head">
+        <span><span class="chev">▶</span> Show live logs</span>
+        <span class="badge" id="log-status">hidden</span>
+      </summary>
+      <pre id="log"></pre>
+    </details>
+    <div class="small" style="opacity:.65;margin-top:10px">
+      This page auto-reloads when code-server is ready. You can also press <kbd>⌘/Ctrl</kbd>+<kbd>R</kbd>.
+    </div>
   </div>
 </div>
-<script>(function(){let d=600,max=5000;async function ping(){try{var r=await fetch('/__up?ts='+Date.now(),{cache:'no-store'});if(r.ok){location.reload();return}}catch(e){}d=Math.min(max,Math.round(d*1.6)+Math.random()*120);setTimeout(ping,d)}setTimeout(ping,d)})();</script>`;
+<script>
+(function(){
+  let delay = 600, maxDelay = 5000, tries = 0;
+  const original = location.href;
+  const tipBaseEl = document.getElementById('tip-base');
+  const logEl = document.getElementById('log');
+  const statusEl = document.getElementById('log-status');
+  const logsBox = document.getElementById('logsbox');
+
+  function setTipBase(t){ if(tipBaseEl) tipBaseEl.textContent = t; }
+  function setStatus(t){ if(statusEl) statusEl.textContent=t; }
+  function addLines(t){
+    if (!logEl || !t) return;
+    logEl.textContent += t.replace(/\\r?\\n/g,'\\n');
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // Live logs: initialize only when opened
+  let logsInit = false;
+  logsBox?.addEventListener('toggle', ()=>{
+    if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
+    logsInit = true;
+    setStatus('initializing…');
+    fetch('/__code_logs?ts='+Date.now(), {cache:'no-store'}).then(r=>{
+      if (r.ok) return r.text();
+      throw new Error('snapshot unavailable');
+    }).then(t=>{
+      if (t) addLines(t);
+      setStatus('live');
+    }).catch(()=>{ setStatus('unavailable'); });
+
+    try {
+      const es = new EventSource('/__code_events');
+      es.addEventListener('message', ev => { addLines(ev.data + "\\n"); });
+      es.onopen = ()=> setStatus('live');
+      es.onerror = ()=> setStatus('disconnected (retrying…)');
+    } catch (_) { setStatus('unavailable'); }
+  });
+
+  // Start polling immediately (dots are CSS-driven and already running)
+  async function ping(){
+    tries++;
+    try{
+      const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+      if (res.ok) {
+        setTipBase('Ready! Loading…');
+        location.replace(original);
+        return;
+      }
+    }catch(e){}
+    const jitter = Math.random() * 150;
+    delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
+    setTimeout(ping, delay);
+  }
+  setTimeout(ping, delay);
+})();
+</script>`;
 }
+
+
+/* --------------------- helpers --------------------- */
+
+function noStoreHeaders(extra = {}) {
+  return Object.assign({
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'pragma': 'no-cache',
+    'expires': '0',
+    'retry-after': '1'
+  }, extra);
+}
+
 
 /* --------------------- helpers --------------------- */
 function noStoreHeaders(extra = {}){
