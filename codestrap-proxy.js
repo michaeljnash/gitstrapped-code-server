@@ -477,7 +477,7 @@ const server = http.createServer((req,res)=>{
             maxMid += 1;
             arr.push({
               location: {
-                "$mid": maxMid,
+                "$mid": 1,
                 "external": "vscode-remote:" + BASE + name,
                 "path": BASE + name,
                 "scheme": "vscode-remote"
