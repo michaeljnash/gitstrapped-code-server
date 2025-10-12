@@ -372,8 +372,49 @@ const server = http.createServer((req,res)=>{
 
   // Code logs snapshot
   if (u.pathname === '/__code_logs') {
-    res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-    return res.end('[codelogs] disabled in this build\n');
+    if (!docker.wantLogs) {
+      res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+      return res.end('[codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n');
+    }
+    resolveContainerId((err, id)=>{
+      if (err || !id) {
+        res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+        return res.end('[codelogs] container not found for CODE_SERVICE_NAME\n');
+      }
+      fetchDockerLogsTail(id, 200, (e, text)=>{
+        if (e) {
+          res.writeHead(500, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+          return res.end('[codelogs] error reading logs\n');
+        }
+        res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+        res.end(text);
+      });
+    });
+    return;
+  }
+
+  // Code logs streaming (SSE)
+  if (u.pathname === '/__code_events') {
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store, no-cache, max-age=0',
+      'connection': 'keep-alive',
+      'x-accel-buffering': 'no'
+    });
+    if (!docker.wantLogs) {
+      res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n\n`);
+      return;
+    }
+    resolveContainerId((err, id)=>{
+      if (err || !id) {
+        res.write(`data: [codelogs] container not found for CODE_SERVICE_NAME\n\n`);
+        return;
+      }
+      const since = Math.floor(Date.now()/1000) - 20; // include a bit of recent history
+      streamDockerLogs(id, res, since);
+      req.on('close', ()=>{ try { res.end(); } catch(_){} });
+    });
+    return;
   }
 
   // ---------- Normal proxy flow ----------
@@ -505,4 +546,11 @@ server.on('upgrade', (req, client, head)=>{
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
   pushLog(`listening on 0.0.0.0:${PROXY_PORT} → upstream http://${CODE_SERVICE_NAME}:${CODE_EXPOSED_PORT}`);
   if (!CODE_SERVICE_NAME) pushLog(`WARNING: CODE_SERVICE_NAME not set — upstream+logs may not work`);
+  if (docker.wantLogs) {
+    pushLog(`docker logs enabled (sock: ${DOCKER_SOCK}) — service: ${CODE_SERVICE_NAME}`);
+  } else if (docker.enabled) {
+    pushLog(`docker socket present, but CODE_SERVICE_NAME not set → logs disabled`);
+  } else {
+    pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
+  }
 });
