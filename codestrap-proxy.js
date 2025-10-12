@@ -21,7 +21,6 @@ const http = require('http');
 const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
-const zlib = require('zlib'); // add this import at the top with others
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
 const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || ''; // required by you; no default
@@ -31,29 +30,44 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
-const PROFILES_DIR = '/config/codestrap/profiles';
 
-function shouldInjectShell(pathname) {
-  const p = (pathname || '/').toLowerCase();
-  if (p === '/' || p === '' || p === '/index.html' || p === '/login') return true;
-  // avoid webviews/assets
-  if (p.startsWith('/vscode') || p.startsWith('/vscode-') || p.startsWith('/static') ||
-      p.startsWith('/webview') || p.startsWith('/vscode-webview') || p.startsWith('/workbench')) return false;
-  return false;
-}
-
-// Allow VS Code / code-server webview SW to claim root scope.
-// Matches both code-server and newer upstream paths.
 function addServiceWorkerHeadersIfNeeded(pathname, res) {
-  const p = pathname || "";
-  const reCodeServer = /\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
-  const reUpstream  = /^\/vscode-webview\/service-worker\.js$/i; // newer path in some builds
-  if (reCodeServer.test(p) || reUpstream.test(p)) {
+  // Allow VS Code webview service worker to claim root scope if registration is attempted
+  // Example path:
+  // /stable-<hash>/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js
+  if (/^\/stable-.*\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js/.test(pathname || "")) {
     res.setHeader('Service-Worker-Allowed', '/');
-    // Avoid caching the SW through intermediate proxies/CDNs
-    res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
   }
 }
+
+// --- VS Code webview: serve a local no-op Service Worker to avoid 401s upstream ---
+function maybeServeWebviewSW(u, res) {
+  // Matches:
+  // /stable-<hash>/static/out/vs/workbench/contrib/webview/browser/pre/service-worker.js
+  // ...with any query string (e.g. ?v=4&vscode-resource-base-authority=...)
+  const swPathRe = /^\/stable-[^/]+\/static\/out\/vs\/workbench\/contrib\/webview\/browser\/pre\/service-worker\.js$/i;
+
+  if (!u || !u.pathname || !swPathRe.test(u.pathname)) return false;
+
+  // Serve a harmless, local SW that always installs/activates and does nothing.
+  const body = `
+/* codestrap stub service-worker.js */
+self.addEventListener('install', (e) => { self.skipWaiting(); });
+self.addEventListener('activate', (e) => { self.clients.claim(); });
+self.addEventListener('fetch', (e) => { /* no-op: let network handle it */ });
+  `.trim() + '\n';
+
+  res.statusCode = 200;
+  res.setHeader('content-type', 'application/javascript; charset=utf-8');
+  res.setHeader('cache-control', 'no-store, no-cache, must-revalidate, max-age=0');
+  res.setHeader('pragma', 'no-cache');
+  res.setHeader('expires', '0');
+  // Allow it to claim the root if VS Code asks:
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.end(body);
+  return true;
+}
+
 
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
@@ -365,6 +379,8 @@ function noStoreHeaders(extra = {}) {
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
+  if (maybeServeWebviewSW(u, res)) return;
+
   addServiceWorkerHeadersIfNeeded(u.pathname, res);
 
   // Health endpoint
@@ -435,106 +451,6 @@ const server = http.createServer((req,res)=>{
     });
     return;
   }
- 
-  // List available profile names derived from filenames: *.profile.json -> <name>
-  if (u.pathname === '/codestrap/profiles/list') {
-    let names = [];
-    try {
-      const files = fs.readdirSync(PROFILES_DIR, { withFileTypes: true });
-      for (const ent of files) {
-        if (!ent.isFile()) continue;
-        const m = ent.name.match(/^(.*)\.profile\.json$/i);
-        if (m && m[1]) {
-          // sanitize to something safe-ish for storage keys
-          const name = m[1].trim();
-          if (name) names.push(name);
-        }
-      }
-      names = Array.from(new Set(names)).sort();
-    } catch (e) {
-      pushLog(`profiles list error: ${e.message}`);
-      res.writeHead(200, { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' });
-      return res.end(JSON.stringify({ profiles: [], error: 'unavailable' }));
-    }
-    res.writeHead(200, { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' });
-    return res.end(JSON.stringify({ profiles: names }));
-  }
-
-  if (u.pathname === '/__profiles_bootstrap.js') {
-    res.writeHead(200, {
-      'content-type': 'application/javascript; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
-    });
-    return res.end(`(function(){
-      try {
-        var log = function(){ try{ console.log.apply(console, ['[codestrap/profiles]'].concat([].slice.call(arguments))); }catch(_){} };
-        var warn = function(){ try{ console.warn.apply(console, ['[codestrap/profiles]'].concat([].slice.call(arguments))); }catch(_){} };
-
-        var INDEX_KEYS = ['workbench.profiles','vscode.profiles','profiles'];
-
-        function getIndex(){
-          for (var i=0;i<INDEX_KEYS.length;i++){
-            var k = INDEX_KEYS[i];
-            try{
-              var raw = localStorage.getItem(k);
-              if (!raw) continue;
-              var j = JSON.parse(raw);
-              if (j && typeof j === 'object') return { key:k, obj:j };
-            }catch(e){}
-          }
-          return null;
-        }
-        function setIndex(k, obj){ try{ localStorage.setItem(k, JSON.stringify(obj)); }catch(e){} }
-
-        function ensureProfileExists(n){
-          var idx = getIndex();
-          if (!idx) idx = { key: INDEX_KEYS[0], obj: { profiles: [], selected: null } };
-          if (!Array.isArray(idx.obj.profiles)) idx.obj.profiles = [];
-
-          var id = 'codestrap:'+n;
-          var exists = idx.obj.profiles.find(function(p){ return p && (p.id===id || p.name===n || p.shortName===n); });
-
-          if (!exists){
-            idx.obj.profiles.push({ id:id, name:n, shortName:n, useDefaultFlags:true });
-            log('created profile in index →', n);
-          } else {
-            log('profile already present →', n);
-          }
-          setIndex(idx.key, idx.obj);
-
-          // per-profile blobs (best effort; keep minimal)
-          var minimal = { name:n, settings:{}, extensions:{} };
-          ['workbench.profile:'+id, 'vscode.profile:'+id, 'profile:'+id].forEach(function(k){
-            try{
-              if (!localStorage.getItem(k)) localStorage.setItem(k, JSON.stringify(minimal));
-            }catch(e){}
-          });
-          try{ localStorage.setItem('codestrap.profile.'+n, '1'); }catch(e){}
-        }
-
-        // Synchronous kick-off: block parse until we fetch + seed.
-        // Same-origin JSON list from the proxy (filesystem read on server).
-        var xhr = new XMLHttpRequest();
-        xhr.open('GET', '/codestrap/profiles/list?ts=' + Date.now(), false /*sync*/);
-        try { xhr.send(null); } catch(e) { warn('fetch failed', e); return; }
-        if (xhr.status !== 200) { warn('list status', xhr.status); return; }
-
-        var data = null;
-        try { data = JSON.parse(xhr.responseText); } catch(e){ warn('bad json'); return; }
-        if (!data || !Array.isArray(data.profiles)) { warn('no profiles array'); return; }
-
-        for (var i=0;i<data.profiles.length;i++){
-          var name = String(data.profiles[i]||'').trim();
-          if (!name) continue;
-          try { ensureProfileExists(name); } catch(e){ warn('seed error for', name, e); }
-        }
-        log('seeded', data.profiles.length, 'profiles');
-        // Done. We do NOT change selection here—this strictly seeds.
-      } catch (e) {
-        try { console.error('[codestrap/profiles] fatal bootstrap error', e); } catch(_){}
-      }
-    })();`);
-  }
 
   // Normal proxy flow
   probeAndNote(ok=>{
@@ -544,6 +460,7 @@ const server = http.createServer((req,res)=>{
       return res.end(makeSplashHtml());
     }
 
+    // strip hop-by-hop
     const headers = { ...req.headers };
     delete headers.connection;
     delete headers.upgrade;
@@ -551,11 +468,7 @@ const server = http.createServer((req,res)=>{
     delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
-    // Detect main shell/html and force identity so we can inject
-    const pathLower = (u.pathname || '/').toLowerCase();
-    const allowInject = (pathLower === '/' || pathLower === '' || pathLower === '/index.html' || pathLower === '/login');
-    if (allowInject) headers['accept-encoding'] = 'identity';
-
+    // forward info
     headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
@@ -571,75 +484,10 @@ const server = http.createServer((req,res)=>{
       method: req.method,
       headers
     }, pr => {
-      const status = pr.statusCode || 502;
-      const hdrs = { ...pr.headers };
-      const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
-      const isHtml = ct.includes('text/html');
-
-      if (!(allowInject && isHtml && req.method === 'GET')) {
-        if (status === 503) Object.assign(hdrs, noStoreHeaders());
-        addServiceWorkerHeadersIfNeeded(u.pathname, { setHeader:(k,v)=>hdrs[k]=v }); // keep your SW header logic
-        res.writeHead(status, hdrs);
-        pr.pipe(res);
-        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
-        return;
-      }
-
-      // We are injecting → no cache & drop len/encoding
-      hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-      delete hdrs['content-length']; delete hdrs['Content-Length'];
-      delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
-      addServiceWorkerHeadersIfNeeded(u.pathname, { setHeader:(k,v)=>hdrs[k]=v });
-      res.writeHead(status, hdrs);
-
-      // Our blocking bootstrap script (runs before app scripts)
-      const BOOT_TAG = `<script src="/__profiles_bootstrap.js"></script>`;
-
-      let injected = false;
-      let buffer = '';
-      pr.setEncoding('utf8');
-
-      pr.on('data', chunk=>{
-        buffer += chunk;
-
-        if (!injected) {
-          // Prefer right after <head>
-          const headOpen = buffer.toLowerCase().indexOf('<head');
-          if (headOpen !== -1) {
-            const headClose = buffer.toLowerCase().indexOf('>', headOpen);
-            if (headClose !== -1) {
-              injected = true;
-              const out = buffer.slice(0, headClose+1) + BOOT_TAG + buffer.slice(headClose+1);
-              res.write(out);
-              buffer = '';
-            }
-          } else if (buffer.length > 128 * 1024) {
-            // If <head> not found early (very rare), fallback to stream; we'll try </body> later.
-            res.write(buffer);
-            buffer = '';
-          }
-        } else {
-          res.write(chunk);
-        }
-      });
-
-      pr.on('end', ()=>{
-        if (!injected) {
-          // Fallback: before </body> (worse than head, but still runs)
-          const j = buffer.toLowerCase().lastIndexOf('</body>');
-          if (j !== -1) res.write(buffer.slice(0, j) + BOOT_TAG + buffer.slice(j));
-          else res.write(buffer);
-        } else if (buffer) {
-          res.write(buffer);
-        }
-        res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [profiles bootstrap injected=${injected}]`);
-      });
-
-      pr.on('error', e=>{
-        pushLog(`error in upstream stream: ${e.message}`);
-        try { res.end(); } catch(_){}
-      });
+      if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
+      res.writeHead(pr.statusCode || 502, pr.headers);
+      pr.pipe(res);
+      pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${pr.statusCode||0}`));
     });
 
     p.on('error', (e)=>{
@@ -650,7 +498,6 @@ const server = http.createServer((req,res)=>{
 
     req.pipe(p);
   });
-
 });
 
 /* --------------------- WebSocket proxy --------------------- */
