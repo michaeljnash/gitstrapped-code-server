@@ -27,7 +27,7 @@ const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
 const CODE_EXPOSED_PORT = +(process.env.CODE_EXPOSED_PORT || 8443);
 const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
-const PROFILES_DIR = process.env.PROFILES_DIR || '/config/codestrap/profiles';
+const PROFILES_DIR = '/config/codestrap/profiles';
 
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
@@ -551,7 +551,8 @@ const server = http.createServer((req,res)=>{
         pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
       }
 
-      const TAG = `<script src="/__watchdog.js" defer></script>`;
+      // in the HTML-mutation branch, before streaming out:
+      const TAG = `<script src="/__watchdog.js" defer></script><script src="/__seed_profiles.js" defer></script>`;
       let injected = false;
       let buffer = '';
       sourceStream.setEncoding('utf8');
