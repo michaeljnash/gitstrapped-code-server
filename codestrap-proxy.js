@@ -21,6 +21,7 @@ const http = require('http');
 const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
+const zlib = require('zlib'); // add this import at the top with others
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
 const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || ''; // required by you; no default
@@ -30,6 +31,16 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
+const PROFILES_DIR = '/config/codestrap/profiles';
+
+function shouldInjectShell(pathname) {
+  const p = (pathname || '/').toLowerCase();
+  if (p === '/' || p === '' || p === '/index.html' || p === '/login') return true;
+  // avoid webviews/assets
+  if (p.startsWith('/vscode') || p.startsWith('/vscode-') || p.startsWith('/static') ||
+      p.startsWith('/webview') || p.startsWith('/vscode-webview') || p.startsWith('/workbench')) return false;
+  return false;
+}
 
 // Allow VS Code / code-server webview SW to claim root scope.
 // Matches both code-server and newer upstream paths.
@@ -424,6 +435,89 @@ const server = http.createServer((req,res)=>{
     });
     return;
   }
+ 
+  // List available profile names derived from filenames: *.profile.json -> <name>
+  if (u.pathname === '/codestrap/profiles/list') {
+    let names = [];
+    try {
+      const files = fs.readdirSync(PROFILES_DIR, { withFileTypes: true });
+      for (const ent of files) {
+        if (!ent.isFile()) continue;
+        const m = ent.name.match(/^(.*)\.profile\.json$/i);
+        if (m && m[1]) {
+          // sanitize to something safe-ish for storage keys
+          const name = m[1].trim();
+          if (name) names.push(name);
+        }
+      }
+      names = Array.from(new Set(names)).sort();
+    } catch (e) {
+      pushLog(`profiles list error: ${e.message}`);
+      res.writeHead(200, { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' });
+      return res.end(JSON.stringify({ profiles: [], error: 'unavailable' }));
+    }
+    res.writeHead(200, { 'content-type':'application/json; charset=utf-8', 'cache-control':'no-store' });
+    return res.end(JSON.stringify({ profiles: names }));
+  }
+
+  if (u.pathname === '/__profiles_bootstrap.js') {
+    res.writeHead(200, {
+      'content-type': 'application/javascript; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    return res.end(`(function(){
+      // Fetch profile names from the proxy, then ensure each exists in localStorage.
+      var INDEX_KEYS = ['workbench.profiles','vscode.profiles','profiles'];
+
+      function getIndex(){
+        for (var i=0;i<INDEX_KEYS.length;i++){
+          var k = INDEX_KEYS[i];
+          try{
+            var raw = localStorage.getItem(k);
+            if (!raw) continue;
+            var j = JSON.parse(raw);
+            if (j && typeof j === 'object') return { key:k, obj:j };
+          } catch(e){}
+        }
+        return null;
+      }
+      function setIndex(k, obj){
+        try { localStorage.setItem(k, JSON.stringify(obj)); } catch(e){}
+      }
+
+      function ensureProfileExists(n){
+        var idx = getIndex();
+        if (!idx) idx = { key: INDEX_KEYS[0], obj: { profiles: [], selected: null } };
+        if (!Array.isArray(idx.obj.profiles)) idx.obj.profiles = [];
+        var id = 'codestrap:' + n;
+
+        var exists = idx.obj.profiles.find(function(p){ return p && (p.id===id || p.name===n || p.shortName===n); });
+        if (!exists){
+          idx.obj.profiles.push({ id:id, name:n, shortName:n, useDefaultFlags:true });
+        }
+        // don't force-select; this script only seeds if missing
+        setIndex(idx.key, idx.obj);
+
+        var minimal = { name:n, settings:{}, extensions:{} };
+        ['workbench.profile:'+id, 'vscode.profile:'+id, 'profile:'+id].forEach(function(k){
+          try{ localStorage.setItem(k, JSON.stringify(minimal)); }catch(e){}
+        });
+        try{ localStorage.setItem('codestrap.profile.'+n, '1'); }catch(e){}
+      }
+
+      try {
+        fetch('/codestrap/profiles/list?ts='+Date.now(), {cache:'no-store', credentials:'same-origin'})
+          .then(function(r){ return r.ok ? r.json() : {profiles:[]}; })
+          .then(function(j){
+            if (!j || !j.profiles || !Array.isArray(j.profiles)) return;
+            j.profiles.forEach(function(name){
+              try { ensureProfileExists(String(name)); } catch(_){}
+            });
+          })
+          .catch(function(){ /* ignore */ });
+      } catch(_) {}
+    })();`);
+  }
 
   // Normal proxy flow
   probeAndNote(ok=>{
@@ -441,6 +535,10 @@ const server = http.createServer((req,res)=>{
     delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
+    // If this looks like the main shell HTML, request identity encoding so we can inject
+    const allowInject = shouldInjectShell(u.pathname);
+    if (allowInject) headers['accept-encoding'] = 'identity';
+
     // forward info
     headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
@@ -457,10 +555,67 @@ const server = http.createServer((req,res)=>{
       method: req.method,
       headers
     }, pr => {
-      if ((pr.statusCode||500) === 503) Object.assign(pr.headers, noStoreHeaders());
-      res.writeHead(pr.statusCode || 502, pr.headers);
-      pr.pipe(res);
-      pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${pr.statusCode||0}`));
+      const status = pr.statusCode || 502;
+      const hdrs = { ...pr.headers };
+      const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
+      const isHtml = ct.includes('text/html');
+
+      if (!(allowInject && isHtml && req.method === 'GET')) {
+        if (status === 503) Object.assign(hdrs, noStoreHeaders());
+        res.writeHead(status, hdrs);
+        pr.pipe(res);
+        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
+        return;
+      }
+
+      // We are injecting → ensure no caching and no content-length/content-encoding
+      hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+      delete hdrs['content-length']; delete hdrs['Content-Length'];
+      delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
+
+      res.writeHead(status, hdrs);
+
+      // Buffer the HTML and splice our tag
+      const TAG = `<script src="/__profiles_bootstrap.js" defer></script>`;
+      let injected = false;
+      let buffer = '';
+      pr.setEncoding('utf8');
+
+      pr.on('data', chunk => {
+        buffer += chunk;
+        if (!injected) {
+          const i = buffer.toLowerCase().indexOf('</head>');
+          if (i !== -1) {
+            injected = true;
+            const out = buffer.slice(0, i) + TAG + buffer.slice(i);
+            res.write(out);
+            buffer = '';
+          } else if (buffer.length > 128 * 1024) {
+            // If head not found in the first 128KB, just stream (rare)
+            res.write(buffer);
+            buffer = '';
+          }
+        } else {
+          res.write(chunk);
+        }
+      });
+
+      pr.on('end', ()=>{
+        if (!injected) {
+          const j = buffer.toLowerCase().lastIndexOf('</body>');
+          if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
+          else res.write(buffer);
+        } else if (buffer) {
+          res.write(buffer);
+        }
+        res.end();
+        pushLog(`${req.method} ${req.url} → ${status} [profiles: injected=${injected}]`);
+      });
+
+      pr.on('error', e => {
+        pushLog(`error in upstream stream: ${e.message}`);
+        try { res.end(); } catch(_){}
+      });
     });
 
     p.on('error', (e)=>{
