@@ -30,6 +30,84 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
+const PROFILE_SWITCH_PATH = '/config/.codestrap/profile.switch';
+
+function readAndClearProfileSwitch(){
+  try{
+    const n = fs.readFileSync(PROFILE_SWITCH_PATH, 'utf8').trim();
+    if (n) { try{ fs.unlinkSync(PROFILE_SWITCH_PATH); }catch(_){ } return n; }
+  }catch(_){}
+  return null;
+}
+
+function shouldBootstrapFirst(reqUrl){
+  // be aggressive: any top-level shell page is fine
+  const u = url.parse(reqUrl || '/', true);
+  const p = (u.pathname || '/').toLowerCase();
+  // The shell HTML paths; expand if your app uses another entry.
+  return p === '/' || p === '' || p === '/index.html' || p === '/login';
+}
+
+function makeProfileBootstrapHtml(profileName){
+  // Inline, synchronous, no external deps. Runs before app JS.
+  return `<!doctype html><meta charset="utf-8">
+<title>Preparing profile…</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="background:#0f172a;color:#e5e7eb;font:16px system-ui;display:grid;place-items:center;min-height:100vh">
+  <div style="text-align:center">
+    <div style="margin-bottom:10px">Creating profile “${profileName}”…</div>
+    <div style="width:44px;height:44px;border:6px solid #334155;border-top-color:#e5e7eb;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto"></div>
+  </div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+  <script>
+    (function(){
+      var name = ${JSON.stringify(profileName)};
+
+      // minimal localStorage seeding — tolerant of VS Code flavors.
+      var INDEX_KEYS = ['workbench.profiles','vscode.profiles','profiles'];
+      function djb2(s){var h=5381;for(var i=0;i<s.length;i++)h=((h<<5)+h)^s.charCodeAt(i);return (h>>>0).toString(16)}
+      function getIndex(){
+        for (var i=0;i<INDEX_KEYS.length;i++){
+          var k=INDEX_KEYS[i];
+          try{ var raw=localStorage.getItem(k); if(!raw) continue;
+               var j=JSON.parse(raw); if(j && typeof j==='object') return {key:k,obj:j}; }catch(e){}
+        }
+        return null;
+      }
+      function setIndex(k, obj){ try{ localStorage.setItem(k, JSON.stringify(obj)); }catch(e){} }
+
+      function ensureProfileExists(n){
+        var idx = getIndex();
+        if (!idx) idx = { key: INDEX_KEYS[0], obj: { profiles: [], selected: null } };
+        if (!Array.isArray(idx.obj.profiles)) idx.obj.profiles = [];
+        var id = 'codestrap:'+n, short = djb2(n).slice(-8);
+
+        var exists = idx.obj.profiles.find(function(p){ return p && (p.id===id || p.name===n || p.shortName===n); });
+        if (!exists){
+          idx.obj.profiles.push({ id:id, name:n, shortName:n, useDefaultFlags:true });
+        }
+        try{ idx.obj.selected = id; }catch(e){}
+        setIndex(idx.key, idx.obj);
+
+        // per-profile blobs (best-effort)
+        var minimal = { name:n, settings:{}, extensions:{} };
+        ['workbench.profile:'+id, 'vscode.profile:'+id, 'profile:'+id].forEach(function(k){
+          try{ localStorage.setItem(k, JSON.stringify(minimal)); }catch(e){}
+        });
+        try{ localStorage.setItem('codestrap.profile.'+n, '1'); }catch(e){}
+      }
+
+      try{ ensureProfileExists(name); }catch(e){ /* ignore */ }
+
+      // now jump using the payload param the app understands
+      var payload = encodeURIComponent(JSON.stringify([["profile", name]]));
+      var base = (location.pathname && location.pathname !== '/login') ? location.pathname : '/';
+      location.replace(base + '?payload=' + payload);
+    })();
+  </script>
+</body>`;
+}
+
 function ts(){ return new Date().toISOString().replace('T',' ').replace('Z','Z'); }
 
 /* --------------------- tiny logger (ring buffer + SSE) --------------------- */
@@ -197,13 +275,18 @@ function shouldInjectWatchdog(reqUrl){
 }
 
 /* --------------------- HTTP server --------------------- */
-const server = http.createServer((req,res)=>{
+const server = http.createServer((req, res) => {
   const u = url.parse(req.url || '/', true);
 
   // Health
   if (u.pathname === '/__up') {
-    return probeAndNote(ok=>{
-      res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
+    return probeAndNote(ok => {
+      res
+        .writeHead(ok ? 200 : 503, {
+          'content-type': 'text/plain',
+          'cache-control': 'no-store',
+        })
+        .end(ok ? 'OK' : 'DOWN');
     });
   }
 
@@ -211,7 +294,7 @@ const server = http.createServer((req,res)=>{
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
     });
     return res.end(`(function(){
       var delay=1500, max=6000;
@@ -229,7 +312,10 @@ const server = http.createServer((req,res)=>{
 
   // Logs (ring buffer)
   if (u.pathname === '/__logs') {
-    res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    res.writeHead(200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    });
     return res.end(getLogsText());
   }
 
@@ -239,23 +325,45 @@ const server = http.createServer((req,res)=>{
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
       'connection': 'keep-alive',
-      'x-accel-buffering': 'no'
+      'x-accel-buffering': 'no',
     });
     sseClients.add(res);
     res.write(`data: [sse] connected ${new Date().toISOString()}\n\n`);
-    if (lastUp !== null) res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
-    req.on('close', ()=>{ try{sseClients.delete(res);}catch(_){ } });
+    if (lastUp !== null)
+      res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
+    req.on('close', () => {
+      try {
+        sseClients.delete(res);
+      } catch (_) {}
+    });
     return;
   }
 
   // Code logs snapshot
   if (u.pathname === '/__code_logs') {
-    res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    res.writeHead(503, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    });
     return res.end('[codelogs] disabled in this build\n');
   }
 
+  // ******** PROFILE BOOTSTRAP: FIRST THING BEFORE PROXY ********
+  // If a switch is queued, serve bootstrap HTML that seeds localStorage + redirects.
+  if (shouldBootstrapFirst(req.url)) {
+    const prof = readAndClearProfileSwitch();
+    if (prof) {
+      pushLog(`profile bootstrap → ${prof}`);
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+      });
+      return res.end(makeProfileBootstrapHtml(prof));
+    }
+  }
+
   // ---------- Normal proxy flow ----------
-  probeAndNote(ok=>{
+  probeAndNote(ok => {
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
       res.writeHead(503, noStoreHeaders());
@@ -264,93 +372,132 @@ const server = http.createServer((req,res)=>{
 
     // strip hop-by-hop
     const headers = { ...req.headers };
-    delete headers.connection; delete headers.upgrade;
-    delete headers['proxy-connection']; delete headers['keep-alive'];
+    delete headers.connection;
+    delete headers.upgrade;
+    delete headers['proxy-connection'];
+    delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
     // forward info
-    headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
-    headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
+    headers['x-forwarded-proto'] =
+      req.headers['x-forwarded-proto'] || 'http';
+    headers['x-forwarded-host'] =
+      headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
       headers['x-forwarded-for'] = headers['x-forwarded-for']
         ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
         : req.socket.remoteAddress;
     }
 
-    const p = http.request({
-      hostname: CODE_SERVICE_NAME || '127.0.0.1',
-      port: CODE_EXPOSED_PORT,
-      path: req.url,
-      method: req.method,
-      headers
-    }, pr => {
-      const status = pr.statusCode || 502;
-      const hdrs = { ...pr.headers };
+    const p = http.request(
+      {
+        hostname: CODE_SERVICE_NAME || '127.0.0.1',
+        port: CODE_EXPOSED_PORT,
+        path: req.url,
+        method: req.method,
+        headers,
+      },
+      pr => {
+        const status = pr.statusCode || 502;
+        const hdrs = { ...pr.headers };
 
-      const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
-      const isHtml = ct.includes('text/html');
-      const allowInjectHere = shouldInjectWatchdog(req.url);
+        const ct = String(
+          hdrs['content-type'] || hdrs['Content-Type'] || ''
+        ).toLowerCase();
+        const isHtml = ct.includes('text/html');
+        const allowInjectHere = shouldInjectWatchdog(req.url);
 
-      if (!(isHtml && allowInjectHere)) {
-        if (status === 503) {
-          hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-          hdrs['pragma'] = 'no-cache'; hdrs['expires'] = '0';
-        }
-        res.writeHead(status, hdrs);
-        pr.pipe(res);
-        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
-        return;
-      }
-
-      // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
-      hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
-      delete hdrs['content-length']; delete hdrs['Content-Length'];
-      const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
-      delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
-      res.writeHead(status, hdrs);
-
-      let sourceStream = pr;
-      try {
-        if (enc.includes('br')) { const bro = zlib.createBrotliDecompress(); pr.pipe(bro); sourceStream = bro; }
-        else if (enc.includes('gzip') || enc.includes('x-gzip')) { const gun = zlib.createGunzip(); pr.pipe(gun); sourceStream = gun; }
-        else if (enc.includes('deflate')) { const inf = zlib.createInflate(); pr.pipe(inf); sourceStream = inf; }
-      } catch (e) {
-        pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
-      }
-
-      const TAG = `<script src="/__watchdog.js" defer></script>`;
-      let injected = false;
-      let buffer = '';
-      sourceStream.setEncoding('utf8');
-
-      sourceStream.on('data', chunk=>{
-        buffer += chunk;
-        if (!injected) {
-          const i = buffer.toLowerCase().indexOf('</head>');
-          if (i !== -1) {
-            injected = true;
-            const out = buffer.slice(0, i) + TAG + buffer.slice(i);
-            res.write(out); buffer = '';
-          } else if (buffer.length > 128 * 1024) {
-            res.write(buffer); buffer='';
+        if (!(isHtml && allowInjectHere)) {
+          if (status === 503) {
+            hdrs['cache-control'] =
+              'no-store, no-cache, must-revalidate, max-age=0';
+            hdrs['pragma'] = 'no-cache';
+            hdrs['expires'] = '0';
           }
-        } else {
-          res.write(chunk);
+          res.writeHead(status, hdrs);
+          pr.pipe(res);
+          pr.on('end', () => pushLog(`${req.method} ${req.url} → ${status}`));
+          return;
         }
-      });
-      sourceStream.on('end', ()=>{
-        if (!injected) {
-          const j = buffer.toLowerCase().lastIndexOf('</body>');
-          if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
-          else res.write(buffer);
-        } else if (buffer) res.write(buffer);
-        res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc||'identity'}]`);
-      });
-      sourceStream.on('error', e=>{ pushLog(`error in injection stream: ${e.message}`); try{res.end();}catch(_){} });
-    });
 
-    p.on('error', (e)=>{
+        // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
+        hdrs['cache-control'] =
+          'no-store, no-cache, must-revalidate, max-age=0';
+        delete hdrs['content-length'];
+        delete hdrs['Content-Length'];
+        const enc = String(
+          hdrs['content-encoding'] || hdrs['Content-Encoding'] || ''
+        ).toLowerCase();
+        delete hdrs['content-encoding'];
+        delete hdrs['Content-Encoding'];
+        res.writeHead(status, hdrs);
+
+        let sourceStream = pr;
+        try {
+          if (enc.includes('br')) {
+            const bro = zlib.createBrotliDecompress();
+            pr.pipe(bro);
+            sourceStream = bro;
+          } else if (enc.includes('gzip') || enc.includes('x-gzip')) {
+            const gun = zlib.createGunzip();
+            pr.pipe(gun);
+            sourceStream = gun;
+          } else if (enc.includes('deflate')) {
+            const inf = zlib.createInflate();
+            pr.pipe(inf);
+            sourceStream = inf;
+          }
+        } catch (e) {
+          pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`);
+          sourceStream = pr;
+        }
+
+        const TAG = `<script src="/__watchdog.js" defer></script>`;
+        let injected = false;
+        let buffer = '';
+        sourceStream.setEncoding('utf8');
+
+        sourceStream.on('data', chunk => {
+          buffer += chunk;
+          if (!injected) {
+            const i = buffer.toLowerCase().indexOf('</head>');
+            if (i !== -1) {
+              injected = true;
+              const out = buffer.slice(0, i) + TAG + buffer.slice(i);
+              res.write(out);
+              buffer = '';
+            } else if (buffer.length > 128 * 1024) {
+              res.write(buffer);
+              buffer = '';
+            }
+          } else {
+            res.write(chunk);
+          }
+        });
+        sourceStream.on('end', () => {
+          if (!injected) {
+            const j = buffer.toLowerCase().lastIndexOf('</body>');
+            if (j !== -1)
+              res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
+            else res.write(buffer);
+          } else if (buffer) res.write(buffer);
+          res.end();
+          pushLog(
+            `${req.method} ${req.url} → ${status} [watchdog=on enc=${
+              enc || 'identity'
+            }]`
+          );
+        });
+        sourceStream.on('error', e => {
+          pushLog(`error in injection stream: ${e.message}`);
+          try {
+            res.end();
+          } catch (_) {}
+        });
+      }
+    );
+
+    p.on('error', e => {
       pushLog(`error piping to upstream: ${e.message}`);
       res.writeHead(503, noStoreHeaders());
       res.end(makeSplashHtml());
@@ -359,6 +506,7 @@ const server = http.createServer((req,res)=>{
     req.pipe(p);
   });
 });
+
 
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{

@@ -788,15 +788,11 @@ trigger_window_reload(){
   printf 'RELOAD:%s\n' "$(date -u +%s)" > "$f" 2>/dev/null || true
 }
 
-# ===== code-server profile switch request (extension reads localStorage) =====
-# We cannot write browser localStorage from here; instead, hand off a request
-# the codestrap extension can consume and then create/switch the VS Code
-# profile in localStorage. Name convention: "codestrap:<profileName>"
+# ----- code-server profile switch request (proxy consumes this file) -----
 request_profile_switch(){ # usage: request_profile_switch "<profile-name>"
   local name="$1"
-  local dir="/run/codestrap"
+  local dir="/config/.codestrap"
   mkdir -p "$dir" 2>/dev/null || true
-  # simple plaintext for the extension to pick up
   printf '%s\n' "$name" > "${dir}/profile.switch"
 }
 
