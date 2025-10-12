@@ -407,17 +407,8 @@ ensure_dir "$BASE"
 SSH_DIR="$HOME/.ssh"; ensure_dir "$SSH_DIR"
 KEY_NAME="id_ed25519"; PRIVATE_KEY_PATH="$SSH_DIR/$KEY_NAME"; PUBLIC_KEY_PATH="$SSH_DIR/${KEY_NAME}.pub"
 
-# VS Code settings paths (profile-aware)
-# If the extension passes CODESTRAP_PROFILE_ID, write into that profile's folder.
-BASE_USER_DIR="$HOME/data/User"
-PROFILE_ID="${CODESTRAP_PROFILE_ID:-}"
-if [ -n "$PROFILE_ID" ]; then
-  USER_DIR="$BASE_USER_DIR/profiles/$PROFILE_ID"
-else
-  USER_DIR="$BASE_USER_DIR"
-fi
-ensure_dir "$USER_DIR"
-
+# VS Code settings paths
+USER_DIR="$HOME/data/User"; ensure_dir "$USER_DIR"
 SETTINGS_PATH="$USER_DIR/settings.json"
 TASKS_PATH="$USER_DIR/tasks.json"
 KEYB_PATH="$USER_DIR/keybindings.json"
@@ -3161,26 +3152,8 @@ cli_entry(){
     --auto|-a)
       CTX_TAG="[Bootstrap GitHub]"; bootstrap_env_only; CTX_TAG=""; exit 0;;
     profile)
-      sub="${2:-}"
-      case "$sub" in
-        --load)
-          name="${3:-}"
-          if [ -z "$name" ]; then
-            err "usage: codestrap profile --load <name>"
-            exit 1
-          fi
-          # Ask the extension to switch (no restart); page reload is handled by extension logic.
-          request_profile_switch "$name"
-          log "requested profile switch → $name"
-          # Optional: kick the web UI to notice faster (extension will ack and then apply)
-          trigger_window_reload
-          exit 0
-          ;;
-        *)
-          err "unknown 'profile' subcommand. Try: codestrap profile --load <name>"
-          exit 1
-          ;;
-      esac
+      shift || true
+      profile_cmd "$@"
       ;;
     passwd)
       shift || true
