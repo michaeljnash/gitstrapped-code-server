@@ -370,7 +370,7 @@ const server = http.createServer((req,res)=>{
       try{
         const prof = readAndClearProfileSwitch();
         if (prof) {
-          pushLog(\`profile bootstrap (SSE push) → \${prof}\`);
+          pushLog(`profile bootstrap (SSE push) → ${prof}`);
           // Custom named event so the client handler can catch it explicitly
           res.write(`event: profile\ndata: ${prof}\n\n`);
         }
