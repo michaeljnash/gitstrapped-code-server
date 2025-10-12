@@ -51,6 +51,7 @@ services:
     volumes:
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./profiles:/config/codestrap/profiles:ro
     expose:
       - "8080"
     ports:
