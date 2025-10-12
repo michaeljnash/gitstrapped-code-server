@@ -469,8 +469,8 @@ const server = http.createServer((req,res)=>{
             arr.push({
               location: {
                 "$mid": maxMid,
-                "external": "vscode-remote:/config/data/User/profiles/" + name,
-                "path": "/config/data/User/profiles/" + name,
+                "external": "vscode-remote:/config/codestrap/profile_data/" + name,
+                "path": "/config/codestrap/profile_data/" + name,
                 "scheme": "vscode-remote"
               },
               "name": name
