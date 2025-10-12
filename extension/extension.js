@@ -11,9 +11,94 @@ const RELOAD_FLAG = '/run/codestrap/reload.flag';
 const RELOAD_DIR  = '/run/codestrap';
 let lastReloadNonce = 0;
 
+// ----------------- PROFILES SUPPORT -----------------
+function getTargetProfileName(){
+  // Priority: env → query param (?profile=) → default
+  const env = process.env.CODESTRAP_PROFILE;
+  if (env && String(env).trim()) return String(env).trim();
+  try {
+    // code-server/web can expose a location with a query string; desktop won’t.
+    const loc = globalThis && globalThis.location;
+    if (loc && typeof loc.search === 'string') {
+      const sp = new URLSearchParams(loc.search);
+      const q = sp.get('profile');
+      if (q && q.trim()) return q.trim();
+    }
+  } catch(_) {}
+  return 'codestrap/default';
+}
+
+async function ensureCodestrapProfile(context){
+  const api = vscode;
+  const profiles = api && api.profiles;
+  const targetName = getTargetProfileName();
+
+  if (!profiles || !profiles.getAllProfiles || !profiles.createProfile || !profiles.switch) {
+    // Not supported in this build — just log and continue without blocking.
+    if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+    outChan.appendLine('[codestrap] Profiles API not available. Skipping profile create/switch.');
+    return { supported:false, switched:false, created:false, name:targetName };
+  }
+
+  // Discover or create the target
+  const all = profiles.getAllProfiles ? profiles.getAllProfiles() : [];
+  let target = all.find(p => p && (p.name === targetName || p.id === targetName));
+  let created = false;
+  if (!target) {
+    if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+    outChan.show(true);
+    outChan.appendLine(`[codestrap] Creating VS Code profile: ${targetName}`);
+    target = await profiles.createProfile(targetName, {
+      settings: {},
+      keybindings: [],
+      tasks: undefined,
+      snippets: undefined,
+      extensions: { enabled: [], disabled: [] },
+      globalState: {}
+    });
+    created = true;
+  }
+
+  // One-time switch guard per installation & per target
+  const guardKey = `profile-switched:${target.name || targetName}`;
+  let switched = false;
+  if (!context.globalState.get(guardKey)) {
+    if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+    outChan.appendLine(`[codestrap] Switching to profile: ${target.name || targetName}`);
+    await profiles.switch(target);
+    await context.globalState.update(guardKey, true);
+    switched = true;
+  } else {
+    if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+    outChan.appendLine(`[codestrap] Profile already selected earlier: ${target.name || targetName}`);
+  }
+
+  return { supported:true, switched, created, name: target.name || targetName };
+}
+
+async function applyCodestrapInActiveProfile(){
+  // Give the profile context a moment to settle
+  await sleep(400);
+  return new Promise((resolve) => {
+    let done = 0; const mark = () => { done; if (done >= 2) resolve(); };
+    runCodestrap('config', ['config','-s','true','-k','true','-t','true','-e','true'], {
+      expectAck:true,
+      postAck: () => mark()
+    });
+    runCodestrap('extensions', ['extensions','-u','missing','-i','all'], {
+      expectAck:true,
+      postAck: () => mark()
+    });
+  });
+}
+// ----------------------------------------------------
+
 // Path the CLI will "touch" to request a VS Code profile switch
 const PROFILE_SWITCH_FLAG = '/run/codestrap/profile.switch';
 let lastProfileSwitchSeen = '';
+
+// ---- helper: small sleep ----
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
 function shellQ(s){
   if (s === undefined || s === null) return "''";
@@ -398,6 +483,19 @@ class ViewProvider {
 }
 
 function activate(context){
+  // 1) Ensure we’re in the right profile (create if missing, switch once)
+  ensureCodestrapProfile(context)
+    .then(async (res) => {
+      if (res.supported && (res.switched || res.created)) {
+        // Apply Codestrap after profile is set/created
+        await applyCodestrapInActiveProfile();
+      }
+    })
+    .catch((e) => {
+      if (!outChan) outChan = vscode.window.createOutputChannel('Codestrap');
+      outChan.appendLine(`[codestrap] Profile init error: ${e && e.message ? e.message : String(e)}`);
+    });
+
   const provider = new ViewProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('codestrap.view', provider, { webviewOptions: { retainContextWhenHidden: true } })
