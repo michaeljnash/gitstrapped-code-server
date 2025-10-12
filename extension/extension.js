@@ -11,6 +11,17 @@ const RELOAD_FLAG = '/run/codestrap/reload.flag';
 const RELOAD_DIR  = '/run/codestrap';
 let lastReloadNonce = 0;
 
+
+function getActiveProfileInfo() {
+  const api = vscode;
+  const p = api?.profiles?.getCurrentProfile ? api.profiles.getCurrentProfile() : null;
+  return {
+    id:   (p && (p.id || '')) || '',
+    name: (p && (p.name || '')) || ''
+  };
+}
+
+
 // ----------------- PROFILES SUPPORT -----------------
 function getTargetProfileName(){
   // Priority: env → query param (?profile=) → default
@@ -134,6 +145,14 @@ function runCodestrap(op, args, { expectAck=false, postAck } = {}) {
   // Force non-TTY so the CLI won’t try to read /dev/tty.
   // (Password flows use --set, so no interactive prompts.)
   const env = { ...process.env, CODESTRAP_NO_TTY: '1' };
+  // Pass the active VS Code profile to the CLI so it writes into User/profiles/<id>
+  try {
+    const ap = getActiveProfileInfo();
+    if (ap && ap.id) {
+      env.CODESTRAP_PROFILE_ID = ap.id;
+      env.CODESTRAP_PROFILE_NAME = ap.name || '';
+    }
+  } catch (_) {}
   const { spawn } = require('child_process');
   const fullArgs = [...r.baseArgs, ...args];
   const proc = spawn(r.cmd, fullArgs, { env });
