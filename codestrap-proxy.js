@@ -275,47 +275,64 @@ function shouldInjectWatchdog(reqUrl){
 }
 
 /* --------------------- HTTP server --------------------- */
-const server = http.createServer((req,res)=>{
+const server = http.createServer((req, res) => {
   const u = url.parse(req.url || '/', true);
 
-  // ******** PROFILE BOOTSTRAP: ABSOLUTE FIRST STEP ********
-  // If any NON-internal request arrives and a switch is queued, short-circuit and
-  // serve the bootstrap HTML (spinner + localStorage seeding + redirect).
-  if (!u.pathname.startsWith('/__')) {
-    const profNow = readAndClearProfileSwitch();
-    if (profNow) {
-      pushLog(`profile bootstrap (immediate) → ${profNow}`);
+  // ******** PROFILE BOOTSTRAP: MUST RUN FIRST ********
+  // 1) If the CLI has queued a switch (file exists), handle it *before anything else*.
+  //    - If we're on a shell page, serve the bootstrap HTML that seeds localStorage and redirects.
+  //    - If we're not on a shell page (assets, API, etc.), 302 to an internal endpoint that will do it.
+  const queued = readAndClearProfileSwitch(); // reads /config/.codestrap/profile.switch and unlinks it
+  if (queued) {
+    if (shouldBootstrapFirst(req.url)) {
+      pushLog(`profile bootstrap → ${queued}`);
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
       });
-      // Ensure redirect includes both ?profile= and the payload param.
-      return res.end(
-        makeProfileBootstrapHtml(profNow).replace(
-          'location.replace(base + \'?payload=\' + payload);',
-          'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'
-        )
-      );
+      return res.end(makeProfileBootstrapHtml(queued));
+    } else {
+      // bounce to a guaranteed HTML endpoint that will run the bootstrap
+      pushLog(`profile bootstrap redirect → ${queued}`);
+      res.writeHead(302, {
+        'location': '/__profile_bootstrap?name=' + encodeURIComponent(queued),
+        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+      });
+      return res.end();
     }
   }
 
-  // Health
+  // 2) Explicit endpoint for bootstrap, so the CLI can *force* it:
+  //    e.g. open http://host:port/__profile_bootstrap?name=<profile>
+  if (u.pathname === '/__profile_bootstrap' && u.query && u.query.name) {
+    const name = String(u.query.name);
+    pushLog(`profile bootstrap (endpoint) → ${name}`);
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+    });
+    return res.end(makeProfileBootstrapHtml(name));
+  }
+
+  // --------------------- health ---------------------
   if (u.pathname === '/__up') {
-    return probeAndNote(ok=>{
-      res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
+    return probeAndNote(ok => {
+      res
+        .writeHead(ok ? 200 : 503, {
+          'content-type': 'text/plain',
+          'cache-control': 'no-store'
+        })
+        .end(ok ? 'OK' : 'DOWN');
     });
   }
 
-  // Watchdog JS (external script)
-  // - Keeps your original outage polling
-  // - PLUS: opens an SSE stream to /__events to listen for "profile" pushes
+  // --------------------- watchdog ---------------------
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      // --- outage watchdog (unchanged) ---
       var delay=1500, max=6000;
       function next(){ delay=Math.min(max, Math.round(delay*1.4)); setTimeout(ping, delay); }
       async function ping(){
@@ -326,32 +343,16 @@ const server = http.createServer((req,res)=>{
         next();
       }
       setTimeout(ping, delay);
-
-      // --- profile switch push: listen for SSE "profile" events ---
-      try{
-        var es = new EventSource('/__events');
-        es.addEventListener('profile', function(ev){
-          try{
-            var name = (ev && ev.data) ? String(ev.data) : '';
-            if (name) {
-              // Go to a dedicated bootstrap endpoint that seeds localStorage and redirects
-              location.replace('/__profile_bootstrap?name='+encodeURIComponent(name));
-            }
-          }catch(_){}
-        });
-      }catch(_){}
     })();`);
   }
 
-  // Logs (ring buffer)
+  // --------------------- logs ---------------------
   if (u.pathname === '/__logs') {
-    res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     return res.end(getLogsText());
   }
 
-  // Debug events (SSE)
-  // Also: poll for /config/.codestrap/profile.switch while this SSE is open.
-  // If it appears, emit a custom "profile" event so clients can navigate immediately.
+  // --------------------- events (SSE) ---------------------
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -362,57 +363,18 @@ const server = http.createServer((req,res)=>{
     sseClients.add(res);
     res.write(`data: [sse] connected ${new Date().toISOString()}\n\n`);
     if (lastUp !== null) res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
-
-    // Per-connection poller for profile switch file
-    let closed = false;
-    const iv = setInterval(()=>{
-      if (closed) return;
-      try{
-        const prof = readAndClearProfileSwitch();
-        if (prof) {
-          pushLog(`profile bootstrap (SSE push) → ${prof}`);
-          // Custom named event so the client handler can catch it explicitly
-          res.write(`event: profile\ndata: ${prof}\n\n`);
-        }
-      }catch(_){}
-    }, 1000);
-
-    req.on('close', ()=>{
-      closed = true;
-      clearInterval(iv);
-      try{sseClients.delete(res);}catch(_){}
-    });
+    req.on('close', () => { try { sseClients.delete(res); } catch (_) {} });
     return;
   }
 
-  // A direct endpoint to serve the bootstrap page on demand (from SSE-triggered nav)
-  if (u.pathname === '/__profile_bootstrap') {
-    const name = (u.query && u.query.name) ? String(u.query.name) : readAndClearProfileSwitch();
-    if (!name) {
-      res.writeHead(404, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-      return res.end('no pending profile switch\n');
-    }
-    pushLog(`profile bootstrap (endpoint) → ${name}`);
-    res.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
-    });
-    return res.end(
-      makeProfileBootstrapHtml(name).replace(
-        'location.replace(base + \'?payload=\' + payload);',
-        'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'
-      )
-    );
-  }
-
-  // Code logs snapshot
+  // --------------------- code logs snapshot ---------------------
   if (u.pathname === '/__code_logs') {
-    res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
+    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     return res.end('[codelogs] disabled in this build\n');
   }
 
-  // ---------- Normal proxy flow ----------
-  probeAndNote(ok=>{
+  // --------------------- normal proxy flow ---------------------
+  probeAndNote(ok => {
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
       res.writeHead(503, noStoreHeaders());
@@ -455,11 +417,11 @@ const server = http.createServer((req,res)=>{
         }
         res.writeHead(status, hdrs);
         pr.pipe(res);
-        pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
+        pr.on('end', () => pushLog(`${req.method} ${req.url} → ${status}`));
         return;
       }
 
-      // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
+      // mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       delete hdrs['content-length']; delete hdrs['Content-Length'];
       const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
@@ -480,7 +442,7 @@ const server = http.createServer((req,res)=>{
       let buffer = '';
       sourceStream.setEncoding('utf8');
 
-      sourceStream.on('data', chunk=>{
+      sourceStream.on('data', chunk => {
         buffer += chunk;
         if (!injected) {
           const i = buffer.toLowerCase().indexOf('</head>');
@@ -489,25 +451,25 @@ const server = http.createServer((req,res)=>{
             const out = buffer.slice(0, i) + TAG + buffer.slice(i);
             res.write(out); buffer = '';
           } else if (buffer.length > 128 * 1024) {
-            res.write(buffer); buffer='';
+            res.write(buffer); buffer = '';
           }
         } else {
           res.write(chunk);
         }
       });
-      sourceStream.on('end', ()=>{
+      sourceStream.on('end', () => {
         if (!injected) {
           const j = buffer.toLowerCase().lastIndexOf('</body>');
           if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
           else res.write(buffer);
         } else if (buffer) res.write(buffer);
         res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc||'identity'}]`);
+        pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc || 'identity'}]`);
       });
-      sourceStream.on('error', e=>{ pushLog(`error in injection stream: ${e.message}`); try{res.end();}catch(_){} });
+      sourceStream.on('error', e => { pushLog(`error in injection stream: ${e.message}`); try { res.end(); } catch (_) {} });
     });
 
-    p.on('error', (e)=>{
+    p.on('error', (e) => {
       pushLog(`error piping to upstream: ${e.message}`);
       res.writeHead(503, noStoreHeaders());
       res.end(makeSplashHtml());
@@ -516,6 +478,7 @@ const server = http.createServer((req,res)=>{
     req.pipe(p);
   });
 });
+
 
 
 /* --------------------- WebSocket proxy --------------------- */
