@@ -466,56 +466,73 @@ const server = http.createServer((req,res)=>{
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      // Fetch profile names from the proxy, then ensure each exists in localStorage.
-      var INDEX_KEYS = ['workbench.profiles','vscode.profiles','profiles'];
-
-      function getIndex(){
-        for (var i=0;i<INDEX_KEYS.length;i++){
-          var k = INDEX_KEYS[i];
-          try{
-            var raw = localStorage.getItem(k);
-            if (!raw) continue;
-            var j = JSON.parse(raw);
-            if (j && typeof j === 'object') return { key:k, obj:j };
-          } catch(e){}
-        }
-        return null;
-      }
-      function setIndex(k, obj){
-        try { localStorage.setItem(k, JSON.stringify(obj)); } catch(e){}
-      }
-
-      function ensureProfileExists(n){
-        var idx = getIndex();
-        if (!idx) idx = { key: INDEX_KEYS[0], obj: { profiles: [], selected: null } };
-        if (!Array.isArray(idx.obj.profiles)) idx.obj.profiles = [];
-        var id = 'codestrap:' + n;
-
-        var exists = idx.obj.profiles.find(function(p){ return p && (p.id===id || p.name===n || p.shortName===n); });
-        if (!exists){
-          idx.obj.profiles.push({ id:id, name:n, shortName:n, useDefaultFlags:true });
-        }
-        // don't force-select; this script only seeds if missing
-        setIndex(idx.key, idx.obj);
-
-        var minimal = { name:n, settings:{}, extensions:{} };
-        ['workbench.profile:'+id, 'vscode.profile:'+id, 'profile:'+id].forEach(function(k){
-          try{ localStorage.setItem(k, JSON.stringify(minimal)); }catch(e){}
-        });
-        try{ localStorage.setItem('codestrap.profile.'+n, '1'); }catch(e){}
-      }
-
       try {
-        fetch('/codestrap/profiles/list?ts='+Date.now(), {cache:'no-store', credentials:'same-origin'})
-          .then(function(r){ return r.ok ? r.json() : {profiles:[]}; })
-          .then(function(j){
-            if (!j || !j.profiles || !Array.isArray(j.profiles)) return;
-            j.profiles.forEach(function(name){
-              try { ensureProfileExists(String(name)); } catch(_){}
-            });
-          })
-          .catch(function(){ /* ignore */ });
-      } catch(_) {}
+        var log = function(){ try{ console.log.apply(console, ['[codestrap/profiles]'].concat([].slice.call(arguments))); }catch(_){} };
+        var warn = function(){ try{ console.warn.apply(console, ['[codestrap/profiles]'].concat([].slice.call(arguments))); }catch(_){} };
+
+        var INDEX_KEYS = ['workbench.profiles','vscode.profiles','profiles'];
+
+        function getIndex(){
+          for (var i=0;i<INDEX_KEYS.length;i++){
+            var k = INDEX_KEYS[i];
+            try{
+              var raw = localStorage.getItem(k);
+              if (!raw) continue;
+              var j = JSON.parse(raw);
+              if (j && typeof j === 'object') return { key:k, obj:j };
+            }catch(e){}
+          }
+          return null;
+        }
+        function setIndex(k, obj){ try{ localStorage.setItem(k, JSON.stringify(obj)); }catch(e){} }
+
+        function ensureProfileExists(n){
+          var idx = getIndex();
+          if (!idx) idx = { key: INDEX_KEYS[0], obj: { profiles: [], selected: null } };
+          if (!Array.isArray(idx.obj.profiles)) idx.obj.profiles = [];
+
+          var id = 'codestrap:'+n;
+          var exists = idx.obj.profiles.find(function(p){ return p && (p.id===id || p.name===n || p.shortName===n); });
+
+          if (!exists){
+            idx.obj.profiles.push({ id:id, name:n, shortName:n, useDefaultFlags:true });
+            log('created profile in index →', n);
+          } else {
+            log('profile already present →', n);
+          }
+          setIndex(idx.key, idx.obj);
+
+          // per-profile blobs (best effort; keep minimal)
+          var minimal = { name:n, settings:{}, extensions:{} };
+          ['workbench.profile:'+id, 'vscode.profile:'+id, 'profile:'+id].forEach(function(k){
+            try{
+              if (!localStorage.getItem(k)) localStorage.setItem(k, JSON.stringify(minimal));
+            }catch(e){}
+          });
+          try{ localStorage.setItem('codestrap.profile.'+n, '1'); }catch(e){}
+        }
+
+        // Synchronous kick-off: block parse until we fetch + seed.
+        // Same-origin JSON list from the proxy (filesystem read on server).
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', '/codestrap/profiles/list?ts=' + Date.now(), false /*sync*/);
+        try { xhr.send(null); } catch(e) { warn('fetch failed', e); return; }
+        if (xhr.status !== 200) { warn('list status', xhr.status); return; }
+
+        var data = null;
+        try { data = JSON.parse(xhr.responseText); } catch(e){ warn('bad json'); return; }
+        if (!data || !Array.isArray(data.profiles)) { warn('no profiles array'); return; }
+
+        for (var i=0;i<data.profiles.length;i++){
+          var name = String(data.profiles[i]||'').trim();
+          if (!name) continue;
+          try { ensureProfileExists(name); } catch(e){ warn('seed error for', name, e); }
+        }
+        log('seeded', data.profiles.length, 'profiles');
+        // Done. We do NOT change selection here—this strictly seeds.
+      } catch (e) {
+        try { console.error('[codestrap/profiles] fatal bootstrap error', e); } catch(_){}
+      }
     })();`);
   }
 
@@ -527,7 +544,6 @@ const server = http.createServer((req,res)=>{
       return res.end(makeSplashHtml());
     }
 
-    // strip hop-by-hop
     const headers = { ...req.headers };
     delete headers.connection;
     delete headers.upgrade;
@@ -535,11 +551,11 @@ const server = http.createServer((req,res)=>{
     delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
-    // If this looks like the main shell HTML, request identity encoding so we can inject
-    const allowInject = shouldInjectShell(u.pathname);
+    // Detect main shell/html and force identity so we can inject
+    const pathLower = (u.pathname || '/').toLowerCase();
+    const allowInject = (pathLower === '/' || pathLower === '' || pathLower === '/index.html' || pathLower === '/login');
     if (allowInject) headers['accept-encoding'] = 'identity';
 
-    // forward info
     headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
@@ -562,36 +578,43 @@ const server = http.createServer((req,res)=>{
 
       if (!(allowInject && isHtml && req.method === 'GET')) {
         if (status === 503) Object.assign(hdrs, noStoreHeaders());
+        addServiceWorkerHeadersIfNeeded(u.pathname, { setHeader:(k,v)=>hdrs[k]=v }); // keep your SW header logic
         res.writeHead(status, hdrs);
         pr.pipe(res);
         pr.on('end', ()=> pushLog(`${req.method} ${req.url} → ${status}`));
         return;
       }
 
-      // We are injecting → ensure no caching and no content-length/content-encoding
+      // We are injecting → no cache & drop len/encoding
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       delete hdrs['content-length']; delete hdrs['Content-Length'];
       delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
-
+      addServiceWorkerHeadersIfNeeded(u.pathname, { setHeader:(k,v)=>hdrs[k]=v });
       res.writeHead(status, hdrs);
 
-      // Buffer the HTML and splice our tag
-      const TAG = `<script src="/__profiles_bootstrap.js" defer></script>`;
+      // Our blocking bootstrap script (runs before app scripts)
+      const BOOT_TAG = `<script src="/__profiles_bootstrap.js"></script>`;
+
       let injected = false;
       let buffer = '';
       pr.setEncoding('utf8');
 
-      pr.on('data', chunk => {
+      pr.on('data', chunk=>{
         buffer += chunk;
+
         if (!injected) {
-          const i = buffer.toLowerCase().indexOf('</head>');
-          if (i !== -1) {
-            injected = true;
-            const out = buffer.slice(0, i) + TAG + buffer.slice(i);
-            res.write(out);
-            buffer = '';
+          // Prefer right after <head>
+          const headOpen = buffer.toLowerCase().indexOf('<head');
+          if (headOpen !== -1) {
+            const headClose = buffer.toLowerCase().indexOf('>', headOpen);
+            if (headClose !== -1) {
+              injected = true;
+              const out = buffer.slice(0, headClose+1) + BOOT_TAG + buffer.slice(headClose+1);
+              res.write(out);
+              buffer = '';
+            }
           } else if (buffer.length > 128 * 1024) {
-            // If head not found in the first 128KB, just stream (rare)
+            // If <head> not found early (very rare), fallback to stream; we'll try </body> later.
             res.write(buffer);
             buffer = '';
           }
@@ -602,17 +625,18 @@ const server = http.createServer((req,res)=>{
 
       pr.on('end', ()=>{
         if (!injected) {
+          // Fallback: before </body> (worse than head, but still runs)
           const j = buffer.toLowerCase().lastIndexOf('</body>');
-          if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
+          if (j !== -1) res.write(buffer.slice(0, j) + BOOT_TAG + buffer.slice(j));
           else res.write(buffer);
         } else if (buffer) {
           res.write(buffer);
         }
         res.end();
-        pushLog(`${req.method} ${req.url} → ${status} [profiles: injected=${injected}]`);
+        pushLog(`${req.method} ${req.url} → ${status} [profiles bootstrap injected=${injected}]`);
       });
 
-      pr.on('error', e => {
+      pr.on('error', e=>{
         pushLog(`error in upstream stream: ${e.message}`);
         try { res.end(); } catch(_){}
       });
@@ -626,6 +650,7 @@ const server = http.createServer((req,res)=>{
 
     req.pipe(p);
   });
+
 });
 
 /* --------------------- WebSocket proxy --------------------- */
