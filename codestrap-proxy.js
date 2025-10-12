@@ -278,15 +278,31 @@ function shouldInjectWatchdog(reqUrl){
 const server = http.createServer((req, res) => {
   const u = url.parse(req.url || '/', true);
 
+  // ******** PROFILE BOOTSTRAP: ABSOLUTE FIRST STEP ********
+  // For any non-internal path (i.e., not starting with /__), if a profile switch
+  // file exists, short-circuit and serve the bootstrap HTML that seeds localStorage
+  // and then redirects with query params for that profile.
+  if (!u.pathname.startsWith('/__')) {
+    const prof = readAndClearProfileSwitch();
+    if (prof) {
+      pushLog(`profile bootstrap → ${prof}`);
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
+      });
+      // makeProfileBootstrapHtml already shows a spinner and seeds localStorage.
+      // It will redirect to /?payload=...; augment to also include &profile=<name>.
+      return res.end(makeProfileBootstrapHtml(prof)
+        .replace('location.replace(base + \'?payload=\' + payload);',
+                 'location.replace("/?profile="+encodeURIComponent(name)+"&payload="+payload);'));
+    }
+  }
+
   // Health
   if (u.pathname === '/__up') {
     return probeAndNote(ok => {
-      res
-        .writeHead(ok ? 200 : 503, {
-          'content-type': 'text/plain',
-          'cache-control': 'no-store',
-        })
-        .end(ok ? 'OK' : 'DOWN');
+      res.writeHead(ok ? 200 : 503, { 'content-type': 'text/plain', 'cache-control': 'no-store' })
+         .end(ok ? 'OK' : 'DOWN');
     });
   }
 
@@ -294,7 +310,7 @@ const server = http.createServer((req, res) => {
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
-      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
       var delay=1500, max=6000;
@@ -312,10 +328,7 @@ const server = http.createServer((req, res) => {
 
   // Logs (ring buffer)
   if (u.pathname === '/__logs') {
-    res.writeHead(200, {
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-    });
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     return res.end(getLogsText());
   }
 
@@ -325,41 +338,19 @@ const server = http.createServer((req, res) => {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
       'connection': 'keep-alive',
-      'x-accel-buffering': 'no',
+      'x-accel-buffering': 'no'
     });
     sseClients.add(res);
     res.write(`data: [sse] connected ${new Date().toISOString()}\n\n`);
-    if (lastUp !== null)
-      res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
-    req.on('close', () => {
-      try {
-        sseClients.delete(res);
-      } catch (_) {}
-    });
+    if (lastUp !== null) res.write(`data: upstream=${lastUp ? 'UP' : 'DOWN'}\n\n`);
+    req.on('close', () => { try { sseClients.delete(res); } catch (_) {} });
     return;
   }
 
   // Code logs snapshot
   if (u.pathname === '/__code_logs') {
-    res.writeHead(503, {
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-    });
+    res.writeHead(503, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
     return res.end('[codelogs] disabled in this build\n');
-  }
-
-  // ******** PROFILE BOOTSTRAP: FIRST THING BEFORE PROXY ********
-  // If a switch is queued, serve bootstrap HTML that seeds localStorage + redirects.
-  if (shouldBootstrapFirst(req.url)) {
-    const prof = readAndClearProfileSwitch();
-    if (prof) {
-      pushLog(`profile bootstrap → ${prof}`);
-      res.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-      });
-      return res.end(makeProfileBootstrapHtml(prof));
-    }
   }
 
   // ---------- Normal proxy flow ----------
@@ -372,132 +363,93 @@ const server = http.createServer((req, res) => {
 
     // strip hop-by-hop
     const headers = { ...req.headers };
-    delete headers.connection;
-    delete headers.upgrade;
-    delete headers['proxy-connection'];
-    delete headers['keep-alive'];
+    delete headers.connection; delete headers.upgrade;
+    delete headers['proxy-connection']; delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
     // forward info
-    headers['x-forwarded-proto'] =
-      req.headers['x-forwarded-proto'] || 'http';
-    headers['x-forwarded-host'] =
-      headers['x-forwarded-host'] || req.headers['host'];
+    headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
+    headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
       headers['x-forwarded-for'] = headers['x-forwarded-for']
         ? `${headers['x-forwarded-for']}, ${req.socket.remoteAddress}`
         : req.socket.remoteAddress;
     }
 
-    const p = http.request(
-      {
-        hostname: CODE_SERVICE_NAME || '127.0.0.1',
-        port: CODE_EXPOSED_PORT,
-        path: req.url,
-        method: req.method,
-        headers,
-      },
-      pr => {
-        const status = pr.statusCode || 502;
-        const hdrs = { ...pr.headers };
+    const p = http.request({
+      hostname: CODE_SERVICE_NAME || '127.0.0.1',
+      port: CODE_EXPOSED_PORT,
+      path: req.url,
+      method: req.method,
+      headers
+    }, pr => {
+      const status = pr.statusCode || 502;
+      const hdrs = { ...pr.headers };
 
-        const ct = String(
-          hdrs['content-type'] || hdrs['Content-Type'] || ''
-        ).toLowerCase();
-        const isHtml = ct.includes('text/html');
-        const allowInjectHere = shouldInjectWatchdog(req.url);
+      const ct = String(hdrs['content-type'] || hdrs['Content-Type'] || '').toLowerCase();
+      const isHtml = ct.includes('text/html');
+      const allowInjectHere = shouldInjectWatchdog(req.url);
 
-        if (!(isHtml && allowInjectHere)) {
-          if (status === 503) {
-            hdrs['cache-control'] =
-              'no-store, no-cache, must-revalidate, max-age=0';
-            hdrs['pragma'] = 'no-cache';
-            hdrs['expires'] = '0';
-          }
-          res.writeHead(status, hdrs);
-          pr.pipe(res);
-          pr.on('end', () => pushLog(`${req.method} ${req.url} → ${status}`));
-          return;
+      if (!(isHtml && allowInjectHere)) {
+        if (status === 503) {
+          hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+          hdrs['pragma'] = 'no-cache'; hdrs['expires'] = '0';
         }
-
-        // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
-        hdrs['cache-control'] =
-          'no-store, no-cache, must-revalidate, max-age=0';
-        delete hdrs['content-length'];
-        delete hdrs['Content-Length'];
-        const enc = String(
-          hdrs['content-encoding'] || hdrs['Content-Encoding'] || ''
-        ).toLowerCase();
-        delete hdrs['content-encoding'];
-        delete hdrs['Content-Encoding'];
         res.writeHead(status, hdrs);
-
-        let sourceStream = pr;
-        try {
-          if (enc.includes('br')) {
-            const bro = zlib.createBrotliDecompress();
-            pr.pipe(bro);
-            sourceStream = bro;
-          } else if (enc.includes('gzip') || enc.includes('x-gzip')) {
-            const gun = zlib.createGunzip();
-            pr.pipe(gun);
-            sourceStream = gun;
-          } else if (enc.includes('deflate')) {
-            const inf = zlib.createInflate();
-            pr.pipe(inf);
-            sourceStream = inf;
-          }
-        } catch (e) {
-          pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`);
-          sourceStream = pr;
-        }
-
-        const TAG = `<script src="/__watchdog.js" defer></script>`;
-        let injected = false;
-        let buffer = '';
-        sourceStream.setEncoding('utf8');
-
-        sourceStream.on('data', chunk => {
-          buffer += chunk;
-          if (!injected) {
-            const i = buffer.toLowerCase().indexOf('</head>');
-            if (i !== -1) {
-              injected = true;
-              const out = buffer.slice(0, i) + TAG + buffer.slice(i);
-              res.write(out);
-              buffer = '';
-            } else if (buffer.length > 128 * 1024) {
-              res.write(buffer);
-              buffer = '';
-            }
-          } else {
-            res.write(chunk);
-          }
-        });
-        sourceStream.on('end', () => {
-          if (!injected) {
-            const j = buffer.toLowerCase().lastIndexOf('</body>');
-            if (j !== -1)
-              res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
-            else res.write(buffer);
-          } else if (buffer) res.write(buffer);
-          res.end();
-          pushLog(
-            `${req.method} ${req.url} → ${status} [watchdog=on enc=${
-              enc || 'identity'
-            }]`
-          );
-        });
-        sourceStream.on('error', e => {
-          pushLog(`error in injection stream: ${e.message}`);
-          try {
-            res.end();
-          } catch (_) {}
-        });
+        pr.pipe(res);
+        pr.on('end', () => pushLog(`${req.method} ${req.url} → ${status}`));
+        return;
       }
-    );
 
-    p.on('error', e => {
+      // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
+      hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
+      delete hdrs['content-length']; delete hdrs['Content-Length'];
+      const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
+      delete hdrs['content-encoding']; delete hdrs['Content-Encoding'];
+      res.writeHead(status, hdrs);
+
+      let sourceStream = pr;
+      try {
+        if (enc.includes('br')) { const bro = zlib.createBrotliDecompress(); pr.pipe(bro); sourceStream = bro; }
+        else if (enc.includes('gzip') || enc.includes('x-gzip')) { const gun = zlib.createGunzip(); pr.pipe(gun); sourceStream = gun; }
+        else if (enc.includes('deflate')) { const inf = zlib.createInflate(); pr.pipe(inf); sourceStream = inf; }
+      } catch (e) {
+        pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
+      }
+
+      const TAG = `<script src="/__watchdog.js" defer></script>`;
+      let injected = false;
+      let buffer = '';
+      sourceStream.setEncoding('utf8');
+
+      sourceStream.on('data', chunk => {
+        buffer += chunk;
+        if (!injected) {
+          const i = buffer.toLowerCase().indexOf('</head>');
+          if (i !== -1) {
+            injected = true;
+            const out = buffer.slice(0, i) + TAG + buffer.slice(i);
+            res.write(out); buffer = '';
+          } else if (buffer.length > 128 * 1024) {
+            res.write(buffer); buffer = '';
+          }
+        } else {
+          res.write(chunk);
+        }
+      });
+      sourceStream.on('end', () => {
+        if (!injected) {
+          const j = buffer.toLowerCase().lastIndexOf('</body>');
+          if (j !== -1) res.write(buffer.slice(0, j) + TAG + buffer.slice(j));
+          else res.write(buffer);
+        } else if (buffer) res.write(buffer);
+        res.end();
+        pushLog(`${req.method} ${req.url} → ${status} [watchdog=on enc=${enc||'identity'}]`);
+      });
+      sourceStream.on('error', e => { pushLog(`error in injection stream: ${e.message}`); try { res.end(); } catch (_) {} });
+    });
+
+    p.on('error', (e) => {
       pushLog(`error piping to upstream: ${e.message}`);
       res.writeHead(503, noStoreHeaders());
       res.end(makeSplashHtml());
