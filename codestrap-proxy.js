@@ -27,6 +27,8 @@ const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
 const CODE_EXPOSED_PORT = +(process.env.CODE_EXPOSED_PORT || 8443);
 const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
+const PROFILES_DIR = process.env.PROFILES_DIR || '/config/codestrap/profiles';
+
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
 
