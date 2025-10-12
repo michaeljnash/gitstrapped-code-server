@@ -445,53 +445,105 @@ const server = http.createServer((req,res)=>{
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      function safeParseProfiles(raw){
-        if (!raw) return [];
-        try {
-          const v = JSON.parse(raw);
-          return Array.isArray(v) ? v : [];
-        } catch { return []; }
-      }
-      function seed(names){
+      const BASE = '/config/codestrap/profile_data/'; // used for localStorage paths
+
+      function readProfiles(){
         try{
-          const key = 'userDataProfiles';
-          let arr = safeParseProfiles(localStorage.getItem(key));
+          const raw = localStorage.getItem('userDataProfiles');
+          if (!raw) return [];
+          const v = JSON.parse(raw);
+          if (Array.isArray(v)) return v;
+          if (v && Array.isArray(v.profiles)) return v.profiles;
+          return [];
+        }catch{return [];}
+      }
+      function writeProfiles(arr){
+        try{ localStorage.setItem('userDataProfiles', JSON.stringify(arr||[])); }
+        catch(e){ console.warn('[codestrap] cannot write userDataProfiles:', e); }
+      }
+
+      function seedAndEnsure(names){
+        try{
+          let arr = readProfiles();
           const have = new Set(arr.map(x => (x && x.name) || ''));
           let maxMid = 0;
           for (const x of arr) {
             const mid = x && x.location && typeof x.location["$mid"] === 'number' ? x.location["$mid"] : 0;
             if (mid > maxMid) maxMid = mid;
           }
-          let added = 0;
+          const created = [];
           for (const name of names || []) {
             if (!name || have.has(name)) continue;
             maxMid += 1;
             arr.push({
               location: {
                 "$mid": maxMid,
-                "external": "vscode-remote:/config/codestrap/profile_data/" + name,
-                "path": "/config/codestrap/profile_data/" + name,
+                "external": "vscode-remote:" + BASE + name,
+                "path": BASE + name,
                 "scheme": "vscode-remote"
               },
               "name": name
             });
-            added++;
+            created.push(name);
           }
-          localStorage.setItem(key, JSON.stringify(arr));
-          console.log('[codestrap] seeded profiles:', {names, added, total: arr.length});
-        } catch(e){
+          if (created.length) writeProfiles(arr);
+
+          // Ask proxy to mkdir for any newly-added names
+          if (created.length) {
+            fetch('/__ensure_profile_dirs', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({ names: created }),
+              credentials: 'same-origin',
+              cache: 'no-store'
+            }).then(r=>r.json()).then(j=>{
+              console.log('[codestrap] ensure dirs:', j);
+            }).catch(e=>console.warn('[codestrap] ensure dirs failed:', e));
+          }
+
+          console.log('[codestrap] seeded profiles:', { added: created.length, total: arr.length, created });
+        }catch(e){
           console.warn('[codestrap] seed profiles failed:', e);
         }
       }
+
       try{
         fetch('/__profiles?ts='+Date.now(), { cache: 'no-store', credentials: 'same-origin' })
           .then(r => r.ok ? r.json() : {names:[]})
-          .then(j => seed((j && j.names) || []))
+          .then(j => seedAndEnsure((j && j.names) || []))
           .catch(e => console.warn('[codestrap] /__profiles fetch failed:', e));
       }catch(e){
         console.warn('[codestrap] seed bootstrap failed:', e);
       }
     })();`);
+  }
+
+  if (u.pathname === '/__ensure_profile_dirs' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', ()=>{
+      try {
+        const { names } = JSON.parse(body||'{}');
+        if (!Array.isArray(names)) throw new Error('names must be an array');
+        let made = 0;
+        for (const name of names) {
+          if (!name || /[\\/]/.test(name)) continue; // simple safety
+          const p = `${PROFILE_DATA_BASE}/${name}`;
+          try {
+            fs.mkdirSync(p, { recursive: true, mode: 0o755 });
+            made++;
+          } catch (e) {
+            pushLog(`[profiles] mkdir failed for ${p}: ${e.message}`);
+          }
+        }
+        res.writeHead(200, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
+        return res.end(JSON.stringify({ ok:true, made, base: PROFILE_DATA_BASE }));
+      } catch (e) {
+        res.writeHead(400, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
+        return res.end(JSON.stringify({ ok:false, error: e.message }));
+      }
+    });
+    return;
   }
 
   // ---------- Normal proxy flow ----------
