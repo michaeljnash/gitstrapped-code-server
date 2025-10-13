@@ -515,14 +515,23 @@ const server = http.createServer((req,res)=>{
         .map(e => e.name)
         .filter(n => /\.profile\.json$/i.test(n))
         .map(n => n.replace(/\.profile\.json$/i, ''));
+      // NEW: for each profile, tell if an auth file exists
+      const auth = {};
+      for (const n of names) {
+        try {
+          auth[n] = fs.existsSync(`${AUTH_DIR}/${n}.auth.json`);
+        } catch (_) {
+          auth[n] = false;
+        }
+      }
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store'
       });
-      return res.end(JSON.stringify({ names }));
+      return res.end(JSON.stringify({ names, auth }));
     } catch (e) {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names: [], error: 'PROFILES_DIR_unreadable' }));
+      return res.end(JSON.stringify({ names: [], auth: {}, error: 'PROFILES_DIR_unreadable' }));
     }
   }
 
@@ -627,7 +636,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // ADD — login page
+  // Login page
   if (u.pathname === '/__login' && req.method === 'GET') {
     const next = u.query.next || '/';
     res.writeHead(200, {'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
@@ -644,20 +653,40 @@ const server = http.createServer((req,res)=>{
   <div>
     <form method="POST" action="/__login">
       <h1>Sign in to a profile</h1>
-      <div class="msg">Choose a profile and enter its password.</div>
+      <div class="msg">Choose a profile. If the profile has a password, you'll be prompted for it.</div>
       <label>Profile</label>
       <select name="profile" id="profile"></select>
-      <label>Password</label>
-      <input type="password" name="password" autocomplete="current-password" required/>
+      <div id="pw-wrap" style="display:none">
+        <label>Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password"/>
+      </div>
       <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
       <button type="submit">Sign in</button>
     </form>
   </div>
   <script>
-  fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
-    const sel = document.getElementById('profile'); if(!sel) return;
-    (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
-  });
+  (async function(){
+    try{
+      const r = await fetch('/__profiles',{cache:'no-store'});
+      const j = await r.json();
+      const sel = document.getElementById('profile');
+      const pwWrap = document.getElementById('pw-wrap');
+      const pw = document.getElementById('password');
+      const needs = j.auth || {};
+      (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+      function update(){
+        const name = sel.value;
+        const requirePw = !!needs[name];
+        pwWrap.style.display = requirePw ? '' : 'none';
+        if (requirePw) { pw.setAttribute('required','required'); }
+        else { pw.removeAttribute('required'); pw.value=''; }
+      }
+      sel.addEventListener('change', update);
+      update();
+    }catch(e){
+      console.warn('login bootstrap failed', e);
+    }
+  })();
   </script>`);
   }
 
@@ -670,15 +699,23 @@ const server = http.createServer((req,res)=>{
       const password = m.get('password')||'';
       const next = m.get('next') || '/';
       const conf = loadAuthForProfile(profile);
-      if (!profile || !conf) {
+      if (!profile) {
         res.writeHead(302, {'Location':'/__login?e=badprofile'});
         return res.end();
       }
+
       try{
-        const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
-        const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
-        if (!ok) throw new Error('bad pw');
-        const sess = { profile, user: conf.user||profile, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
+        let user = profile;
+
+        if (conf) {
+          // Password REQUIRED for this profile
+          const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
+          const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
+          if (!ok) throw new Error('bad pw');
+          user = conf.user || profile;
+        } // else: passwordless — accept immediately
+
+        const sess = { profile, user, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
         const token = sign(sess);
 
         // Secure cookie only if HTTPS or XFP=https
