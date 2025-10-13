@@ -835,38 +835,68 @@ const server = http.createServer((req,res)=>{
       const name = String(params.profile || '');
       const pw   = String(params.password || '');
       if (!name) {
+        pushLog(`[auth] login rejected: missing profile`);
         res.writeHead(302, { 'location': '/__login?error=1' }); return res.end();
       }
       const needAuth = authRequiredForProfile(name);
+      pushLog(`[auth] profile='${name}' needAuth=${needAuth}`);
       const nextUrl = u.query.next || '/';
+
+      pushLog(`[auth] POST /__login profile='${name}'`);
 
       if (!needAuth) {
         // no password for this profile → just make a session
         const tok = newSession(name, false);
         setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
+        pushLog(`[auth] profile='${name}' no-auth, session created`);
         res.writeHead(302, { 'location': nextUrl }); return res.end();
       }
 
       const auth = loadAuth(name);
+     const authExists = !!auth;
+     const authPathStr = `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`;
+     pushLog(`[auth] profile='${name}' authExists=${authExists} path=${authPathStr}`);
+     if (authExists) {
+       pushLog(`[auth] flags requiresChange=${!!auth.requiresChange} defaultSeed=${!!auth.defaultSeed}`);
+     }
 
-      if (!auth) {
-        // FIRST LOGIN: no auth file yet → only accept the default seed
-        if (pw !== DEFAULT_PROFILE_PASSWORD) {
+     // --- FIRST LOGIN: no auth file yet ---
+     if (!auth) {
+       if (pw !== DEFAULT_PROFILE_PASSWORD) {
+         pushLog(`[auth] profile='${name}' default password mismatch on first create`);
           res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
         }
         // Create auth file using the default; require change immediately
         const rec = makeHashRecord(name, pw);
         rec.requiresChange = true;
         rec.defaultSeed = true;
-        saveAuth(name, rec);
+       if (!saveAuth(name, rec)) {
+         pushLog(`[auth] ERROR saving auth seed for '${name}'`);
+         res.writeHead(500, { 'content-type':'text/plain' }); return res.end('Failed to save auth');
+       }
+       pushLog(`[auth] seeded auth for '${name}' (requiresChange=true)`);
 
         const tok = newSession(name, true); // pendingChange = true
         setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
         res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
       }
 
+     // --- SEEDED BUT UNCHANGED: accept default OR stored hash; force change ---
+     if (auth.defaultSeed === true && auth.requiresChange === true) {
+       const ok = (pw === DEFAULT_PROFILE_PASSWORD) || verifyPassword(pw, auth);
+       if (!ok) {
+         pushLog(`[auth] profile='${name}' defaultSeedrequiresChange but supplied pw rejected`);
+         res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
+       }
+       pushLog(`[auth] profile='${name}' accepted (seed stage), forcing /__password`);
+       const tok = newSession(name, true); // still pending change
+       setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
+       res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
+     }
+
       // Normal verification path
       if (!verifyPassword(pw, auth)) {
+        pushLog(`[auth] profile='${name}' invalid password (normal path)`);
         res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
       }
 
@@ -874,8 +904,10 @@ const server = http.createServer((req,res)=>{
       const tok = newSession(name, pending);
       setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
       if (pending) {
+        pushLog(`[auth] profile='${name}' valid pw; requiresChange -> /__password`);
         res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
       }
+      pushLog(`[auth] profile='${name}' valid pw; -> ${nextUrl}`);
       res.writeHead(302, { 'location': nextUrl }); return res.end();
     });
     return;
