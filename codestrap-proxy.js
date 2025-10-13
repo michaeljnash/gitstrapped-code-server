@@ -431,39 +431,6 @@ function requireProfileFromUrl(u){
 
 function authPath(name){ return `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`; }
 
-// ADD — cookie/signing helpers
-function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
-function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
-
-function sign(obj){
-  const payload = b64url(JSON.stringify(obj));
-  const h = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
-  return `${payload}.${h}`;
-}
-function verify(token){
-  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
-  const [payload, mac] = token.split('.');
-  const good = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
-  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(good))) return null;
-  const obj = JSON.parse(ub64url(payload));
-  if (!obj || !obj.profile) return null;
-  if (obj.exp && Date.now() > obj.exp) return null;
-  return obj;
-}
-
-function setCookie(res, name, val, opts={}){
-  const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
-  if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
-  if (opts.secure) parts.push('Secure'); // only when explicitly true
-  res.setHeader('Set-Cookie', parts.join('; '));
-}
-function clearCookie(res, name){ res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); }
-function readCookie(req, name){
-  const c = req.headers.cookie || '';
-  const m = c.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
 // ADD — per-profile auth files (scrypt)
 function loadAuthForProfile(name){
   try{
@@ -551,7 +518,8 @@ const server = http.createServer((req,res)=>{
   const PUBLIC_PATHS = new Set([
     '/__up','/__logs','/__events','/__code_logs','/__code_events',
     '/__profiles','/__seed_profiles.js','/__watchdog.js',
-    '/__login','/__logout','/__ensure_profile_dirs','/favicon.ico'
+    '/__login','/__logout','/__password', // ← add this
+    '/__ensure_profile_dirs','/favicon.ico'
   ]);
   const ASSET_PREFIXES = ['/vscode','/vscode-','/static','/workbench','/webview','/vscode-webview'];
   function isAssetPath(p){
@@ -928,53 +896,55 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
+  function clearCookie(res, name){
+    res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
+  }
+
   // ADD — logout
   if (u.pathname === '/__logout') {
+    // remove server-side session
+    const c = parseCookies(req);
+    const t = c[SESSION_COOKIE];
+    if (t) { try { SESS.delete(t); } catch(_){} }
     clearCookie(res, SESSION_COOKIE);
     res.writeHead(302, {'Location':'/__login'});
     return res.end();
   }
 
-  // ADD — auth gate for everything except internal endpoints
-  if (!PUBLIC_PATHS.has(u.pathname)) {
-    const tok = readCookie(req, SESSION_COOKIE);
-    const sess = verify(tok);
+  // ---------- Unified auth/profile gate (after special routes, before proxy) ----------
+  {
+    const sess = readSession(req); // {token, profile, exp, pendingChange} or null
+    const urlProfile = requireProfileFromUrl(u); // ?profile or payload=[["profile","..."]]
+    const effectiveProfile = urlProfile || (sess && sess.profile) || null;
 
-    if (!sess || !sess.profile) {
-      res.writeHead(302, {'Location': `/__login?next=${encodeURIComponent(req.url||'/')}`});
-      return res.end();
-    }
-
-    // Enforce payload only for app pages (not static assets)
-    if (!isAssetPath(u.pathname)) {
-      const gotProfile = parseProfileFromPayload(u);
-      if (!gotProfile || gotProfile !== sess.profile) {
-        const parsed = url.parse(req.url||'/', true);
-        parsed.query = parsed.query || {};
-        parsed.query.payload = `[["profile","${sess.profile}"]]`;
-        delete parsed.search;
-        const fixed = url.format(parsed);
-        res.writeHead(302, {'Location': fixed});
-        return res.end();
+    // Only gate non-public paths
+    if (!PUBLIC_PATHS.has(u.pathname)) {
+      // If this URL/profile requires auth, enforce matching session
+      if (effectiveProfile && authRequiredForProfile(effectiveProfile)) {
+        if (!sess || sess.profile !== effectiveProfile) {
+          const next = encodeURIComponent(req.url || '/');
+          res.writeHead(302, { 'Location': `/__login?profile=${encodeURIComponent(effectiveProfile)}&next=${next}` });
+          return res.end();
+        }
+        // Force first-login password change until resolved
+        if (sess.pendingChange && u.pathname !== '/__password') {
+          res.writeHead(302, { 'Location': `/__password?profile=${encodeURIComponent(effectiveProfile)}` });
+          return res.end();
+        }
       }
-    }
-  }
 
-  // ---------- Auth gate before proxy ----------
-  // If the URL declares a profile and that profile requires auth, enforce it.
-  const profileFromUrl = requireProfileFromUrl(u);
-  if (profileFromUrl) {
-    if (authRequiredForProfile(profileFromUrl)) {
-      const sess = readSession(req);
-      if (!sess || sess.profile !== profileFromUrl) {
-        // go to login for that profile
-        res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(profileFromUrl)}` });
-        return res.end();
-      }
-      // If first login requires change, force the change page until done
-      if (sess.pendingChange && u.pathname !== '/__password') {
-        res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(profileFromUrl)}` });
-        return res.end();
+      // Normalize payload for app pages (not static assets)
+      if (!isAssetPath(u.pathname)) {
+        const got = parseProfileFromPayload(u);
+        if (effectiveProfile && got !== effectiveProfile) {
+          const parsed = url.parse(req.url || '/', true);
+          parsed.query = parsed.query || {};
+          parsed.query.payload = `[["profile","${effectiveProfile}"]]`;
+          delete parsed.search; // force rebuild
+          const fixed = url.format(parsed);
+          res.writeHead(302, { 'Location': fixed });
+          return res.end();
+        }
       }
     }
   }
@@ -1089,8 +1059,7 @@ const server = http.createServer((req,res)=>{
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{
   // REQUIRE valid session; don't force payload for WS
-  const m = (req.headers.cookie||'').match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
-  const sess = m ? verify(decodeURIComponent(m[1])) : null;
+  const sess = readSession({ headers: req.headers }); // reuse cookie parser
   if (!sess || !sess.profile) { try{client.destroy();}catch(_){ } return; }
 
   // If payload present, it must match; but we don't force-add it here
