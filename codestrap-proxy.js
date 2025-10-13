@@ -15,6 +15,11 @@
 //   UP_TIMEOUT_MS      (default 2500)
 //   LOG_CAP            (default 500)
 //   DOCKER_SOCK        (default "/var/run/docker.sock")
+//
+// Auth:
+//   - Per-profile auth files at /config/codestrap/profile_auth/<profile>.auth.json
+//     with { algo:"scrypt", salt, hash, N, r, p, dkLen, user? }.
+//   - If auth file is missing for a profile -> passwordless login for that profile.
 
 const http = require('http');
 const net  = require('net');
@@ -23,14 +28,13 @@ const fs   = require('fs');
 const zlib = require('zlib');
 const crypto = require('crypto');
 
-const AUTH_SECRET = 'CHANGEME-super-secret'; // >>> set this in prod
+const AUTH_SECRET = process.env.AUTH_SECRET || 'CHANGEME-super-secret'; // set in prod
 const AUTH_DIR = '/config/codestrap/profile_auth';
 const SESSION_COOKIE = 'cs_profile_sess';
 const SESSION_TTL_SEC = +(process.env.SESSION_TTL_SEC || 12*60*60); // 12h
 
-// ADD: writable base for profile dirs (used by /__ensure_profile_dirs)
+// Writable base for profile dirs (used by /__ensure_profile_dirs)
 const PROFILE_DATA_BASE = '/config/codestrap/profile_data';
-
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
 const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
@@ -189,7 +193,7 @@ details[open] .chev{transform:rotate(90deg)}
   display:inline-grid;
   grid-auto-flow:column;
   grid-template-columns:repeat(3,1ch);
-  width:3ch;               /* fixed width so the line never shifts */
+  width:3ch;
 }
 .dots span{
   display:inline-block;
@@ -197,17 +201,12 @@ details[open] .chev{transform:rotate(90deg)}
   opacity:0;
   animation: steps(1,end) 1.2s infinite dotReset;
 }
-/* 1st dot visible the whole cycle */
 .dots span:nth-child(1){ animation-name: dot1; }
-/* 2nd dot becomes visible after 1/3 */
 .dots span:nth-child(2){ animation-name: dot2; }
-/* 3rd dot becomes visible after 2/3 */
 .dots span:nth-child(3){ animation-name: dot3; }
-
 @keyframes dot1 { 0%,100% { opacity:1 } }
 @keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
 @keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
-/* Just a placeholder so we can set defaults above; not used directly */
 @keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
 </style>
 <div class="wrap">
@@ -235,7 +234,7 @@ details[open] .chev{transform:rotate(90deg)}
 </div>
 <script>
 (function(){
-  let delay = 600, maxDelay = 5000, tries = 0;
+  let delay = 600, maxDelay = 5000;
   const original = location.href;
   const tipBaseEl = document.getElementById('tip-base');
   const logEl = document.getElementById('log');
@@ -250,7 +249,6 @@ details[open] .chev{transform:rotate(90deg)}
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // Live logs: initialize only when opened
   let logsInit = false;
   logsBox?.addEventListener('toggle', ()=>{
     if (!logsBox.open || logsInit) { setStatus(logsBox.open ? 'opening…' : 'hidden'); return; }
@@ -272,9 +270,7 @@ details[open] .chev{transform:rotate(90deg)}
     } catch (_) { setStatus('unavailable'); }
   });
 
-  // Start polling immediately (dots are CSS-driven and already running)
   async function ping(){
-    tries++;
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
       if (res.ok) {
@@ -292,13 +288,11 @@ details[open] .chev{transform:rotate(90deg)}
 </script>`;
 }
 
-
 /* --------------------- helpers --------------------- */
 
-// ADD — cookie/signing helpers
+// cookie/signing helpers
 function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
-
 function sign(obj){
   const payload = b64url(JSON.stringify(obj));
   const h = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
@@ -314,7 +308,6 @@ function verify(token){
   if (obj.exp && Date.now() > obj.exp) return null;
   return obj;
 }
-
 function setCookie(res, name, val, opts={}){
   const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
   if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
@@ -328,7 +321,7 @@ function readCookie(req, name){
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-// ADD — per-profile auth files (scrypt)
+// per-profile auth files (scrypt)
 function loadAuthForProfile(name){
   try{
     const p = `${AUTH_DIR}/${name}.auth.json`;
@@ -342,7 +335,7 @@ function scryptHex(password, saltHex, N=16384,r=8,p=1,dkLen=64){
   return crypto.scryptSync(password, Buffer.from(saltHex,'hex'), dkLen,{N,r,p}).toString('hex');
 }
 
-// ADD — payload helpers
+// payload helpers
 function parseProfileFromPayload(u){
   if (!u || !u.query || !u.query.payload) return null;
   try{
@@ -358,18 +351,6 @@ function makePayloadFor(profile){
 }
 
 function noStoreHeaders(extra = {}) {
-  return Object.assign({
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-    'pragma': 'no-cache',
-    'expires': '0',
-    'retry-after': '1'
-  }, extra);
-}
-
-
-/* --------------------- helpers --------------------- */
-function noStoreHeaders(extra = {}){
   return Object.assign({
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
@@ -396,7 +377,7 @@ function shouldInjectWatchdog(reqUrl){
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
-  // ADD — public paths and "asset" detection
+  // public paths and asset detection
   const PUBLIC_PATHS = new Set([
     '/__up','/__logs','/__events','/__code_logs','/__code_events',
     '/__profiles','/__seed_profiles.js','/__watchdog.js',
@@ -410,7 +391,6 @@ const server = http.createServer((req,res)=>{
     return false;
   }
 
-
   // Health
   if (u.pathname === '/__up') {
     return probeAndNote(ok=>{
@@ -418,7 +398,7 @@ const server = http.createServer((req,res)=>{
     });
   }
 
-  // Watchdog JS (external script)
+  // Watchdog JS
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
@@ -438,13 +418,13 @@ const server = http.createServer((req,res)=>{
     })();`);
   }
 
-  // Logs (ring buffer)
+  // Proxy logs snapshot
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Debug events
+  // Proxy debug SSE
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -468,7 +448,7 @@ const server = http.createServer((req,res)=>{
     resolveContainerId((err, id)=>{
       if (err || !id) {
         res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
-        return res.end('[codelogs] container not found for CODE_SERVICE_NAME\n');
+        return res.end('[codelogs] container not found for CODE_SERVICE_NAME]\n');
       }
       fetchDockerLogsTail(id, 200, (e, text)=>{
         if (e) {
@@ -482,7 +462,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Code logs streaming (SSE)
+  // Code logs SSE
   if (u.pathname === '/__code_events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -490,23 +470,17 @@ const server = http.createServer((req,res)=>{
       'connection': 'keep-alive',
       'x-accel-buffering': 'no'
     });
-    if (!docker.wantLogs) {
-      res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n\n`);
-      return;
-    }
+    if (!docker.wantLogs) { res.write(`data: [codelogs] unavailable (docker socket or CODE_SERVICE_NAME)\n\n`); return; }
     resolveContainerId((err, id)=>{
-      if (err || !id) {
-        res.write(`data: [codelogs] container not found for CODE_SERVICE_NAME\n\n`);
-        return;
-      }
-      const since = Math.floor(Date.now()/1000) - 20; // include a bit of recent history
+      if (err || !id) { res.write(`data: [codelogs] container not found for CODE_SERVICE_NAME\n\n`); return; }
+      const since = Math.floor(Date.now()/1000) - 20;
       streamDockerLogs(id, res, since);
-      req.on('close', ()=>{ try { res.end(); } catch(_){} });
+      req.on('close', ()=>{ try{res.end();}catch(_){ } });
     });
     return;
   }
 
-  // inside createServer handler, near other special routes:
+  // Profiles list (+ auth flags)
   if (u.pathname === '/__profiles') {
     try {
       const entries = fs.readdirSync(PROFILES_DIR, { withFileTypes: true });
@@ -515,24 +489,30 @@ const server = http.createServer((req,res)=>{
         .map(e => e.name)
         .filter(n => /\.profile\.json$/i.test(n))
         .map(n => n.replace(/\.profile\.json$/i, ''));
+      const auth = {};
+      for (const n of names) {
+        try { auth[n] = fs.existsSync(`${AUTH_DIR}/${n}.auth.json`); }
+        catch { auth[n] = false; }
+      }
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store'
       });
-      return res.end(JSON.stringify({ names }));
+      return res.end(JSON.stringify({ names, auth }));
     } catch (e) {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names: [], error: 'PROFILES_DIR_unreadable' }));
+      return res.end(JSON.stringify({ names: [], auth: {}, error: 'PROFILES_DIR_unreadable' }));
     }
   }
 
+  // Seeder (localStorage userDataProfiles + mkdir)
   if (u.pathname === '/__seed_profiles.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      const BASE = '/config/codestrap/profile_data/'; // used for localStorage paths
+      const BASE = '/config/codestrap/profile_data/';
 
       function readProfiles(){
         try{
@@ -558,7 +538,7 @@ const server = http.createServer((req,res)=>{
             if (!name || have.has(name)) continue;
             arr.push({
               location: {
-                "$mid": 1, // per your requirement: always 1
+                "$mid": 1, // always 1 per requirement
                 "external": "vscode-remote:" + BASE + name,
                 "path": BASE + name,
                 "scheme": "vscode-remote"
@@ -569,7 +549,6 @@ const server = http.createServer((req,res)=>{
           }
           if (created.length) writeProfiles(arr);
 
-          // Ask proxy to mkdir for any newly-added names
           if (created.length) {
             fetch('/__ensure_profile_dirs', {
               method: 'POST',
@@ -599,6 +578,7 @@ const server = http.createServer((req,res)=>{
     })();`);
   }
 
+  // mkdir for new profiles
   if (u.pathname === '/__ensure_profile_dirs' && req.method === 'POST') {
     let body = '';
     req.on('data', c => body += c);
@@ -608,7 +588,7 @@ const server = http.createServer((req,res)=>{
         if (!Array.isArray(names)) throw new Error('names must be an array');
         let made = 0;
         for (const name of names) {
-          if (!name || /[\\/]/.test(name)) continue; // simple safety
+          if (!name || /[\\/]/.test(name)) continue;
           const p = `${PROFILE_DATA_BASE}/${name}`;
           try {
             fs.mkdirSync(p, { recursive: true, mode: 0o755 });
@@ -627,41 +607,61 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // ADD — login page
+  // Login page (password optional UI)
   if (u.pathname === '/__login' && req.method === 'GET') {
     const next = u.query.next || '/';
     res.writeHead(200, {'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
     return res.end(`<!doctype html><meta charset="utf-8"><title>Codestrap Login</title>
-  <style>
-    body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
-    form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
-    h1{margin:0 0 10px 0;font-size:18px}
-    label{display:block;margin:8px 0 4px 0}
-    input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
-    button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
-    .msg{opacity:.8;margin-bottom:8px}
-  </style>
-  <div>
-    <form method="POST" action="/__login">
-      <h1>Sign in to a profile</h1>
-      <div class="msg">Choose a profile and enter its password.</div>
-      <label>Profile</label>
-      <select name="profile" id="profile"></select>
+<style>
+  body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
+  form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
+  h1{margin:0 0 10px 0;font-size:18px}
+  label{display:block;margin:8px 0 4px 0}
+  input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
+  button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
+  .msg{opacity:.8;margin-bottom:8px}
+</style>
+<div>
+  <form method="POST" action="/__login">
+    <h1>Sign in to a profile</h1>
+    <div class="msg">Choose a profile. If it has a password, you'll be prompted for it.</div>
+    <label>Profile</label>
+    <select name="profile" id="profile"></select>
+    <div id="pw-wrap" style="display:none">
       <label>Password</label>
-      <input type="password" name="password" autocomplete="current-password" required/>
-      <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
-      <button type="submit">Sign in</button>
-    </form>
-  </div>
-  <script>
-  fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
-    const sel = document.getElementById('profile'); if(!sel) return;
+      <input type="password" id="password" name="password" autocomplete="current-password"/>
+    </div>
+    <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+<script>
+(async function(){
+  try{
+    const r = await fetch('/__profiles',{cache:'no-store'});
+    const j = await r.json();
+    const sel = document.getElementById('profile');
+    const pwWrap = document.getElementById('pw-wrap');
+    const pw = document.getElementById('password');
+    const needs = j.auth || {};
     (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
-  });
-  </script>`);
+    function update(){
+      const name = sel.value;
+      const requirePw = !!needs[name];
+      pwWrap.style.display = requirePw ? '' : 'none';
+      if (requirePw) { pw.setAttribute('required','required'); }
+      else { pw.removeAttribute('required'); pw.value=''; }
+    }
+    sel.addEventListener('change', update);
+    update();
+  }catch(e){
+    console.warn('login bootstrap failed', e);
+  }
+})();
+</script>`);
   }
 
-  // ADD — login POST
+  // Login POST (password optional based on auth file)
   if (u.pathname === '/__login' && req.method === 'POST') {
     let body=''; req.on('data', c=> body+=c);
     req.on('end', ()=>{
@@ -669,24 +669,29 @@ const server = http.createServer((req,res)=>{
       const profile = (m.get('profile')||'').trim();
       const password = m.get('password')||'';
       const next = m.get('next') || '/';
-      const conf = loadAuthForProfile(profile);
-      if (!profile || !conf) {
-        res.writeHead(302, {'Location':'/__login?e=badprofile'});
-        return res.end();
+
+      if (!profile) {
+        res.writeHead(302, {'Location':'/__login?e=badprofile'}); return res.end();
       }
+
+      const conf = loadAuthForProfile(profile);
+
       try{
-        const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
-        const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
-        if (!ok) throw new Error('bad pw');
-        const sess = { profile, user: conf.user||profile, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
+        let user = profile;
+        if (conf) {
+          const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
+          const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
+          if (!ok) throw new Error('bad pw');
+          user = conf.user || profile;
+        } // else: passwordless profile
+
+        const sess = { profile, user, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
         const token = sign(sess);
 
-        // Secure cookie only if HTTPS or XFP=https
         const xfproto = (req.headers['x-forwarded-proto']||'').split(',')[0].trim();
         const isHttps = xfproto === 'https' || req.connection?.encrypted;
         setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: isHttps});
 
-        // Ensure payload matches session profile
         let target = next || '/';
         try {
           const parsed = url.parse(target, true);
@@ -708,14 +713,14 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // ADD — logout
+  // Logout
   if (u.pathname === '/__logout') {
     clearCookie(res, SESSION_COOKIE);
     res.writeHead(302, {'Location':'/__login'});
     return res.end();
   }
 
-  // ADD — auth gate for everything except internal endpoints
+  // Auth gate (everything except internal endpoints)
   if (!PUBLIC_PATHS.has(u.pathname)) {
     const tok = readCookie(req, SESSION_COOKIE);
     const sess = verify(tok);
@@ -725,7 +730,7 @@ const server = http.createServer((req,res)=>{
       return res.end();
     }
 
-    // Enforce payload only for app pages (not static assets)
+    // Enforce payload for app pages (not static assets)
     if (!isAssetPath(u.pathname)) {
       const gotProfile = parseProfileFromPayload(u);
       if (!gotProfile || gotProfile !== sess.profile) {
@@ -748,13 +753,11 @@ const server = http.createServer((req,res)=>{
       return res.end(makeSplashHtml());
     }
 
-    // strip hop-by-hop
     const headers = { ...req.headers };
     delete headers.connection; delete headers.upgrade;
     delete headers['proxy-connection']; delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
-    // forward info
     headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
@@ -788,7 +791,7 @@ const server = http.createServer((req,res)=>{
         return;
       }
 
-      // Mutate HTML for main shell only → decode if compressed, drop length/encoding, set no-store.
+      // Mutate HTML (decode if compressed) and inject watchdog + seeder
       hdrs['cache-control'] = 'no-store, no-cache, must-revalidate, max-age=0';
       delete hdrs['content-length']; delete hdrs['Content-Length'];
       const enc = String(hdrs['content-encoding'] || hdrs['Content-Encoding'] || '').toLowerCase();
@@ -804,7 +807,6 @@ const server = http.createServer((req,res)=>{
         pushLog(`warn: decoder init failed enc='${enc}': ${e.message}`); sourceStream = pr;
       }
 
-      // in the HTML-mutation branch, before streaming out:
       const TAG = `<script src="/__watchdog.js" defer></script><script src="/__seed_profiles.js" defer></script>`;
       let injected = false;
       let buffer = '';
@@ -877,7 +879,6 @@ server.on('upgrade', (req, client, head)=>{
     client.on('error',  ()=>{ try{upstream.destroy();}catch(_){ } });
   });
 });
-
 
 /* --------------------- boot --------------------- */
 server.listen(PROXY_PORT, '0.0.0.0', ()=>{
