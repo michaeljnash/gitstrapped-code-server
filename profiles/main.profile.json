@@ -1,4 +1,5 @@
 {
+  "auth": true,
   "dirs": {
     "workspace": "/config/codestrap/profile_data/main/workspace",
     "profile_data": "/config/codestrap/profile_data/main",

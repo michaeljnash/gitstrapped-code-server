@@ -295,6 +295,8 @@ details[open] .chev{transform:rotate(90deg)}
 
 /* --------------------- helpers --------------------- */
 
+function authPath(name){ return `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`; }
+
 // ADD — cookie/signing helpers
 function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
 function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
@@ -331,13 +333,28 @@ function readCookie(req, name){
 // ADD — per-profile auth files (scrypt)
 function loadAuthForProfile(name){
   try{
-    const p = `${AUTH_DIR}/${name}.auth.json`;
+    const p = authPath(name);
     const raw = fs.readFileSync(p, 'utf8');
     const j = JSON.parse(raw);
     if (!j || j.algo!=='scrypt' || !j.salt || !j.hash) return null;
+    // normalize flags
+    j.requiresChange = !!j.requiresChange;
     return j;
   }catch(_){ return null; }
 }
+
+function saveAuthForProfile(name, conf){
+  const p = authPath(name);
+  fs.mkdirSync(require('path').dirname(p), { recursive: true, mode: 0o755 });
+  fs.writeFileSync(p, JSON.stringify(conf, null, 2));
+}
+function makeHashRecord(user, password){
+  const salt = crypto.randomBytes(16).toString('hex');
+  const N=16384,r=8,p=1,dkLen=64;
+  const hash = crypto.scryptSync(password, Buffer.from(salt,'hex'), dkLen,{N,r,p}).toString('hex');
+  return { user, algo:'scrypt', salt, hash, N, r, p, dkLen, requiresChange:false, defaultSeed:false };
+}
+
 function scryptHex(password, saltHex, N=16384,r=8,p=1,dkLen=64){
   return crypto.scryptSync(password, Buffer.from(saltHex,'hex'), dkLen,{N,r,p}).toString('hex');
 }
@@ -515,23 +532,37 @@ const server = http.createServer((req,res)=>{
         .map(e => e.name)
         .filter(n => /\.profile\.json$/i.test(n))
         .map(n => n.replace(/\.profile\.json$/i, ''));
-      // NEW: for each profile, tell if an auth file exists
-      const auth = {};
+
+      const authRequired = {};
+      const requiresChange = {};
+
       for (const n of names) {
+        // Read profile.json to check "auth": true
+        let wantAuth = false;
         try {
-          auth[n] = fs.existsSync(`${AUTH_DIR}/${n}.auth.json`);
-        } catch (_) {
-          auth[n] = false;
+          const pj = JSON.parse(fs.readFileSync(`${PROFILES_DIR}/${n}.profile.json`, 'utf8'));
+          wantAuth = !!(pj && pj.auth === true);
+        } catch (_){}
+
+        const conf = loadAuthForProfile(n);
+        if (wantAuth && !conf) {
+          // No file yet; UI should treat as password required (we expect init script to create it).
+          authRequired[n] = true;
+          requiresChange[n] = true; // until created, show change prompt after default creation
+        } else if (conf) {
+          authRequired[n] = true;
+          requiresChange[n] = !!conf.requiresChange;
+        } else {
+          authRequired[n] = false;
+          requiresChange[n] = false;
         }
       }
-      res.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store'
-      });
-      return res.end(JSON.stringify({ names, auth }));
+
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      return res.end(JSON.stringify({ names, auth: authRequired, requiresChange }));
     } catch (e) {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names: [], auth: {}, error: 'PROFILES_DIR_unreadable' }));
+      return res.end(JSON.stringify({ names: [], auth: {}, requiresChange: {}, error: 'PROFILES_DIR_unreadable' }));
     }
   }
 
@@ -643,49 +674,64 @@ const server = http.createServer((req,res)=>{
     return res.end(`<!doctype html><meta charset="utf-8"><title>Codestrap Login</title>
   <style>
     body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
-    form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
+    form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:340px}
     h1{margin:0 0 10px 0;font-size:18px}
     label{display:block;margin:8px 0 4px 0}
     input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
     button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
     .msg{opacity:.8;margin-bottom:8px}
+    .warn{background:#3b1d1d;border:1px solid #7f1d1d;padding:8px;border-radius:8px;margin:8px 0}
   </style>
   <div>
-    <form method="POST" action="/__login">
+    <form method="POST" action="/__login" id="f">
       <h1>Sign in to a profile</h1>
-      <div class="msg">Choose a profile. If the profile has a password, you'll be prompted for it.</div>
+      <div class="msg">Choose a profile. If it requires a password, you’ll be prompted.</div>
+
       <label>Profile</label>
       <select name="profile" id="profile"></select>
-      <div id="pw-wrap" style="display:none">
-        <label>Password</label>
+
+      <div id="pw-req" style="display:none">
+        <label>Current password</label>
         <input type="password" id="password" name="password" autocomplete="current-password"/>
       </div>
+
+      <div id="pw-change" class="warn" style="display:none">
+        <div><strong>First login:</strong> this profile is using a default password. Please set a new password now.</div>
+        <label style="margin-top:8px">New password</label>
+        <input type="password" id="new_password" name="new_password" autocomplete="new-password"/>
+        <label>Confirm new password</label>
+        <input type="password" id="new_password2" name="new_password2" autocomplete="new-password"/>
+      </div>
+
       <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
-      <button type="submit">Sign in</button>
+      <button type="submit">Continue</button>
     </form>
   </div>
   <script>
   (async function(){
-    try{
-      const r = await fetch('/__profiles',{cache:'no-store'});
-      const j = await r.json();
-      const sel = document.getElementById('profile');
-      const pwWrap = document.getElementById('pw-wrap');
+    const r = await fetch('/__profiles',{cache:'no-store'});
+    const j = await r.json();
+    const sel = document.getElementById('profile');
+    const pwReq = document.getElementById('pw-req');
+    const pwChg = document.getElementById('pw-change');
+    const needs = j.auth || {}, chg = j.requiresChange || {};
+    (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+    function update(){
+      const name = sel.value;
+      const requirePw = !!needs[name];
+      const mustChange = !!chg[name];
+      pwReq.style.display = requirePw ? '' : 'none';
+      pwChg.style.display = (requirePw && mustChange) ? '' : 'none';
+      // HTML-level required toggles
       const pw = document.getElementById('password');
-      const needs = j.auth || {};
-      (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
-      function update(){
-        const name = sel.value;
-        const requirePw = !!needs[name];
-        pwWrap.style.display = requirePw ? '' : 'none';
-        if (requirePw) { pw.setAttribute('required','required'); }
-        else { pw.removeAttribute('required'); pw.value=''; }
-      }
-      sel.addEventListener('change', update);
-      update();
-    }catch(e){
-      console.warn('login bootstrap failed', e);
+      const npw = document.getElementById('new_password');
+      const npw2 = document.getElementById('new_password2');
+      if (requirePw) pw.setAttribute('required','required'); else { pw.removeAttribute('required'); pw.value=''; }
+      if (requirePw && mustChange) { npw.setAttribute('required','required'); npw2.setAttribute('required','required'); }
+      else { npw.removeAttribute('required'); npw2.removeAttribute('required'); npw.value=''; npw2.value=''; }
     }
+    sel.addEventListener('change', update);
+    update();
   })();
   </script>`);
   }
@@ -708,17 +754,29 @@ const server = http.createServer((req,res)=>{
         let user = profile;
 
         if (conf) {
-          // Password REQUIRED for this profile
+          // Must supply current password
           const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
           const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
           if (!ok) throw new Error('bad pw');
+
+          // If the auth file indicates default seed / first login, require new password now
+          if (conf.requiresChange) {
+            const npw = (m.get('new_password')||'').trim();
+            const npw2 = (m.get('new_password2')||'').trim();
+            if (!npw || npw !== npw2) {
+              res.writeHead(302, {'Location':'/__login?e=needchange'});
+              return res.end();
+            }
+            const newRec = makeHashRecord(conf.user||profile, npw);
+            saveAuthForProfile(profile, newRec); // overwrites with fresh salt/hash; requiresChange=false
+          }
+
           user = conf.user || profile;
-        } // else: passwordless — accept immediately
+        } // else passwordless
 
         const sess = { profile, user, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
         const token = sign(sess);
 
-        // Secure cookie only if HTTPS or XFP=https
         const xfproto = (req.headers['x-forwarded-proto']||'').split(',')[0].trim();
         const isHttps = xfproto === 'https' || req.connection?.encrypted;
         setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: isHttps});
