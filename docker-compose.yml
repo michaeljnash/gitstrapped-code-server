@@ -40,7 +40,8 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=123456edereuddddd4e5dfdgdddddddrfddcfdfeddvreffh
+      - "recreate-tag=123456edereuddddd4e5dfdgdddddddrfddcfdfeddvreffcdhrdddeddhdddgvddddddddddddfdrfffdddffddeddddcdd 8dddddgfcdbvsdDfddscddcddd dddyddddfdgfdded4Efedgu7dedydfgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
+    image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
       PROXY_PORT: "8080"
