@@ -324,6 +324,11 @@ const server = http.createServer((req,res)=>{
     return false;
   }
 
+  // Only the app shell needs a chosen profile; inner routes/webviews/assets must not be blocked.
+  function requiresProfileForPath(p){
+    return p === '/' || p === '' || p === '/index.html' || p === '/login';
+  }
+
   /* ------------ Health ------------ */
   if (u.pathname === '/__up') {
     return probeAndNote(ok=>{
@@ -593,15 +598,12 @@ fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
     return;
   }
 
-  /* ------------ Require payload for app pages ------------ */
-  if (!PUBLIC_PATHS.has(u.pathname)) {
-    // For app-shell pages (not assets), require an explicit payload
-    if (!isAssetPath(u.pathname)) {
-      const gotProfile = parseProfileFromPayload(u);
-      if (!gotProfile) {
-        res.writeHead(302, {'Location': `/__profile?next=${encodeURIComponent(req.url||'/')}`});
-        return res.end();
-      }
+  /* ------------ Require payload only on the main app shell ------------ */
+  if (requiresProfileForPath(u.pathname)) {
+    const gotProfile = parseProfileFromPayload(u);
+    if (!gotProfile) {
+      res.writeHead(302, {'Location': `/__profile?next=${encodeURIComponent(req.url||'/')}`});
+      return res.end();
     }
   }
 
@@ -713,13 +715,7 @@ fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
 
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{
-  // Require a profile payload for WS (cannot redirect a WS upgrade)
-  try {
-    const uWS = url.parse(req.url||'/', true);
-    const prof = parseProfileFromPayload(uWS);
-    if (!prof) { try{client.destroy();}catch(_){ } return; }
-  } catch(_) { try{client.destroy();}catch(_){ } return; }
-
+  // Do NOT enforce payload on WS; many VS Code internals use upgrade endpoints.
   probeAndNote(ok=>{
     if (!ok) { try{client.destroy();}catch(_){ } return; }
     const upstream = net.connect(CODE_EXPOSED_PORT, CODE_SERVICE_NAME || '127.0.0.1');
