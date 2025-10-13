@@ -16,32 +16,26 @@
 //   LOG_CAP            (default 500)
 //   DOCKER_SOCK        (default "/var/run/docker.sock")
 //
-// Auth:
-//   - Per-profile auth files at /config/codestrap/profile_auth/<profile>.auth.json
-//     with { algo:"scrypt", salt, hash, N, r, p, dkLen, user? }.
-//   - If auth file is missing for a profile -> passwordless login for that profile.
+// Profile selection:
+//   - GET  /__profile → profile picker (no passwords)
+//   - POST /__profile → redirect to ?payload=[["profile","<name>"]]
+//   - Any request lacking payload is redirected to /__profile?next=<url>
 
 const http = require('http');
 const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
-const crypto = require('crypto');
 
-const AUTH_SECRET = process.env.AUTH_SECRET || 'CHANGEME-super-secret'; // set in prod
-const AUTH_DIR = '/config/codestrap/profile_auth';
-const SESSION_COOKIE = 'cs_profile_sess';
-const SESSION_TTL_SEC = +(process.env.SESSION_TTL_SEC || 12*60*60); // 12h
+/* ---------- Config paths ---------- */
+const PROFILE_DATA_BASE = '/config/codestrap/profile_data';  // mkdir target
+const PROFILES_DIR = '/config/codestrap/profiles';
 
-// Writable base for profile dirs (used by /__ensure_profile_dirs)
-const PROFILE_DATA_BASE = '/config/codestrap/profile_data';
-
+/* ---------- Core config ---------- */
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
 const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
 const CODE_EXPOSED_PORT = +(process.env.CODE_EXPOSED_PORT || 8443);
 const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
-
-const PROFILES_DIR = '/config/codestrap/profiles';
 
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
@@ -187,38 +181,26 @@ kbd{background:#111827;border:1px solid #374151;border-radius:6px;padding:2px 6p
 .chev{display:inline-block;transition:transform .15s ease}
 details[open] .chev{transform:rotate(90deg)}
 
-/* --- dot animation that does NOT reflow --- */
+/* dot animation */
 .tip-line{display:inline-flex;align-items:baseline;gap:.15rem}
-.dots{
-  display:inline-grid;
-  grid-auto-flow:column;
-  grid-template-columns:repeat(3,1ch);
-  width:3ch;
-}
-.dots span{
-  display:inline-block;
-  width:1ch; text-align:left;
-  opacity:0;
-  animation: steps(1,end) 1.2s infinite dotReset;
-}
-.dots span:nth-child(1){ animation-name: dot1; }
-.dots span:nth-child(2){ animation-name: dot2; }
-.dots span:nth-child(3){ animation-name: dot3; }
-@keyframes dot1 { 0%,100% { opacity:1 } }
-@keyframes dot2 { 0%,33% { opacity:0 } 34%,100% { opacity:1 } }
-@keyframes dot3 { 0%,66% { opacity:0 } 67%,100% { opacity:1 } }
-@keyframes dotReset { 0% {opacity:0} 100% {opacity:0} }
+.dots{display:inline-grid;grid-auto-flow:column;grid-template-columns:repeat(3,1ch);width:3ch}
+.dots span{display:inline-block;width:1ch;text-align:left;opacity:0;animation:steps(1,end) 1.2s infinite dotReset}
+.dots span:nth-child(1){animation-name:dot1}
+.dots span:nth-child(2){animation-name:dot2}
+.dots span:nth-child(3){animation-name:dot3}
+@keyframes dot1{0%,100%{opacity:1}}
+@keyframes dot2{0%,33%{opacity:0}34%,100%{opacity:1}}
+@keyframes dot3{0%,66%{opacity:0}67%,100%{opacity:1}}
+@keyframes dotReset{0%{opacity:0}100%{opacity:0}}
 </style>
 <div class="wrap">
   <div class="spinner"></div>
   <h1>Codestrap is connecting to code-server…</h1>
   <div class="small subtitle">This may take some time.</div>
-
   <div class="small tip-line" id="tip">
     <span id="tip-base">Starting services</span>
     <span class="dots" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
   </div>
-
   <div class="container">
     <details class="card" id="logsbox">
       <summary class="head">
@@ -273,11 +255,7 @@ details[open] .chev{transform:rotate(90deg)}
   async function ping(){
     try{
       const res = await fetch('/__up?ts=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
-      if (res.ok) {
-        setTipBase('Ready! Loading…');
-        location.replace(original);
-        return;
-      }
+      if (res.ok) { setTipBase('Ready! Loading…'); location.replace(original); return; }
     }catch(e){}
     const jitter = Math.random() * 150;
     delay = Math.min(maxDelay, Math.round(delay * 1.6) + jitter);
@@ -290,49 +268,14 @@ details[open] .chev{transform:rotate(90deg)}
 
 /* --------------------- helpers --------------------- */
 
-// cookie/signing helpers
-function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
-function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
-function sign(obj){
-  const payload = b64url(JSON.stringify(obj));
-  const h = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
-  return `${payload}.${h}`;
-}
-function verify(token){
-  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
-  const [payload, mac] = token.split('.');
-  const good = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
-  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(good))) return null;
-  const obj = JSON.parse(ub64url(payload));
-  if (!obj || !obj.profile) return null;
-  if (obj.exp && Date.now() > obj.exp) return null;
-  return obj;
-}
-function setCookie(res, name, val, opts={}){
-  const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
-  if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
-  if (opts.secure) parts.push('Secure'); // only when explicitly true
-  res.setHeader('Set-Cookie', parts.join('; '));
-}
-function clearCookie(res, name){ res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); }
-function readCookie(req, name){
-  const c = req.headers.cookie || '';
-  const m = c.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
-  return m ? decodeURIComponent(m[1]) : null;
-}
-
-// per-profile auth files (scrypt)
-function loadAuthForProfile(name){
-  try{
-    const p = `${AUTH_DIR}/${name}.auth.json`;
-    const raw = fs.readFileSync(p, 'utf8');
-    const j = JSON.parse(raw);
-    if (!j || j.algo!=='scrypt' || !j.salt || !j.hash) return null;
-    return j;
-  }catch(_){ return null; }
-}
-function scryptHex(password, saltHex, N=16384,r=8,p=1,dkLen=64){
-  return crypto.scryptSync(password, Buffer.from(saltHex,'hex'), dkLen,{N,r,p}).toString('hex');
+function noStoreHeaders(extra = {}) {
+  return Object.assign({
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
+    'pragma': 'no-cache',
+    'expires': '0',
+    'retry-after': '1'
+  }, extra);
 }
 
 // payload helpers
@@ -348,16 +291,6 @@ function parseProfileFromPayload(u){
 }
 function makePayloadFor(profile){
   return encodeURIComponent(JSON.stringify([["profile", profile]]));
-}
-
-function noStoreHeaders(extra = {}) {
-  return Object.assign({
-    'content-type': 'text/html; charset=utf-8',
-    'cache-control': 'no-store, no-cache, must-revalidate, max-age=0',
-    'pragma': 'no-cache',
-    'expires': '0',
-    'retry-after': '1'
-  }, extra);
 }
 
 /* --------------------- path guard for injection --------------------- */
@@ -377,11 +310,11 @@ function shouldInjectWatchdog(reqUrl){
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
 
-  // public paths and asset detection
+  // Public paths and asset detection
   const PUBLIC_PATHS = new Set([
     '/__up','/__logs','/__events','/__code_logs','/__code_events',
     '/__profiles','/__seed_profiles.js','/__watchdog.js',
-    '/__login','/__logout','/__ensure_profile_dirs','/favicon.ico'
+    '/__profile','/__ensure_profile_dirs','/favicon.ico'
   ]);
   const ASSET_PREFIXES = ['/vscode','/vscode-','/static','/workbench','/webview','/vscode-webview'];
   function isAssetPath(p){
@@ -391,14 +324,14 @@ const server = http.createServer((req,res)=>{
     return false;
   }
 
-  // Health
+  /* ------------ Health ------------ */
   if (u.pathname === '/__up') {
     return probeAndNote(ok=>{
       res.writeHead(ok?200:503, {'content-type':'text/plain','cache-control':'no-store'}).end(ok?'OK':'DOWN');
     });
   }
 
-  // Watchdog JS
+  /* ------------ Watchdog JS ------------ */
   if (u.pathname === '/__watchdog.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
@@ -418,13 +351,13 @@ const server = http.createServer((req,res)=>{
     })();`);
   }
 
-  // Proxy logs snapshot
+  /* ------------ Proxy logs snapshot ------------ */
   if (u.pathname === '/__logs') {
     res.writeHead(200, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
     return res.end(getLogsText());
   }
 
-  // Proxy debug SSE
+  /* ------------ Proxy debug SSE ------------ */
   if (u.pathname === '/__events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -439,7 +372,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Code logs snapshot
+  /* ------------ Code logs snapshot ------------ */
   if (u.pathname === '/__code_logs') {
     if (!docker.wantLogs) {
       res.writeHead(503, {'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});
@@ -462,7 +395,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Code logs SSE
+  /* ------------ Code logs SSE ------------ */
   if (u.pathname === '/__code_events') {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
@@ -480,7 +413,7 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Profiles list (+ auth flags)
+  /* ------------ Profiles list ------------ */
   if (u.pathname === '/__profiles') {
     try {
       const entries = fs.readdirSync(PROFILES_DIR, { withFileTypes: true });
@@ -489,23 +422,18 @@ const server = http.createServer((req,res)=>{
         .map(e => e.name)
         .filter(n => /\.profile\.json$/i.test(n))
         .map(n => n.replace(/\.profile\.json$/i, ''));
-      const auth = {};
-      for (const n of names) {
-        try { auth[n] = fs.existsSync(`${AUTH_DIR}/${n}.auth.json`); }
-        catch { auth[n] = false; }
-      }
       res.writeHead(200, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store'
       });
-      return res.end(JSON.stringify({ names, auth }));
+      return res.end(JSON.stringify({ names }));
     } catch (e) {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names: [], auth: {}, error: 'PROFILES_DIR_unreadable' }));
+      return res.end(JSON.stringify({ names: [], error: 'PROFILES_DIR_unreadable' }));
     }
   }
 
-  // Seeder (localStorage userDataProfiles + mkdir)
+  /* ------------ Seeder (localStorage + mkdir) ------------ */
   if (u.pathname === '/__seed_profiles.js') {
     res.writeHead(200, {
       'content-type': 'application/javascript; charset=utf-8',
@@ -578,7 +506,7 @@ const server = http.createServer((req,res)=>{
     })();`);
   }
 
-  // mkdir for new profiles
+  /* ------------ mkdir for new profiles ------------ */
   if (u.pathname === '/__ensure_profile_dirs' && req.method === 'POST') {
     let body = '';
     req.on('data', c => body += c);
@@ -607,145 +535,77 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Login page (password optional UI)
-  if (u.pathname === '/__login' && req.method === 'GET') {
+  /* ------------ Profile picker (no password) ------------ */
+  if (u.pathname === '/__profile' && req.method === 'GET') {
     const next = u.query.next || '/';
     res.writeHead(200, {'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
-    return res.end(`<!doctype html><meta charset="utf-8"><title>Codestrap Login</title>
+    return res.end(`<!doctype html><meta charset="utf-8"><title>Select a profile</title>
 <style>
   body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
   form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
   h1{margin:0 0 10px 0;font-size:18px}
   label{display:block;margin:8px 0 4px 0}
-  input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
+  select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
   button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
   .msg{opacity:.8;margin-bottom:8px}
 </style>
 <div>
-  <form method="POST" action="/__login">
-    <h1>Sign in to a profile</h1>
-    <div class="msg">Choose a profile. If it has a password, you'll be prompted for it.</div>
+  <form method="POST" action="/__profile">
+    <h1>Select a profile</h1>
+    <div class="msg">Pick the profile you want to use.</div>
     <label>Profile</label>
     <select name="profile" id="profile"></select>
-    <div id="pw-wrap" style="display:none">
-      <label>Password</label>
-      <input type="password" id="password" name="password" autocomplete="current-password"/>
-    </div>
     <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
-    <button type="submit">Sign in</button>
+    <button type="submit">Use this profile</button>
   </form>
 </div>
 <script>
-(async function(){
-  try{
-    const r = await fetch('/__profiles',{cache:'no-store'});
-    const j = await r.json();
-    const sel = document.getElementById('profile');
-    const pwWrap = document.getElementById('pw-wrap');
-    const pw = document.getElementById('password');
-    const needs = j.auth || {};
-    (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
-    function update(){
-      const name = sel.value;
-      const requirePw = !!needs[name];
-      pwWrap.style.display = requirePw ? '' : 'none';
-      if (requirePw) { pw.setAttribute('required','required'); }
-      else { pw.removeAttribute('required'); pw.value=''; }
-    }
-    sel.addEventListener('change', update);
-    update();
-  }catch(e){
-    console.warn('login bootstrap failed', e);
-  }
-})();
+fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+  const sel = document.getElementById('profile'); if(!sel) return;
+  (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+});
 </script>`);
   }
 
-  // Login POST (password optional based on auth file)
-  if (u.pathname === '/__login' && req.method === 'POST') {
+  if (u.pathname === '/__profile' && req.method === 'POST') {
     let body=''; req.on('data', c=> body+=c);
     req.on('end', ()=>{
       const m = new URLSearchParams(body);
       const profile = (m.get('profile')||'').trim();
-      const password = m.get('password')||'';
       const next = m.get('next') || '/';
-
       if (!profile) {
-        res.writeHead(302, {'Location':'/__login?e=badprofile'}); return res.end();
+        res.writeHead(302, {'Location':'/__profile?e=badprofile'}); return res.end();
       }
-
-      const conf = loadAuthForProfile(profile);
-
-      try{
-        let user = profile;
-        if (conf) {
-          const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
-          const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
-          if (!ok) throw new Error('bad pw');
-          user = conf.user || profile;
-        } // else: passwordless profile
-
-        const sess = { profile, user, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
-        const token = sign(sess);
-
-        const xfproto = (req.headers['x-forwarded-proto']||'').split(',')[0].trim();
-        const isHttps = xfproto === 'https' || req.connection?.encrypted;
-        setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: isHttps});
-
-        let target = next || '/';
-        try {
-          const parsed = url.parse(target, true);
-          const p = parseProfileFromPayload(parsed);
-          if (p !== profile) {
-            parsed.query = parsed.query || {};
-            parsed.query.payload = `[["profile","${profile}"]]`;
-            delete parsed.search;
-            target = url.format(parsed);
-          }
-        } catch(_){}
-        res.writeHead(302, {'Location': target});
-        return res.end();
-      }catch(_){
-        res.writeHead(302, {'Location':'/__login?e=badpass'});
-        return res.end();
-      }
+      let target = next || '/';
+      try {
+        const parsed = url.parse(target, true);
+        const p = parseProfileFromPayload(parsed);
+        if (p !== profile) {
+          parsed.query = parsed.query || {};
+          parsed.query.payload = `[["profile","${profile}"]]`;
+          delete parsed.search;
+          target = url.format(parsed);
+        }
+      } catch(_){}
+      res.writeHead(302, {'Location': target});
+      return res.end();
     });
     return;
   }
 
-  // Logout
-  if (u.pathname === '/__logout') {
-    clearCookie(res, SESSION_COOKIE);
-    res.writeHead(302, {'Location':'/__login'});
-    return res.end();
-  }
-
-  // Auth gate (everything except internal endpoints)
+  /* ------------ Require payload for app pages ------------ */
   if (!PUBLIC_PATHS.has(u.pathname)) {
-    const tok = readCookie(req, SESSION_COOKIE);
-    const sess = verify(tok);
-
-    if (!sess || !sess.profile) {
-      res.writeHead(302, {'Location': `/__login?next=${encodeURIComponent(req.url||'/')}`});
-      return res.end();
-    }
-
-    // Enforce payload for app pages (not static assets)
+    // For app-shell pages (not assets), require an explicit payload
     if (!isAssetPath(u.pathname)) {
       const gotProfile = parseProfileFromPayload(u);
-      if (!gotProfile || gotProfile !== sess.profile) {
-        const parsed = url.parse(req.url||'/', true);
-        parsed.query = parsed.query || {};
-        parsed.query.payload = `[["profile","${sess.profile}"]]`;
-        delete parsed.search;
-        const fixed = url.format(parsed);
-        res.writeHead(302, {'Location': fixed});
+      if (!gotProfile) {
+        res.writeHead(302, {'Location': `/__profile?next=${encodeURIComponent(req.url||'/')}`});
         return res.end();
       }
     }
   }
 
-  // ---------- Normal proxy flow ----------
+  /* ------------ Normal proxy flow ------------ */
   probeAndNote(ok=>{
     if (!ok) {
       pushLog(`upstream DOWN → ${req.method} ${req.url}`);
@@ -753,11 +613,13 @@ const server = http.createServer((req,res)=>{
       return res.end(makeSplashHtml());
     }
 
+    // strip hop-by-hop
     const headers = { ...req.headers };
     delete headers.connection; delete headers.upgrade;
     delete headers['proxy-connection']; delete headers['keep-alive'];
     delete headers['transfer-encoding'];
 
+    // forward info
     headers['x-forwarded-proto'] = req.headers['x-forwarded-proto'] || 'http';
     headers['x-forwarded-host']  = headers['x-forwarded-host'] || req.headers['host'];
     if (req.socket?.remoteAddress) {
@@ -851,17 +713,12 @@ const server = http.createServer((req,res)=>{
 
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{
-  // REQUIRE valid session; don't force payload for WS
-  const m = (req.headers.cookie||'').match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
-  const sess = m ? verify(decodeURIComponent(m[1])) : null;
-  if (!sess || !sess.profile) { try{client.destroy();}catch(_){ } return; }
-
-  // If payload present, it must match; but we don't force-add it here
+  // Require a profile payload for WS (cannot redirect a WS upgrade)
   try {
     const uWS = url.parse(req.url||'/', true);
-    const pName = parseProfileFromPayload(uWS);
-    if (pName && pName !== sess.profile) { try{client.destroy();}catch(_){ } return; }
-  } catch(_){}
+    const prof = parseProfileFromPayload(uWS);
+    if (!prof) { try{client.destroy();}catch(_){ } return; }
+  } catch(_) { try{client.destroy();}catch(_){ } return; }
 
   probeAndNote(ok=>{
     if (!ok) { try{client.destroy();}catch(_){ } return; }
