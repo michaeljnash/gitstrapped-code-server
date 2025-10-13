@@ -4,7 +4,7 @@ services:
     labels:
       - "recreate-tag=12dd3f4u5f6fdfdfddedgdddefdcddfddrdfddrdvvrdddddfdeedddddhdddddgddhvrdddddffdfddeddccddsddf ddddg7fdddddvdfd scdbddfdDdcdddddeddgfde4fd48rEdtyuydfedef dsre8ederd4frerdd6ededrdfgfefdg5rertddgregeftyteFrd4eeyd3eee3er4egee3edddeeedddd7eedfeddd4dsddder37re89544"
     environment:
-      FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
+      #FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       FILE__SUDO_PASSWORD_HASH: /config/.codestrap/sudo_password.hash
       DOCKER_MODS: linuxserver/mods:universal-package-install
       INSTALL_PACKAGES: argon2 jq yq openssl #curl git python3-venv
