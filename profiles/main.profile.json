@@ -1,4 +1,9 @@
 {
+  "dirs": {
+    "workspace": "/config/codestrap/profile_data/main/workspace",
+    "profile_data": "/config/codestrap/profile_data/main",
+    "associated": [ "/config/codestrap/profile_data/main/other-dir-to-associate-with-profile" ]
+  },
   "settings": {
     "someSettingKey": "someSettingVal",
     "workbench.colorTheme": "Monokai"

@@ -21,6 +21,16 @@ const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
+const crypto = require('crypto');
+
+const AUTH_SECRET = 'CHANGEME-super-secret'; // >>> set this in prod
+const AUTH_DIR = '/config/codestrap/profile_auth';
+const SESSION_COOKIE = 'cs_profile_sess';
+const SESSION_TTL_SEC = +(process.env.SESSION_TTL_SEC || 12*60*60); // 12h
+
+// ADD: writable base for profile dirs (used by /__ensure_profile_dirs)
+const PROFILE_DATA_BASE = '/config/codestrap/profile_data';
+
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
 const CODE_SERVICE_NAME = process.env.CODE_SERVICE_NAME || '';
@@ -285,6 +295,68 @@ details[open] .chev{transform:rotate(90deg)}
 
 /* --------------------- helpers --------------------- */
 
+// ADD: cookie/signing helpers
+function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
+
+function sign(obj){
+  const payload = b64url(JSON.stringify(obj));
+  const h = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  return `${payload}.${h}`;
+}
+function verify(token){
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [payload, mac] = token.split('.');
+  const good = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(good))) return null;
+  const obj = JSON.parse(ub64url(payload));
+  if (!obj || !obj.profile) return null;
+  if (obj.exp && Date.now() > obj.exp) return null;
+  return obj;
+}
+
+function setCookie(res, name, val, opts={}){
+  const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
+  if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
+  if (opts.secure !== false) parts.push('Secure'); // remove if serving plain HTTP
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+function clearCookie(res, name){ res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); }
+function readCookie(req, name){
+  const c = req.headers.cookie || '';
+  const m = c.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+// ADD: load per-profile password file & scrypt
+function loadAuthForProfile(name){
+  try{
+    const p = `${AUTH_DIR}/${name}.auth.json`;
+    const raw = fs.readFileSync(p, 'utf8');
+    const j = JSON.parse(raw);
+    if (!j || j.algo!=='scrypt' || !j.salt || !j.hash) return null;
+    return j;
+  }catch(_){ return null; }
+}
+function scryptHex(password, saltHex, N=16384,r=8,p=1,dkLen=64){
+  return crypto.scryptSync(password, Buffer.from(saltHex,'hex'), dkLen,{N,r,p}).toString('hex');
+}
+
+// ADD: payload helpers
+function parseProfileFromPayload(u){
+  if (!u || !u.query || !u.query.payload) return null;
+  try{
+    const raw = Array.isArray(u.query.payload) ? u.query.payload[0] : u.query.payload;
+    const decoded = decodeURIComponent(raw);
+    const a = JSON.parse(decoded);
+    if (Array.isArray(a) && Array.isArray(a[0]) && a[0][0]==='profile') return String(a[0][1]||'');
+  }catch(_){}
+  return null;
+}
+function makePayloadFor(profile){
+  return encodeURIComponent(JSON.stringify([["profile", profile]]));
+}
+
 function noStoreHeaders(extra = {}) {
   return Object.assign({
     'content-type': 'text/html; charset=utf-8',
@@ -546,6 +618,90 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
+  // ADD: login page
+  if (u.pathname === '/__login' && req.method === 'GET') {
+    const next = u.query.next || '/';
+    res.writeHead(200, {'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+    return res.end(`<!doctype html><meta charset="utf-8"><title>Codestrap Login</title>
+  <style>
+    body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
+    form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
+    h1{margin:0 0 10px 0;font-size:18px}
+    label{display:block;margin:8px 0 4px 0}
+    input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
+    button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
+    .msg{opacity:.8;margin-bottom:8px}
+  </style>
+  <div>
+    <form method="POST" action="/__login">
+      <h1>Sign in to a profile</h1>
+      <div class="msg">Choose a profile and enter its password.</div>
+      <label>Profile</label>
+      <select name="profile" id="profile"></select>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required/>
+      <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+  <script>
+  fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+    const sel = document.getElementById('profile'); if(!sel) return;
+    (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+  });
+  </script>`);
+  }
+
+  // ADD: login POST
+  if (u.pathname === '/__login' && req.method === 'POST') {
+    let body=''; req.on('data', c=> body+=c);
+    req.on('end', ()=>{
+      const m = new URLSearchParams(body);
+      const profile = (m.get('profile')||'').trim();
+      const password = m.get('password')||'';
+      const next = m.get('next') || '/';
+      const conf = loadAuthForProfile(profile);
+      if (!profile || !conf) {
+        res.writeHead(302, {'Location':'/__login?e=badprofile'});
+        return res.end();
+      }
+      try{
+        const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
+        const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
+        if (!ok) throw new Error('bad pw');
+        const sess = { profile, user: conf.user||profile, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
+        const token = sign(sess);
+        setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: true});
+
+        // Ensure payload matches session profile
+        let target = next || '/';
+        try {
+          const parsed = url.parse(target, true);
+          const p = parseProfileFromPayload(parsed);
+          if (p !== profile) {
+            parsed.query = parsed.query || {};
+            parsed.query.payload = `[["profile","${profile}"]]`;
+            delete parsed.search;
+            target = url.format(parsed);
+          }
+        } catch(_){}
+        res.writeHead(302, {'Location': target});
+        return res.end();
+      }catch(_){
+        res.writeHead(302, {'Location':'/__login?e=badpass'});
+        return res.end();
+      }
+    });
+    return;
+  }
+
+  // ADD: logout
+  if (u.pathname === '/__logout') {
+    clearCookie(res, SESSION_COOKIE);
+    res.writeHead(302, {'Location':'/__login'});
+    return res.end();
+  }
+
   // ---------- Normal proxy flow ----------
   probeAndNote(ok=>{
     if (!ok) {
@@ -655,6 +811,13 @@ const server = http.createServer((req,res)=>{
 
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{
+  // AUTH GATE for WS
+  const u = url.parse(req.url || '/', true);
+  const m = (req.headers.cookie||'').match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+  const sess = m ? verify(decodeURIComponent(m[1])) : null;
+  const pName = parseProfileFromPayload(u);
+  if (!sess || !pName || pName !== sess.profile) { try{client.destroy();}catch(_){ } return; }
+
   probeAndNote(ok=>{
     if (!ok) { try{client.destroy();}catch(_){ } return; }
     const upstream = net.connect(CODE_EXPOSED_PORT, CODE_SERVICE_NAME || '127.0.0.1');
