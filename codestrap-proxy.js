@@ -318,9 +318,10 @@ function verify(token){
 function setCookie(res, name, val, opts={}){
   const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
   if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
-  if (opts.secure !== false) parts.push('Secure'); // remove if serving plain HTTP
+  if (opts.secure) parts.push('Secure'); // only when explicitly true
   res.setHeader('Set-Cookie', parts.join('; '));
 }
+
 function clearCookie(res, name){ res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); }
 function readCookie(req, name){
   const c = req.headers.cookie || '';
@@ -671,7 +672,10 @@ const server = http.createServer((req,res)=>{
         if (!ok) throw new Error('bad pw');
         const sess = { profile, user: conf.user||profile, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
         const token = sign(sess);
-        setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: true});
+        const xfproto = (req.headers['x-forwarded-proto']||'').split(',')[0].trim();
+        const isHttps = xfproto === 'https' || req.connection?.encrypted;
+        setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: isHttps});
+
 
         // Ensure payload matches session profile
         let target = next || '/';
