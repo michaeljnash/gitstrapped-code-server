@@ -843,40 +843,6 @@ _seed_profile_auth_json() { # usage: _seed_profile_auth_json "<name>" "<password
   log "seeded default auth for profile '${_name}' → ${_file}"
 }
 
-init_profile_auth_from_profiles() {
-  # Only runs at init (but safe to call anytime)
-  [ -d "$PROFILE_DIR" ] || { log "no profiles dir ($PROFILE_DIR); skip auth seeding"; return 0; }
-
-  shopt -s nullglob 2>/dev/null || true
-  set +e
-  for pf in "$PROFILE_DIR"/*.profile.json; do
-    name="$(basename "$pf" .profile.json)"
-    # Is "auth": true ?
-    auth_required="$(jq -r '(.auth // false) | tostring' "$pf" 2>/dev/null || echo false)"
-    case "$auth_required" in
-      true|True|TRUE) auth_required=true ;;
-      *) auth_required=false ;;
-    esac
-
-    auth_file="${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json"
-
-    if [ "$auth_required" = "true" ]; then
-      if [ -s "$auth_file" ]; then
-        log "auth exists for profile '${name}' → ${auth_file}"
-      else
-        if [ -z "$DEFAULT_PASSWORD" ]; then
-          warn "profile '${name}' requires auth but DEFAULT_PASSWORD is not set; skipping seed"
-        else
-          _seed_profile_auth_json "$name" "$DEFAULT_PASSWORD" || true
-        fi
-      fi
-    else
-      log "profile '${name}': auth not required (no file will be created)"
-    fi
-  done
-  set -e
-}
-
 # ===== first-boot default password =====
 init_default_password_if_env(){
   DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-}"
@@ -3337,14 +3303,13 @@ case "${1:-init}" in
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[Codestrap extension]"     install_codestrap_extension
     safe_run "[Codestrap UI]"            write_codestrap_login
-    #safe_run "[Default password]"        init_default_password_if_env
-    safe_run "[Profiles auth init]"      init_profile_auth_from_profiles
+    safe_run "[Default password]"        init_default_password_if_env
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
     safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
-    safe_run "[Bootstrap config]"        merge_codestrap_settings
-    safe_run "[Bootstrap config]"        merge_codestrap_keybindings
-    safe_run "[Bootstrap config]"        merge_codestrap_tasks
+    #safe_run "[Bootstrap config]"        merge_codestrap_settings
+    #safe_run "[Bootstrap config]"        merge_codestrap_keybindings
+    #safe_run "[Bootstrap config]"        merge_codestrap_tasks
     #safe_run "[Bootstrap config]"        merge_codestrap_extensions
     safe_run "[Bootstrap GitHub]"        bootstrap_github_if_envs
     safe_run "[Extensions env]"          manage_extensions_if_envs
