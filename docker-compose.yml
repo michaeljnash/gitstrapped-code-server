@@ -49,6 +49,7 @@ services:
       CODE_EXPOSED_PORT: "8443"
     networks: [codestrap-network]
     volumes:
+      - config:/config
       - ./codestrap-proxy.js:/app/codestrap-proxy.js:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./profiles:/config/codestrap/profiles:ro
