@@ -25,17 +25,11 @@ const crypto = require('crypto');
 
 const AUTH_SECRET = 'CHANGEME-super-secret'; // >>> set this in prod
 const AUTH_DIR = '/config/codestrap/profile_auth';
-// Very simple in-memory session: { token: { profile, exp, pendingChange } }
-const SESS = new Map();
 const SESSION_COOKIE = 'cs_profile_sess';
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12h
 const SESSION_TTL_SEC = +(process.env.SESSION_TTL_SEC || 12*60*60); // 12h
 
 // ADD: writable base for profile dirs (used by /__ensure_profile_dirs)
 const PROFILE_DATA_BASE = '/config/codestrap/profile_data';
-// Default seed password used on first login when no auth file exists yet
-const DEFAULT_PROFILE_PASSWORD = process.env.DEFAULT_PROFILE_PASSWORD || 'codestrap';
-
 
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
@@ -301,185 +295,49 @@ details[open] .chev{transform:rotate(90deg)}
 
 /* --------------------- helpers --------------------- */
 
-/* --------------------- per-profile auth helpers --------------------- */
+// ADD — cookie/signing helpers
+function b64url(b){ return Buffer.from(b).toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function ub64url(s){ s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return Buffer.from(s,'base64'); }
 
-function loadAuth(name){
-  try{
-    const p = `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`;
-    const raw = fs.readFileSync(p, 'utf8');
-    const j = JSON.parse(raw);
-    // minimal shape guard
-    if (!j || !j.hash || !j.salt || !j.algo) return null;
-    return j;
-  }catch(_){ return null; }
+function sign(obj){
+  const payload = b64url(JSON.stringify(obj));
+  const h = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  return `${payload}.${h}`;
+}
+function verify(token){
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [payload, mac] = token.split('.');
+  const good = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('base64url');
+  if (!crypto.timingSafeEqual(Buffer.from(mac), Buffer.from(good))) return null;
+  const obj = JSON.parse(ub64url(payload));
+  if (!obj || !obj.profile) return null;
+  if (obj.exp && Date.now() > obj.exp) return null;
+  return obj;
 }
 
-function authRequiredForProfile(name){
-  // Decide based on profile json having "auth": true
-  try{
-    const pf = `${PROFILES_DIR}/${name}.profile.json`;
-    const raw = fs.readFileSync(pf, 'utf8');
-    const j = JSON.parse(raw);
-    return !!j && !!j.auth;
-  }catch(_){ return false; }
-}
-
-function timingSafeEq(a, b){
-  const A = Buffer.from(a); const B = Buffer.from(b);
-  if (A.length !== B.length) return false;
-  return crypto.timingSafeEqual(A, B);
-}
-
-function verifyPassword(plain, auth){
-  try{
-    if (!auth || auth.algo !== 'scrypt') return false;
-    const N     = auth.N || 16384;
-    const r     = auth.r || 8;
-    const p     = auth.p || 1;
-    const dkLen = auth.dkLen || 64;
-    const salt  = Buffer.from(auth.salt, 'hex');
-    const out   = crypto.scryptSync(plain, salt, dkLen, { N, r, p }).toString('hex');
-    return timingSafeEq(out, String(auth.hash));
-  }catch(_){ return false; }
-}
-
-function saveAuth(name, authObj){
-  try{
-    const dir = `${PROFILE_DATA_BASE}/${name}/auth`;
-    fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
-    const file = `${dir}/${name}.auth.json`;
-    fs.writeFileSync(file, JSON.stringify(authObj, null, 2));
-    return true;
-  }catch(e){
-    pushLog(`[auth] save failed for ${name}: ${e.message}`);
-    return false;
-  }
-}
-
-function rotatePassword(name, newPlain){
-  const N=16384, r=8, p=1, dkLen=64;
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(newPlain, Buffer.from(salt,'hex'), dkLen, { N, r, p }).toString('hex');
-  const old = loadAuth(name) || { algo:'scrypt', dkLen, N, r, p };
-  const updated = {
-    user: name,
-    algo: 'scrypt',
-    salt, hash, N, r, p, dkLen,
-    requiresChange: false,
-    defaultSeed: false,
-  };
-  // preserve any extra fields from old, except the ones we just replaced
-  for (const k of Object.keys(old)) {
-    if (updated[k] === undefined) updated[k] = old[k];
-  }
-  return saveAuth(name, updated);
-}
-
-/* --------------------- session (in-memory) --------------------- */
-
-function parseCookies(req){
-  const hdr = req.headers.cookie || '';
-  const out = {};
-  hdr.split(';').forEach(p=>{
-    const i = p.indexOf('=');
-    if (i === -1) return;
-    const k = p.slice(0,i).trim(); const v = p.slice(i+1).trim();
-    out[k] = decodeURIComponent(v);
-  });
-  return out;
-}
 function setCookie(res, name, val, opts={}){
-  const parts = [`${name}=${encodeURIComponent(val)}`];
-  if (opts.Path) parts.push(`Path=${opts.Path}`);
-  if (opts.HttpOnly) parts.push('HttpOnly');
-  if (opts.SameSite) parts.push(`SameSite=${opts.SameSite}`);
-  if (opts.Secure) parts.push('Secure');
-  if (opts.MaxAge != null) parts.push(`Max-Age=${opts.MaxAge}`);
-  const prev = res.getHeader('set-cookie') || [];
-  const arr = Array.isArray(prev) ? prev : [prev].filter(Boolean);
-  arr.push(parts.join('; '));
-  res.setHeader('set-cookie', arr);
+  const parts = [`${name}=${val}; Path=/; HttpOnly; SameSite=Lax`];
+  if (opts.maxAge) parts.push(`Max-Age=${opts.maxAge|0}`);
+  if (opts.secure) parts.push('Secure'); // only when explicitly true
+  res.setHeader('Set-Cookie', parts.join('; '));
 }
-function newSession(profile, pendingChange=false){
-  const token = crypto.randomBytes(24).toString('base64url');
-  SESS.set(token, { profile, exp: Date.now() + SESSION_TTL_MS, pendingChange });
-  return token;
+function clearCookie(res, name){ res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`); }
+function readCookie(req, name){
+  const c = req.headers.cookie || '';
+  const m = c.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return m ? decodeURIComponent(m[1]) : null;
 }
-function readSession(req){
-  const c = parseCookies(req);
-  const t = c[SESSION_COOKIE];
-  if (!t) return null;
-  const s = SESS.get(t);
-  if (!s) return null;
-  if (s.exp < Date.now()) { SESS.delete(t); return null; }
-  return { token: t, ...s };
-}
-function requireProfileFromUrl(u){
-  // We look for payload=[["profile","<name>"]] OR ?profile=<name>
-  // Accept both to be flexible.
-  const q = u.query || {};
-  if (q.profile) return String(q.profile);
-  if (q.payload) {
-    try{
-      const arr = JSON.parse(q.payload);
-      // expect [["profile","name"]] or larger
-      for (const pair of arr || []) {
-        if (Array.isArray(pair) && pair[0] === 'profile' && typeof pair[1] === 'string') return pair[1];
-      }
-    }catch(_){ /* ignore */ }
-  }
-  return '';
-}
-
-// Pick a sensible profile to log into (used when user hits bare domain)
-function pickLoginProfile(u, sess){
-  // 1) if URL declares a profile, honor it
-  const fromUrl = requireProfileFromUrl(u);
-  if (fromUrl) return fromUrl;
-  // 2) if we have a session, reuse its profile
-  if (sess && sess.profile) return sess.profile;
-  // 3) prefer `main` if present
-  try {
-    if (fs.existsSync(`${PROFILES_DIR}/main.profile.json`)) return 'main';
-  } catch {}
-  // 4) else the first secure profile; else any profile
-  try {
-    const entries = fs.readdirSync(PROFILES_DIR, { withFileTypes: true })
-      .filter(e => e.isFile() && /\.profile\.json$/i.test(e.name))
-      .map(e => e.name.replace(/\.profile\.json$/i, ''));
-    const secured = entries.find(n => authRequiredForProfile(n));
-    return secured || entries[0] || '';
-  } catch {}
-  return '';
-}
-
-function authPath(name){ return `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`; }
 
 // ADD — per-profile auth files (scrypt)
 function loadAuthForProfile(name){
   try{
-    const p = authPath(name);
+    const p = `${AUTH_DIR}/${name}.auth.json`;
     const raw = fs.readFileSync(p, 'utf8');
     const j = JSON.parse(raw);
     if (!j || j.algo!=='scrypt' || !j.salt || !j.hash) return null;
-    // normalize flags
-    j.requiresChange = !!j.requiresChange;
     return j;
   }catch(_){ return null; }
 }
-
-function saveAuthForProfile(name, conf){
-  const p = authPath(name);
-  fs.mkdirSync(require('path').dirname(p), { recursive: true, mode: 0o755 });
-  fs.writeFileSync(p, JSON.stringify(conf, null, 2));
-}
-function makeHashRecord(user, password){
-  const salt = crypto.randomBytes(16).toString('hex');
-  const N=16384,r=8,p=1,dkLen=64;
-  const hash = crypto.scryptSync(password, Buffer.from(salt,'hex'), dkLen,{N,r,p}).toString('hex');
-  return { user, algo:'scrypt', salt, hash, N, r, p, dkLen, requiresChange:false, defaultSeed:false };
-}
-
 function scryptHex(password, saltHex, N=16384,r=8,p=1,dkLen=64){
   return crypto.scryptSync(password, Buffer.from(saltHex,'hex'), dkLen,{N,r,p}).toString('hex');
 }
@@ -542,8 +400,7 @@ const server = http.createServer((req,res)=>{
   const PUBLIC_PATHS = new Set([
     '/__up','/__logs','/__events','/__code_logs','/__code_events',
     '/__profiles','/__seed_profiles.js','/__watchdog.js',
-    '/__login','/__logout','/__password', // ← add this
-    '/__ensure_profile_dirs','/favicon.ico'
+    '/__login','/__logout','/__ensure_profile_dirs','/favicon.ico'
   ]);
   const ASSET_PREFIXES = ['/vscode','/vscode-','/static','/workbench','/webview','/vscode-webview'];
   function isAssetPath(p){
@@ -658,37 +515,14 @@ const server = http.createServer((req,res)=>{
         .map(e => e.name)
         .filter(n => /\.profile\.json$/i.test(n))
         .map(n => n.replace(/\.profile\.json$/i, ''));
-
-      const authRequired = {};
-      const requiresChange = {};
-
-      for (const n of names) {
-        // Read profile.json to check "auth": true
-        let wantAuth = false;
-        try {
-          const pj = JSON.parse(fs.readFileSync(`${PROFILES_DIR}/${n}.profile.json`, 'utf8'));
-          wantAuth = !!(pj && pj.auth === true);
-        } catch (_){}
-
-        const conf = loadAuthForProfile(n);
-        if (wantAuth && !conf) {
-          // No file yet; UI should treat as password required (we expect init script to create it).
-          authRequired[n] = true;
-          requiresChange[n] = true; // until created, show change prompt after default creation
-        } else if (conf) {
-          authRequired[n] = true;
-          requiresChange[n] = !!conf.requiresChange;
-        } else {
-          authRequired[n] = false;
-          requiresChange[n] = false;
-        }
-      }
-
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names, auth: authRequired, requiresChange }));
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store'
+      });
+      return res.end(JSON.stringify({ names }));
     } catch (e) {
       res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(JSON.stringify({ names: [], auth: {}, requiresChange: {}, error: 'PROFILES_DIR_unreadable' }));
+      return res.end(JSON.stringify({ names: [], error: 'PROFILES_DIR_unreadable' }));
     }
   }
 
@@ -793,243 +627,115 @@ const server = http.createServer((req,res)=>{
     return;
   }
 
-  // Login page
-  // ---------- AUTH PAGES ----------
+  // ADD — login page
   if (u.pathname === '/__login' && req.method === 'GET') {
-    const name = String(u.query.profile || '');
-    const errMsg = u.query.error ? 'Invalid password.' : '';
-    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
-    return res.end(`<!doctype html><meta charset="utf-8"><title>Sign in</title>
-<style>
-  body{font:16px system-ui;background:#0f172a;color:#e5e7eb;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-  .card{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;max-width:420px;width:100%}
-  .row{display:flex;gap:12px;margin-top:10px}
-  input[type=password]{flex:1;padding:12px;border-radius:10px;border:1px solid #4b5563;background:#0b1220;color:#e5e7eb}
-  button{padding:12px 16px;border-radius:10px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
-  .err{color:#ef4444;margin-top:10px;min-height:1em}
-  .muted{color:#9ca3af}
-</style>
-<div class="card">
-  <h2 style="margin:0 0 4px">Profile login</h2>
-  <div class="muted" style="margin-bottom:10px">Profile: <b>${name || '(unknown)'}</b></div>
-  <form method="post" action="/__login">
-    <input type="hidden" name="profile" value="${name}">
-    <div class="row">
-      <input required autofocus type="password" name="password" placeholder="Password">
+    const next = u.query.next || '/';
+    res.writeHead(200, {'content-type':'text/html; charset=utf-8','cache-control':'no-store'});
+    return res.end(`<!doctype html><meta charset="utf-8"><title>Codestrap Login</title>
+  <style>
+    body{font:14px system-ui;background:#0f172a;color:#e5e7eb;display:grid;place-items:center;height:100vh;margin:0}
+    form{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;min-width:320px}
+    h1{margin:0 0 10px 0;font-size:18px}
+    label{display:block;margin:8px 0 4px 0}
+    input,select{width:100%;padding:8px;border-radius:8px;border:1px solid #374151;background:#0b1220;color:#e5e7eb}
+    button{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
+    .msg{opacity:.8;margin-bottom:8px}
+  </style>
+  <div>
+    <form method="POST" action="/__login">
+      <h1>Sign in to a profile</h1>
+      <div class="msg">Choose a profile and enter its password.</div>
+      <label>Profile</label>
+      <select name="profile" id="profile"></select>
+      <label>Password</label>
+      <input type="password" name="password" autocomplete="current-password" required/>
+      <input type="hidden" name="next" value="${String(next).replace(/"/g,'&quot;')}"/>
       <button type="submit">Sign in</button>
-    </div>
-    <div class="err">${errMsg}</div>
-  </form>
-</div>`);
+    </form>
+  </div>
+  <script>
+  fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
+    const sel = document.getElementById('profile'); if(!sel) return;
+    (j.names||[]).forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+  });
+  </script>`);
   }
 
+  // ADD — login POST
   if (u.pathname === '/__login' && req.method === 'POST') {
     let body=''; req.on('data', c=> body+=c);
     req.on('end', ()=>{
-      // x-www-form-urlencoded
-      const params = {};
-      (body||'').split('&').forEach(p=>{
-        const i=p.indexOf('=');
-        if(i>-1){ params[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1).replace(/\+/g,' ')); }
-      });
-      const name = String(params.profile || '');
-      const pw   = String(params.password || '');
-      if (!name) {
-        pushLog(`[auth] login rejected: missing profile`);
-        res.writeHead(302, { 'location': '/__login?error=1' }); return res.end();
+      const m = new URLSearchParams(body);
+      const profile = (m.get('profile')||'').trim();
+      const password = m.get('password')||'';
+      const next = m.get('next') || '/';
+      const conf = loadAuthForProfile(profile);
+      if (!profile || !conf) {
+        res.writeHead(302, {'Location':'/__login?e=badprofile'});
+        return res.end();
       }
-      const needAuth = authRequiredForProfile(name);
-      pushLog(`[auth] profile='${name}' needAuth=${needAuth}`);
-      const nextUrl = u.query.next || '/';
+      try{
+        const derived = scryptHex(password, conf.salt, conf.N||16384, conf.r||8, conf.p||1, conf.dkLen||64);
+        const ok = crypto.timingSafeEqual(Buffer.from(derived,'hex'), Buffer.from(conf.hash,'hex'));
+        if (!ok) throw new Error('bad pw');
+        const sess = { profile, user: conf.user||profile, iat: Date.now(), exp: Date.now()+SESSION_TTL_SEC*1000 };
+        const token = sign(sess);
 
-      pushLog(`[auth] POST /__login profile='${name}'`);
+        // Secure cookie only if HTTPS or XFP=https
+        const xfproto = (req.headers['x-forwarded-proto']||'').split(',')[0].trim();
+        const isHttps = xfproto === 'https' || req.connection?.encrypted;
+        setCookie(res, SESSION_COOKIE, token, {maxAge: SESSION_TTL_SEC, secure: isHttps});
 
-      if (!needAuth) {
-        // no password for this profile → just make a session
-        const tok = newSession(name, false);
-        setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
-        pushLog(`[auth] profile='${name}' no-auth, session created`);
-        res.writeHead(302, { 'location': nextUrl }); return res.end();
+        // Ensure payload matches session profile
+        let target = next || '/';
+        try {
+          const parsed = url.parse(target, true);
+          const p = parseProfileFromPayload(parsed);
+          if (p !== profile) {
+            parsed.query = parsed.query || {};
+            parsed.query.payload = `[["profile","${profile}"]]`;
+            delete parsed.search;
+            target = url.format(parsed);
+          }
+        } catch(_){}
+        res.writeHead(302, {'Location': target});
+        return res.end();
+      }catch(_){
+        res.writeHead(302, {'Location':'/__login?e=badpass'});
+        return res.end();
       }
-
-      const auth = loadAuth(name);
-     const authExists = !!auth;
-     const authPathStr = `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`;
-     pushLog(`[auth] profile='${name}' authExists=${authExists} path=${authPathStr}`);
-     if (authExists) {
-       pushLog(`[auth] flags requiresChange=${!!auth.requiresChange} defaultSeed=${!!auth.defaultSeed}`);
-     }
-
-     // --- FIRST LOGIN: no auth file yet ---
-     if (!auth) {
-       if (pw !== DEFAULT_PROFILE_PASSWORD) {
-         pushLog(`[auth] profile='${name}' default password mismatch on first create`);
-          res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
-        }
-        // Create auth file using the default; require change immediately
-        const rec = makeHashRecord(name, pw);
-        rec.requiresChange = true;
-        rec.defaultSeed = true;
-       if (!saveAuth(name, rec)) {
-         pushLog(`[auth] ERROR saving auth seed for '${name}'`);
-         res.writeHead(500, { 'content-type':'text/plain' }); return res.end('Failed to save auth');
-       }
-       pushLog(`[auth] seeded auth for '${name}' (requiresChange=true)`);
-
-        const tok = newSession(name, true); // pendingChange = true
-        setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
-        res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
-      }
-
-     // --- SEEDED BUT UNCHANGED: accept default OR stored hash; force change ---
-     if (auth.defaultSeed === true && auth.requiresChange === true) {
-       const ok = (pw === DEFAULT_PROFILE_PASSWORD) || verifyPassword(pw, auth);
-       if (!ok) {
-         pushLog(`[auth] profile='${name}' defaultSeedrequiresChange but supplied pw rejected`);
-         res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
-       }
-       pushLog(`[auth] profile='${name}' accepted (seed stage), forcing /__password`);
-       const tok = newSession(name, true); // still pending change
-       setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
-       res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
-     }
-
-      // Normal verification path
-      if (!verifyPassword(pw, auth)) {
-        pushLog(`[auth] profile='${name}' invalid password (normal path)`);
-        res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
-      }
-
-      const pending = !!auth.requiresChange;
-      const tok = newSession(name, pending);
-      setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
-      if (pending) {
-        pushLog(`[auth] profile='${name}' valid pw; requiresChange -> /__password`);
-        res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
-      }
-      pushLog(`[auth] profile='${name}' valid pw; -> ${nextUrl}`);
-      res.writeHead(302, { 'location': nextUrl }); return res.end();
     });
     return;
-  }
-
-  if (u.pathname === '/__password' && req.method === 'GET') {
-    const sess = readSession(req);
-    const profile = String(u.query.profile || (sess && sess.profile) || '');
-    // Only allow if logged in for this profile AND pendingChange
-    if (!sess || !profile || sess.profile !== profile || !sess.pendingChange) {
-      res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(profile)}` }); return res.end();
-    }
-    const err = u.query.error ? 'Minimum length 8 and both fields must match.' : '';
-    res.writeHead(200, { 'content-type':'text/html; charset=utf-8','cache-control':'no-store' });
-    return res.end(`<!doctype html><meta charset="utf-8"><title>Set new password</title>
-<style>
-  body{font:16px system-ui;background:#0f172a;color:#e5e7eb;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-  .card{background:#111827;border:1px solid #374151;border-radius:12px;padding:20px;max-width:480px;width:100%}
-  input{width:100%;padding:12px;border-radius:10px;border:1px solid #4b5563;background:#0b1220;color:#e5e7eb;margin-top:10px}
-  button{margin-top:12px;padding:12px 16px;border-radius:10px;border:1px solid #374151;background:#1f2937;color:#e5e7eb;cursor:pointer}
-  .muted{color:#9ca3af}
-  .err{color:#ef4444;min-height:1em;margin-top:8px}
-</style>
-<div class="card">
-  <h2 style="margin:0 0 6px">First login — set a new password</h2>
-  <div class="muted">Profile: <b>${profile}</b></div>
-  <form method="post" action="/__password">
-    <input type="hidden" name="profile" value="${profile}">
-    <input required type="password" name="pw1" placeholder="New password (min 8)">
-    <input required type="password" name="pw2" placeholder="Confirm new password">
-    <button type="submit">Save</button>
-    <div class="err">${err}</div>
-  </form>
-</div>`);
-  }
-
-  if (u.pathname === '/__password' && req.method === 'POST') {
-    let body=''; req.on('data', c=> body+=c);
-    req.on('end', ()=>{
-      const params = {};
-      (body||'').split('&').forEach(p=>{
-        const i=p.indexOf('=');
-        if(i>-1){ params[decodeURIComponent(p.slice(0,i))]=decodeURIComponent(p.slice(i+1).replace(/\+/g,' ')); }
-      });
-      const profile = String(params.profile || '');
-      const pw1 = String(params.pw1 || '');
-      const pw2 = String(params.pw2 || '');
-      const sess = readSession(req);
-      if (!sess || sess.profile !== profile || !sess.pendingChange) {
-        res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(profile)}` }); return res.end();
-      }
-      if (!pw1 || pw1 !== pw2 || pw1.length < 8) {
-        res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(profile)}&error=1` }); return res.end();
-      }
-      if (!rotatePassword(profile, pw1)) {
-        res.writeHead(500, { 'content-type':'text/plain' }); return res.end('Failed to save password');
-      }
-      // Clear pendingChange in session
-      const s = SESS.get(sess.token);
-      if (s) { s.pendingChange = false; s.exp = Date.now() + SESSION_TTL_MS; SESS.set(sess.token, s); }
-      res.writeHead(302, { 'location': '/' }); return res.end();
-    });
-    return;
-  }
-
-  function clearCookie(res, name){
-    res.setHeader('Set-Cookie', `${name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
   }
 
   // ADD — logout
   if (u.pathname === '/__logout') {
-    // remove server-side session
-    const c = parseCookies(req);
-    const t = c[SESSION_COOKIE];
-    if (t) { try { SESS.delete(t); } catch(_){} }
     clearCookie(res, SESSION_COOKIE);
     res.writeHead(302, {'Location':'/__login'});
     return res.end();
   }
 
-  // ---------- Unified auth/profile gate (after special routes, before proxy) ----------
-  {
-    const sess = readSession(req); // {token, profile, exp, pendingChange} or null
-    const urlProfile = requireProfileFromUrl(u); // ?profile or payload=[["profile","..."]]
-    const effectiveProfile = urlProfile || (sess && sess.profile) || null;
+  // ADD — auth gate for everything except internal endpoints
+  if (!PUBLIC_PATHS.has(u.pathname)) {
+    const tok = readCookie(req, SESSION_COOKIE);
+    const sess = verify(tok);
 
-    // Only gate non-public paths
-    if (!PUBLIC_PATHS.has(u.pathname)) {
-      // If user hits any app page without a session, send to login for a sensible profile
-      if (!sess) {
-        const target = pickLoginProfile(u, null);
-        const next = encodeURIComponent(req.url || '/');
-        const q = target ? `?profile=${encodeURIComponent(target)}&next=${next}` : `?next=${next}`;
-        res.writeHead(302, { 'Location': `/__login${q}` });
+    if (!sess || !sess.profile) {
+      res.writeHead(302, {'Location': `/__login?next=${encodeURIComponent(req.url||'/')}`});
+      return res.end();
+    }
+
+    // Enforce payload only for app pages (not static assets)
+    if (!isAssetPath(u.pathname)) {
+      const gotProfile = parseProfileFromPayload(u);
+      if (!gotProfile || gotProfile !== sess.profile) {
+        const parsed = url.parse(req.url||'/', true);
+        parsed.query = parsed.query || {};
+        parsed.query.payload = `[["profile","${sess.profile}"]]`;
+        delete parsed.search;
+        const fixed = url.format(parsed);
+        res.writeHead(302, {'Location': fixed});
         return res.end();
-      }
-      // If this URL/profile requires auth, enforce matching session
-      if (effectiveProfile && authRequiredForProfile(effectiveProfile)) {
-        if (!sess || sess.profile !== effectiveProfile) {
-          const next = encodeURIComponent(req.url || '/');
-          res.writeHead(302, { 'Location': `/__login?profile=${encodeURIComponent(effectiveProfile)}&next=${next}` });
-          return res.end();
-        }
-        // Force first-login password change until resolved
-        if (sess.pendingChange && u.pathname !== '/__password') {
-          res.writeHead(302, { 'Location': `/__password?profile=${encodeURIComponent(effectiveProfile)}` });
-          return res.end();
-        }
-      }
-
-      // Normalize payload for app pages (not static assets)
-      if (!isAssetPath(u.pathname)) {
-        const got = parseProfileFromPayload(u);
-        if (effectiveProfile && got !== effectiveProfile) {
-          const parsed = url.parse(req.url || '/', true);
-          parsed.query = parsed.query || {};
-          parsed.query.payload = `[["profile","${effectiveProfile}"]]`;
-          delete parsed.search; // force rebuild
-          const fixed = url.format(parsed);
-          res.writeHead(302, { 'Location': fixed });
-          return res.end();
-        }
       }
     }
   }
@@ -1144,7 +850,8 @@ const server = http.createServer((req,res)=>{
 /* --------------------- WebSocket proxy --------------------- */
 server.on('upgrade', (req, client, head)=>{
   // REQUIRE valid session; don't force payload for WS
-  const sess = readSession({ headers: req.headers }); // reuse cookie parser
+  const m = (req.headers.cookie||'').match(new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`));
+  const sess = m ? verify(decodeURIComponent(m[1])) : null;
   if (!sess || !sess.profile) { try{client.destroy();}catch(_){ } return; }
 
   // If payload present, it must match; but we don't force-add it here
