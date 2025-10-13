@@ -33,6 +33,9 @@ const SESSION_TTL_SEC = +(process.env.SESSION_TTL_SEC || 12*60*60); // 12h
 
 // ADD: writable base for profile dirs (used by /__ensure_profile_dirs)
 const PROFILE_DATA_BASE = '/config/codestrap/profile_data';
+// Default seed password used on first login when no auth file exists yet
+const DEFAULT_PROFILE_PASSWORD = process.env.DEFAULT_PROFILE_PASSWORD || 'codestrap';
+
 
 
 const PROXY_PORT        = +(process.env.PROXY_PORT || 8080);
@@ -428,6 +431,27 @@ function requireProfileFromUrl(u){
   return '';
 }
 
+// Pick a sensible profile to log into (used when user hits bare domain)
+function pickLoginProfile(u, sess){
+  // 1) if URL declares a profile, honor it
+  const fromUrl = requireProfileFromUrl(u);
+  if (fromUrl) return fromUrl;
+  // 2) if we have a session, reuse its profile
+  if (sess && sess.profile) return sess.profile;
+  // 3) prefer `main` if present
+  try {
+    if (fs.existsSync(`${PROFILES_DIR}/main.profile.json`)) return 'main';
+  } catch {}
+  // 4) else the first secure profile; else any profile
+  try {
+    const entries = fs.readdirSync(PROFILES_DIR, { withFileTypes: true })
+      .filter(e => e.isFile() && /\.profile\.json$/i.test(e.name))
+      .map(e => e.name.replace(/\.profile\.json$/i, ''));
+    const secured = entries.find(n => authRequiredForProfile(n));
+    return secured || entries[0] || '';
+  } catch {}
+  return '';
+}
 
 function authPath(name){ return `${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json`; }
 
@@ -814,24 +838,45 @@ const server = http.createServer((req,res)=>{
         res.writeHead(302, { 'location': '/__login?error=1' }); return res.end();
       }
       const needAuth = authRequiredForProfile(name);
+      const nextUrl = u.query.next || '/';
+
       if (!needAuth) {
         // no password for this profile → just make a session
         const tok = newSession(name, false);
         setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
-        res.writeHead(302, { 'location': '/' }); return res.end();
+        res.writeHead(302, { 'location': nextUrl }); return res.end();
       }
+
       const auth = loadAuth(name);
-      if (!auth || !verifyPassword(pw, auth)) {
+
+      if (!auth) {
+        // FIRST LOGIN: no auth file yet → only accept the default seed
+        if (pw !== DEFAULT_PROFILE_PASSWORD) {
+          res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
+        }
+        // Create auth file using the default; require change immediately
+        const rec = makeHashRecord(name, pw);
+        rec.requiresChange = true;
+        rec.defaultSeed = true;
+        saveAuth(name, rec);
+
+        const tok = newSession(name, true); // pendingChange = true
+        setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
+        res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
+      }
+
+      // Normal verification path
+      if (!verifyPassword(pw, auth)) {
         res.writeHead(302, { 'location': `/__login?profile=${encodeURIComponent(name)}&error=1` }); return res.end();
       }
-      // Password OK
+
       const pending = !!auth.requiresChange;
       const tok = newSession(name, pending);
       setCookie(res, SESSION_COOKIE, tok, { Path:'/', HttpOnly:true, SameSite:'Lax' });
       if (pending) {
         res.writeHead(302, { 'location': `/__password?profile=${encodeURIComponent(name)}` }); return res.end();
       }
-      res.writeHead(302, { 'location': '/' }); return res.end();
+      res.writeHead(302, { 'location': nextUrl }); return res.end();
     });
     return;
   }
@@ -919,6 +964,14 @@ const server = http.createServer((req,res)=>{
 
     // Only gate non-public paths
     if (!PUBLIC_PATHS.has(u.pathname)) {
+      // If user hits any app page without a session, send to login for a sensible profile
+      if (!sess) {
+        const target = pickLoginProfile(u, null);
+        const next = encodeURIComponent(req.url || '/');
+        const q = target ? `?profile=${encodeURIComponent(target)}&next=${next}` : `?next=${next}`;
+        res.writeHead(302, { 'Location': `/__login${q}` });
+        return res.end();
+      }
       // If this URL/profile requires auth, enforce matching session
       if (effectiveProfile && authRequiredForProfile(effectiveProfile)) {
         if (!sess || sess.profile !== effectiveProfile) {
