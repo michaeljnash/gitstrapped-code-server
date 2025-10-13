@@ -429,6 +429,10 @@ fi
 
 # Profiles dir
 PROFILE_DIR="/config/codestrap/profiles"
+# Per-profile auth storage (proxy reads these)
+PROFILE_DATA_BASE="${PROFILE_DATA_BASE:-/config/codestrap/profile_data}"
+# DEFAULT_PASSWORD is already used elsewhere; we also use it for seeding profile auth
+DEFAULT_PASSWORD="${DEFAULT_PASSWORD:-}"
 
 # Source files from the resolved directory
 REPO_SETTINGS_SRC="${REPO_SETTINGS_SRC:-$CODESTRAP_CONFIG_DIR/settings.json}"
@@ -794,6 +798,83 @@ request_profile_switch(){ # usage: request_profile_switch "<profile-name>"
   local dir="/config/.codestrap"
   mkdir -p "$dir" 2>/dev/null || true
   printf '%s\n' "$name" > "${dir}/profile.switch"
+}
+
+# ===== per-profile auth bootstrap (seed scrypt auth files for profiles that require auth) =====
+_find_node_bin() {
+  for p in /usr/local/bin/node /usr/bin/node /app/code-server/lib/node /usr/lib/code-server/lib/node; do
+    [ -x "$p" ] && { echo "$p"; return 0; }
+  done
+  echo ""
+}
+
+_seed_profile_auth_json() { # usage: _seed_profile_auth_json "<name>" "<password>"
+  _name="$1"; _pw="$2"
+  [ -n "$_name" ] || { warn "seed auth: empty profile name"; return 1; }
+  [ -n "$_pw" ]   || { warn "seed auth: empty password for ${_name}"; return 1; }
+
+  _NODE="$(_find_node_bin)"
+  if [ -z "$_NODE" ]; then
+    warn "node not found; cannot seed auth for ${_name}"
+    return 1
+  fi
+
+  _dir="${PROFILE_DATA_BASE}/${_name}/auth"
+  _file="${_dir}/${_name}.auth.json"
+  mkdir -p "$_dir" || true
+
+  "$_NODE" -e '
+    const crypto=require("crypto"), fs=require("fs"), path=require("path");
+    const name=process.argv[2], base=process.argv[3], pass=process.argv[4];
+    if(!name||!base||!pass){ process.stderr.write("bad args\n"); process.exit(2); }
+    const dir=path.join(base, name, "auth");
+    const file=path.join(dir, name + ".auth.json");
+    fs.mkdirSync(dir,{recursive:true,mode:0o755});
+    const salt=crypto.randomBytes(16).toString("hex");
+    const N=16384,r=8,p=1,dkLen=64;
+    const hash=crypto.scryptSync(pass, Buffer.from(salt,"hex"), dkLen,{N,r,p}).toString("hex");
+    const out={user:name,algo:"scrypt",salt,hash,N,r,p,dkLen,requiresChange:true,defaultSeed:true};
+    fs.writeFileSync(file, JSON.stringify(out,null,2));
+  ' "$_name" "$PROFILE_DATA_BASE" "$_pw"
+
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$_dir" 2>/dev/null || true
+  chmod 750 "$_dir" 2>/dev/null || true
+  chmod 640 "$_file" 2>/dev/null || true
+  log "seeded default auth for profile '${_name}' → ${_file}"
+}
+
+init_profile_auth_from_profiles() {
+  # Only runs at init (but safe to call anytime)
+  [ -d "$PROFILE_DIR" ] || { log "no profiles dir ($PROFILE_DIR); skip auth seeding"; return 0; }
+
+  shopt -s nullglob 2>/dev/null || true
+  set +e
+  for pf in "$PROFILE_DIR"/*.profile.json; do
+    name="$(basename "$pf" .profile.json)"
+    # Is "auth": true ?
+    auth_required="$(jq -r '(.auth // false) | tostring' "$pf" 2>/dev/null || echo false)"
+    case "$auth_required" in
+      true|True|TRUE) auth_required=true ;;
+      *) auth_required=false ;;
+    esac
+
+    auth_file="${PROFILE_DATA_BASE}/${name}/auth/${name}.auth.json"
+
+    if [ "$auth_required" = "true" ]; then
+      if [ -s "$auth_file" ]; then
+        log "auth exists for profile '${name}' → ${auth_file}"
+      else
+        if [ -z "$DEFAULT_PASSWORD" ]; then
+          warn "profile '${name}' requires auth but DEFAULT_PASSWORD is not set; skipping seed"
+        else
+          _seed_profile_auth_json "$name" "$DEFAULT_PASSWORD" || true
+        fi
+      fi
+    else
+      log "profile '${name}': auth not required (no file will be created)"
+    fi
+  done
+  set -e
 }
 
 # ===== first-boot default password =====
@@ -3256,7 +3337,8 @@ case "${1:-init}" in
     safe_run "[Restart gate]"            install_restart_gate
     safe_run "[Codestrap extension]"     install_codestrap_extension
     safe_run "[Codestrap UI]"            write_codestrap_login
-    safe_run "[Default password]"        init_default_password_if_env
+    #safe_run "[Default password]"        init_default_password_if_env
+    safe_run "[Profiles auth init]"      init_profile_auth_from_profiles
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
     safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
