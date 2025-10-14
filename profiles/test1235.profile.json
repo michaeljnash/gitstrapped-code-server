@@ -28,7 +28,8 @@
   },
   "extensions": [
     "dbaeumer.vscode-eslint",
-    "github.vscode-pull-request-github"
+    "github.vscode-pull-request-github",
+    "atkeson.nodejs-testing"
   ],
   "github": {
     "username": "michaeljnash",
