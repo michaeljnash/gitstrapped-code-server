@@ -27,6 +27,7 @@ const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
 const path = require('path');
+const https = require('https')
 const { spawn, spawnSync } = require('child_process');
 
 const EXTENSIONS_DIR = '/config/extensions';     // where code-server installs extensions
@@ -52,6 +53,28 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
+
+// Resolve code-server CLI once (env CODE_CLI or common paths)
+let CODE_CLI_RESOLVED = null;
+function resolveCodeCli() {
+  if (CODE_CLI_RESOLVED !== null) return CODE_CLI_RESOLVED;
+  const candidates = [
+    process.env.CODE_CLI || '',
+    'code-server',
+    '/usr/bin/code-server',
+    '/usr/local/bin/code-server',
+    '/app/bin/code-server',
+  ].filter(Boolean);
+  for (const bin of candidates) {
+    try {
+      const r = spawnSync(bin, ['--version'], { stdio: 'ignore' });
+      if ((r.status|0) === 0) { CODE_CLI_RESOLVED = bin; pushLog(`[ext] using code-server cli: ${bin}`); return bin; }
+    } catch (_) {}
+  }
+  CODE_CLI_RESOLVED = null;
+  pushLog(`[ext] code-server CLI NOT found (will fallback to Open VSX download)`);
+  return null;
+}
 
 function ts(){ return new Date().toISOString().replace('T',' ').replace('Z','Z'); }
 
@@ -395,26 +418,141 @@ function writeProfileExtensionsFile(profileName, extensionIds){
 }
 
 // Install a single extension id via code-server CLI
-function installOneExtension(id, timeoutMs = 180000){
+async function installOneExtension(id, timeoutMs = 180000){
+  const cli = resolveCodeCli();
+  // Try direct CLI install first (id form: publisher.name)
+  if (cli) {
+    const res = await runCodeCliInstall(cli, ['--install-extension', id], timeoutMs);
+    if (res.ok) return res;
+    pushLog(`[ext] CLI install failed for ${id} (code=${res.code}, timeout=${res.timedOut}). Trying VSIX fallback…`);
+  }
+
+  // Fallback: download VSIX from Open VSX, then install via CLI or unzip
+  const parsed = parseExtensionId(id);
+  if (!parsed) return { id, ok:false, code:null, timedOut:false, out:'', err:'bad id format' };
+
+  const meta = await openVsxLatestMeta(parsed.publisher, parsed.name).catch(e => ({ error: String(e) }));
+  if (!meta || meta.error || !meta.files || !meta.files.download) {
+    return { id, ok:false, code:null, timedOut:false, out:'', err:`OpenVSX meta failed: ${meta && meta.error || 'no meta'}` };
+  }
+
+  const vsixPath = await downloadToFile(meta.files.download, `/tmp/${id}-${meta.version}.vsix`).catch(e => null);
+  if (!vsixPath) return { id, ok:false, code:null, timedOut:false, out:'', err:'VSIX download failed' };
+
+  // Prefer CLI install of the VSIX file
+  const cli2 = resolveCodeCli();
+  if (cli2) {
+    const res2 = await runCodeCliInstall(cli2, ['--install-extension', vsixPath], timeoutMs);
+    if (res2.ok) { safeRemove(vsixPath); return res2; }
+    pushLog(`[ext] VSIX CLI install failed for ${id}: ${res2.err.slice(-200)}`);
+  }
+
+  // As a last resort, unpack VSIX to EXTENSIONS_DIR/<id>-<version>-universal (requires 'unzip' or 'bsdtar')
+  const unpackOk = await tryUnpackVsix(vsixPath, id, meta.version);
+  safeRemove(vsixPath);
+  if (!unpackOk) return { id, ok:false, code:null, timedOut:false, out:'', err:'unpack failed (no unzip/bsdtar?)' };
+
+  return { id, ok:true, code:0, timedOut:false, out:'unpacked', err:'' };
+}
+
+function parseExtensionId(id){
+  if (!id || typeof id !== 'string') return null;
+  const i = id.indexOf('.');
+  if (i <= 0 || i === id.length-1) return null;
+  return { publisher: id.slice(0,i), name: id.slice(i+1) };
+}
+
+function openVsxLatestMeta(publisher, name){
+  // *must* call the API endpoint, not the website; set Accept to JSON
+  const urlStr = `https://open-vsx.org/api/${encodeURIComponent(publisher)}/${encodeURIComponent(name)}/latest`;
+  return httpJson(urlStr, { headers: { 'User-Agent': 'codestrap-proxy', 'Accept': 'application/json' } });
+}
+
+function httpJson(urlStr, { headers } = {}){
+  return new Promise((resolve, reject)=>{
+    const req = https.get(urlStr, { headers }, (res)=>{
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        // follow one redirect
+        return resolve(httpJson(res.headers.location, { headers }));
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', c => data += c);
+      res.on('end', ()=>{
+        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+  });
+}
+
+function downloadToFile(urlStr, dstPath){
+  return new Promise((resolve, reject)=>{
+    ensureDir(path.dirname(dstPath));
+    const file = fs.createWriteStream(dstPath);
+    const req = https.get(urlStr, { headers: { 'User-Agent': 'codestrap-proxy' } }, (res)=>{
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        // follow one redirect
+        res.resume();
+        return downloadToFile(res.headers.location, dstPath).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      res.pipe(file);
+      res.on('error', err => { try{file.close();}catch(_){} reject(err); });
+      file.on('finish', ()=>{ file.close(()=>{ try{ fs.chmodSync(dstPath, 0o664); }catch(_){} chownR(path.dirname(dstPath)); resolve(dstPath); }); });
+    });
+    req.on('error', err => { try{file.close(); fs.unlinkSync(dstPath);}catch(_){} reject(err); });
+  });
+}
+
+function tryUnpackVsix(vsixPath, id, version){
+  return new Promise((resolve)=>{
+    const folder = `${id}-${version}-universal`;
+    const dest = path.join(EXTENSIONS_DIR, folder);
+    ensureDir(dest);
+
+    // Prefer bsdtar, else unzip, else fail
+    const tryCmd = (cmd, args) => new Promise(r=>{
+      const p = spawn(cmd, args, { stdio: ['ignore','ignore','pipe'] });
+      let err=''; p.stderr.on('data', c=> err+=c.toString());
+      p.on('error', ()=> r({ ok:false, err: 'spawn error' }));
+      p.on('close', code => r({ ok: code===0, err, code }));
+    });
+
+    (async ()=>{
+      let ok = false;
+      if (!ok) {
+        const a = await tryCmd('bsdtar', ['-xvf', vsixPath, '-C', dest]);
+        ok = a.ok;
+      }
+      if (!ok) {
+        const b = await tryCmd('unzip', ['-o', vsixPath, '-d', dest]);
+        ok = b.ok;
+      }
+      if (ok) { chownR(dest); resolve(true); }
+      else resolve(false);
+    })();
+  });
+}
+
+function safeRemove(p){ try{ fs.unlinkSync(p); }catch(_){} }
+
+function runCodeCliInstall(cli, extraArgs, timeoutMs){
   return new Promise((resolve) => {
     const args = [
-      '--install-extension', id,
+      ...extraArgs,
       '--extensions-dir', EXTENSIONS_DIR,
       '--user-data-dir', USER_DATA_DIR,
       '--force'
     ];
-    const child = spawn(CODE_CLI, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
+    const child = spawn(cli, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
-    const timer = setTimeout(()=>{
-      try { child.kill('SIGTERM'); } catch(_){}
-      resolve({ id, ok:false, code:null, timedOut:true, out, err: err + '\n[TIMEOUT]' });
-    }, timeoutMs);
-
+    const timer = setTimeout(()=>{ try{child.kill('SIGTERM');}catch(_){ } resolve({ ok:false, id:String(extraArgs[1]||''), code:null, timedOut:true, out, err: err+'\n[TIMEOUT]' }); }, timeoutMs);
     child.stdout.on('data', c => out += c.toString());
     child.stderr.on('data', c => err += c.toString());
-    child.on('error', e => { clearTimeout(timer); resolve({ id, ok:false, code:null, timedOut:false, out, err: String(e) }); });
-    child.on('close', code => { clearTimeout(timer); resolve({ id, ok: code === 0, code, timedOut:false, out, err }); });
+    child.on('error', e => { clearTimeout(timer); resolve({ ok:false, id:String(extraArgs[1]||''), code:null, timedOut:false, out, err:String(e) }); });
+    child.on('close', code => { clearTimeout(timer); resolve({ ok: code===0, id:String(extraArgs[1]||''), code, timedOut:false, out, err }); });
   });
 }
 
@@ -427,19 +565,18 @@ async function ensureExtensionsForProfile(profileName, ids){
   for (const id of missing) {
     const r = await installOneExtension(id);
     results.push(r);
+    pushLog(`[ext] ${id} → ok=${r.ok} code=${r.code} timeout=${r.timedOut}`);
   }
 
-  // Ensure extensions directory is owned by code-server user (PUID/PGID)
   chownR(EXTENSIONS_DIR);
 
-  // After installs, write the profile's extensions.json
   const writeRes = writeProfileExtensionsFile(profileName, wanted);
-
+  pushLog(`[ext] wrote extensions.json for ${profileName}: ${writeRes.written}/${writeRes.requested} entries`);
   return {
     profile: profileName,
     wanted: wanted.length,
-    installed: results.filter(r=>r.ok).map(r=>r.id),
-    failed: results.filter(r=>!r.ok).map(r=>({ id:r.id, code:r.code, timedOut:r.timedOut, err: r.err.slice(-400) })),
+    newlyInstalled: results.filter(r=>r.ok).map(r=>r.id),
+    failed: results.filter(r=>!r.ok).map(r=>({ id:r.id, code:r.code, timedOut:r.timedOut, err: r.err && r.err.slice(-200) })),
     write: writeRes
   };
 }
