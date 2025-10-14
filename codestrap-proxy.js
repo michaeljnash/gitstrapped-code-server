@@ -26,6 +26,12 @@ const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
+const path = require('path');
+const { spawn } = require('child_process');
+
+const EXTENSIONS_DIR = '/config/extensions';     // where code-server installs extensions
+const USER_DATA_DIR  = '/config/data';           // code-server user data dir
+const CODE_CLI       = process.env.CODE_CLI || 'code-server'; // CLI binary to use
 
 /* ---------- Config paths ---------- */
 const PROFILE_DATA_BASE = '/config/data/User/profiles';  // mkdir target
@@ -306,6 +312,135 @@ function shouldInjectWatchdog(reqUrl){
   return false;
 }
 
+/* ------------------ Extension helpers ------------------ */
+
+// Read a profile's config JSON: /config/codestrap/profiles/<name>.profile.json
+function readProfileConfig(name){
+  try{
+    const p = `${PROFILES_DIR}/${name}.profile.json`;
+    const raw = fs.readFileSync(p, 'utf8');
+    const j = JSON.parse(raw);
+    return j && typeof j === 'object' ? j : null;
+  }catch(_){ return null; }
+}
+
+// Find an installed folder for an extension id (e.g. "ms-python.python")
+function findInstalledFolderFor(id){
+  try{
+    const entries = fs.readdirSync(EXTENSIONS_DIR, { withFileTypes: true });
+    const prefix = `${id}-`; // folders look like: <id>-<version>-<platform>
+    const candidates = entries
+      .filter(e => e.isDirectory() && e.name.startsWith(prefix))
+      .map(e => e.name)
+      .sort(); // pick latest lexically
+    return candidates.length ? candidates[candidates.length - 1] : null;
+  }catch(_){ return null; }
+}
+
+// Build entry for extensions.json from a folder "<id>-<version>-<platform>"
+function buildEntryFromFolder(folder){
+  const lastDash = folder.lastIndexOf('-');
+  if (lastDash < 0) return null;
+  const platform = folder.slice(lastDash + 1);
+  const rest = folder.slice(0, lastDash);
+
+  const verDash = rest.lastIndexOf('-');
+  if (verDash < 0) return null;
+  const version = rest.slice(verDash + 1);
+  const id = rest.slice(0, verDash);
+
+  const fullPath = `${EXTENSIONS_DIR}/${folder}`;
+  return {
+    identifier: { id },
+    version,
+    location: {
+      "$mid": 1,
+      "path": fullPath,
+      "scheme": "file"
+    },
+    relativeLocation: folder,
+    metadata: {
+      installedTimestamp: Date.now(),
+      targetPlatform: platform,
+      isPreReleaseVersion: false
+    }
+  };
+}
+
+// Write /config/data/User/profiles/<name>/extensions.json(.js)
+function writeProfileExtensionsFile(profileName, extensionIds){
+  const entries = [];
+  for (const id of (extensionIds || [])) {
+    if (!id || typeof id !== 'string') continue;
+    const folder = findInstalledFolderFor(id);
+    if (!folder) continue; // only include installed ones
+    const entry = buildEntryFromFolder(folder);
+    if (entry) entries.push(entry);
+  }
+
+  const base = `${PROFILE_DATA_BASE}/${profileName}`;
+  try { fs.mkdirSync(base, { recursive: true, mode: 0o755 }); } catch(_){}
+
+  const outJson = JSON.stringify(entries, null, 2) + '\n';
+  try { fs.writeFileSync(`${base}/extensions.json`, outJson, 'utf8'); } catch(_){}
+  try { fs.writeFileSync(`${base}/extensions.js`,  outJson, 'utf8'); } catch(_){}
+
+  return { written: entries.length, requested: (extensionIds||[]).length };
+}
+
+// Install a single extension id via code-server CLI
+function installOneExtension(id, timeoutMs = 180000){
+  return new Promise((resolve) => {
+    const args = [
+      '--install-extension', id,
+      '--extensions-dir', EXTENSIONS_DIR,
+      '--user-data-dir', USER_DATA_DIR,
+      '--force'
+    ];
+    const child = spawn(CODE_CLI, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let out = '', err = '';
+    const timer = setTimeout(()=>{
+      try { child.kill('SIGTERM'); } catch(_){}
+      resolve({ id, ok:false, code:null, timedOut:true, out, err: err + '\n[TIMEOUT]' });
+    }, timeoutMs);
+
+    child.stdout.on('data', c => out += c.toString());
+    child.stderr.on('data', c => err += c.toString());
+    child.on('error', e => {
+      clearTimeout(timer);
+      resolve({ id, ok:false, code:null, timedOut:false, out, err: String(e) });
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve({ id, ok: code === 0, code, timedOut:false, out, err });
+    });
+  });
+}
+
+// Install all missing extensions for a profile, then write extensions.json
+async function ensureExtensionsForProfile(profileName, ids){
+  const wanted = Array.isArray(ids) ? ids.filter(s=>typeof s==='string' && s.trim()) : [];
+  const missing = wanted.filter(id => !findInstalledFolderFor(id));
+
+  const results = [];
+  for (const id of missing) {
+    const r = await installOneExtension(id);
+    results.push(r);
+  }
+
+  // After installs, write the profile's extensions.json
+  const writeRes = writeProfileExtensionsFile(profileName, wanted);
+
+  return {
+    profile: profileName,
+    wanted: wanted.length,
+    installed: results.filter(r=>r.ok).map(r=>r.id),
+    failed: results.filter(r=>!r.ok).map(r=>({ id:r.id, code:r.code, timedOut:r.timedOut, err: r.err.slice(-400) })),
+    write: writeRes
+  };
+}
+
 /* --------------------- HTTP server --------------------- */
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
@@ -495,6 +630,22 @@ const server = http.createServer((req,res)=>{
           }
 
           console.log('[codestrap] seeded profiles:', { added: created.length, total: arr.length, created });
+
+          // Always (re)install missing extensions and rewrite extensions.json for ALL known profiles
+          try {
+            fetch('/__install_profile_exts', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({ names: names }),   // "names" is the full list returned by /__profiles
+              credentials: 'same-origin',
+              cache: 'no-store'
+            }).then(r=>r.json()).then(j=>{
+              console.log('[codestrap] install profile exts:', j);
+            }).catch(e=>console.warn('[codestrap] install profile exts failed:', e));
+          } catch(e) {
+            console.warn('[codestrap] ext install bootstrap failed:', e);
+          }
+
         }catch(e){
           console.warn('[codestrap] seed profiles failed:', e);
         }
@@ -594,6 +745,34 @@ fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
       } catch(_){}
       res.writeHead(302, {'Location': target});
       return res.end();
+    });
+    return;
+  }
+
+  /* ------------ Install & write extensions.json for profiles ------------ */
+  if (u.pathname === '/__install_profile_exts' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', async ()=>{
+      try {
+        const { names } = JSON.parse(body||'{}');
+        if (!Array.isArray(names)) throw new Error('names must be an array');
+
+        const out = [];
+        for (const name of names) {
+          if (!name || /[\\/]/.test(name)) continue;
+          const conf = readProfileConfig(name);
+          const extIds = (conf && Array.isArray(conf.extensions)) ? conf.extensions : [];
+          const resOne = await ensureExtensionsForProfile(name, extIds);
+          out.push(resOne);
+        }
+
+        res.writeHead(200, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
+        return res.end(JSON.stringify({ ok:true, results: out }));
+      } catch (e) {
+        res.writeHead(400, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
+        return res.end(JSON.stringify({ ok:false, error: e.message }));
+      }
     });
     return;
   }

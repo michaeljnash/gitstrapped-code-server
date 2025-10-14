@@ -33,7 +33,8 @@
     ]
   },
   "extensions": [
-    "dbaeumer.vscode-eslint"
+    "dbaeumer.vscode-eslint",
+    "bierner.docs-view"
   ],
   "github": {
     "username": "michaeljnash",
