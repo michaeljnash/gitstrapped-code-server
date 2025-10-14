@@ -42,11 +42,16 @@ if [ "${RUN_MODE:-cli}" = "init" ]; then
 fi
 
 # ----- force NO TTY when called non-interactively (extension spawn path) -----
-# If CODESTRAP_NO_TTY=1|true is set, never attempt to read/write /dev/tty.
-case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes|y) CODESTRAP_FORCE_NO_TTY=1 ;;
-  *)            CODESTRAP_FORCE_NO_TTY=0 ;;
-esac
+# Respect an earlier force=1 (e.g., RUN_MODE=init). Only set when the env var is present.
+if [ "${CODESTRAP_FORCE_NO_TTY:-0}" != "1" ]; then
+  if [ -n "${CODESTRAP_NO_TTY+x}" ]; then
+    case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
+      1|true|yes|y) CODESTRAP_FORCE_NO_TTY=1 ;;
+      *)            CODESTRAP_FORCE_NO_TTY=0 ;;
+    esac
+  fi
+fi
+export CODESTRAP_FORCE_NO_TTY
 
 # Run a step safely: in CLI, exit on failure; in INIT, log + continue.
 safe_run(){ # usage: safe_run "<ctx-tag>" <command> [args...]
@@ -456,30 +461,11 @@ VSC_PROFILES_BASE="/config/data/User/profiles"
 # default to permission pinning; set CODESTRAP_PROFILE_PIN_MODE=bind to use bind mounts when CAP_SYS_ADMIN is present
 PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"  # perm|bind
 
-list_profile_names() { # prints one name per line (without .profile.json/.json)
-  out_tmp="$(mktemp)"
-  : >"$out_tmp"
-  for d in "${PROFILES_JSON_DIR:-}" "${PROFILE_DIR:-}"; do
-    [ -d "$d" ] || continue
-    # Expand both patterns; if no match, $1 won't exist → safe no-op
-    set -- "$d"/*.profile.json "$d"/*.json
-    [ -e "$1" ] || continue
-    for f in "$d"/*.profile.json "$d"/*.json; do
-      [ -e "$f" ] || continue
-      b="${f##*/}"
-      case "$b" in
-        *.profile.json) n="${b%.profile.json}" ;;
-        *.json)         n="${b%.json}" ;;
-        *)              continue ;;
-      esac
-      printf '%s\n' "$n" >>"$out_tmp"
-    done
-  done
-  # unique + non-empty
-  if [ -s "$out_tmp" ]; then
-    sort -u "$out_tmp" | awk 'NF'
-  fi
-  rm -f "$out_tmp" 2>/dev/null || true
+list_profile_names() { # prints one name per line (without .profile.json)
+  [ -d "$PROFILES_JSON_DIR" ] || return 0
+  # Busybox/alpine-safe: avoid -printf
+  find "$PROFILES_JSON_DIR" -maxdepth 1 -type f -name '*.profile.json' 2>/dev/null \
+    | sed 's#.*/##' | sed 's/\.profile\.json$//' | awk 'NF' | sort -u
 }
 
 is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
@@ -575,28 +561,37 @@ reconcile_pinned_profiles() {
 }
 
 pin_profiles_step() {
+  CTX_TAG="[Pin profiles]"
   log "pinning VS Code profiles (protect dirs from deletion)"
   ensure_dir "$PINNED_BASE"
   ensure_dir "$VSC_PROFILES_BASE"
 
-  # Discover profiles once (so we can log and also iterate)
-  found="$(list_profile_names | tr '\n' ' ' || true)"
-  log "profiles discovered: ${found:-<none>}"
+  # Discover once and log it
+  names="$(list_profile_names | tr '\n' ' ' || true)"
+  log "profiles discovered: ${names:-<none>}"
+
+  # If nothing discovered, bail early with a clear message
+  if [ -z "${names// /}" ]; then
+    log "no profiles seeded (make sure *.profile.json files exist under ${PROFILES_JSON_DIR})"
+    CTX_TAG=""
+    return 0
+  fi
 
   errs=0
   seeded=0
-  printf '%s\n' "$found" | tr ' ' '\n' | awk 'NF' | while IFS= read -r name; do
+
+  # Iterate robustly (newline-delimited)
+  printf '%s\n' "$names" | tr ' ' '\n' | awk 'NF' | while IFS= read -r name; do
     [ -n "$name" ] || continue
 
     src="$PINNED_BASE/$name"
     dst="$VSC_PROFILES_BASE/$name"
 
-    # Backing dir owned by PUID:PGID so VS Code can read/write
+    # Seed a backing dir (we keep this even in perm mode so we have a canonical copy to rehydrate from)
     ensure_dir "$src"
     chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
     chmod 0775 "$src" 2>/dev/null || true
 
-    # Seed common files if missing (code-server will freely update these)
     for f in settings.json keybindings.json tasks.json extensions.json; do
       if [ ! -e "$src/$f" ]; then
         : >"$src/$f"
@@ -605,21 +600,39 @@ pin_profiles_step() {
       fi
     done
 
-    # Create destination dir so code-server can start even if mount fails
+    # Ensure destination exists
     ensure_dir "$dst"
     chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
 
-    # Try bind-mount (no-op if already mounted). Errors are counted but non-fatal in init mode.
-    if ! ensure_bind_mount "$src" "$dst"; then
-      errs=$((errs+1))
-    fi
+    case "$PIN_MODE" in
+      bind)
+        # Only try a bind mount if we actually have CAP_SYS_ADMIN; otherwise warn once
+        if [ "$(id -u)" != "0" ] || ! command -v mount >/dev/null 2>&1; then
+          warn "bind mount unavailable (need CAP_SYS_ADMIN); use CODESTRAP_PROFILE_PIN_MODE=perm."
+        else
+          if ! is_mounted_here "$dst"; then
+            if ! mount --bind "$src" "$dst" 2>/dev/null; then
+              warn "bind mount failed: $src -> $dst"
+              errs=$((errs+1))
+            fi
+          fi
+        fi
+        ;;
+      perm|*)
+        # No mounts, no symlinks. We keep normal folders so code-server watchers behave.
+        # Only create missing files; never clobber existing files to avoid stomping user changes.
+        for f in settings.json keybindings.json tasks.json extensions.json; do
+          [ -e "$dst/$f" ] || { : >"$dst/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true; chmod 0664 "$dst/$f" 2>/dev/null || true; }
+        done
+        ;;
+    esac
 
     seeded=$((seeded+1))
   done
 
-  # Unpin/remount cleanup: unmount profile dirs that no longer exist in JSON list
-  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    keep="$(printf '%s\n' "$found" | tr '\n' ' ')"
+  # Cleanup stale bind-mounts only if we were in bind mode and running as root
+  if [ "$PIN_MODE" = "bind" ] && command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+    keep="$(printf '%s\n' "$names" | tr '\n' ' ')"
     for mdir in "$VSC_PROFILES_BASE"/*; do
       [ -d "$mdir" ] || continue
       base="$(basename "$mdir")"
@@ -630,19 +643,17 @@ pin_profiles_step() {
     done
   fi
 
-  # Final ownership sweep
   chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
 
-  # Summary
-  if [ "${seeded:-0}" -eq 0 ]; then
-    log "no profiles seeded (make sure *.profile.json files exist under ${PROFILES_JSON_DIR:-/config/codestrap/profiles})"
-  else
-    log "seeded ${seeded} profile dir(s)"
+  if [ "${seeded:-0}" -gt 0 ]; then
+    log "seeded ${seeded} profile dir(s) in ${VSC_PROFILES_BASE} (mode=${PIN_MODE})"
   fi
   if [ "${errs:-0}" -gt 0 ]; then
-    warn "one or more profile bind mounts failed (run container as root or grant CAP_SYS_ADMIN)"
+    warn "one or more profile bind mounts failed"
   fi
+  CTX_TAG=""
 }
+
 
 
 # (Phase-1) No ORIGIN_* tracking; removing env-based bootstrap.
