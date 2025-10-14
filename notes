@@ -1,0 +1,9 @@
+so we can disable extension installation for the user or not in policies (if disabled just change the chown so installs fail and maybe make proxy show a nicer message when we try installs!)
+
+then we can basically know for sure that any installed are only our own, or we can (re)install all of our own on each init/strap run plus whatever user has installed. we should also add a way to do versions later specific ver installs from .profile.json extensions array
+
+prevents us having to do any uninstall all missing none install all missing none stuff making things much easier. makes more sense as a policy anyway to allow/disallow extensions install etc. later we can figure out how to do a enable/disable policy
+
+so we can install the superset of extensions on each init/strap run and then we with our proxy, per profile on load, find the specified extension id's for that profile, and copy the object from the config/extensions/extensions.json with the same id and copy it to the config/data/User/profiles/extensions.json in the array there, thus adding that extension to the profile.
+
+BOOM, we have extensions per profile all figured out. copying settings keybindings tasks etc all easier so figure that out next.
