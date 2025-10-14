@@ -27,6 +27,7 @@ services:
     volumes:
       - config:/config
       - workspace:/config/workspace
+      - extensions:/config/extensions
       - ./config:/config/codestrap/config:ro #make editable? maybe do via policies.yml file? so not ro here but if not editable in policies protect/ro by shell
       - ./extension:/config/codestrap/extension:ro
       - ./policies.yml:/config/.codestrap/policies.yml:ro
@@ -67,3 +68,4 @@ networks:
 volumes:
   config:
   workspace:
+  extensions:
