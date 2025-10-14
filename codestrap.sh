@@ -442,6 +442,97 @@ REPO_TASKS_SRC="${REPO_TASKS_SRC:-$CODESTRAP_CONFIG_DIR/tasks.json}"
 
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
 
+# ===== profile pinning (make profile dirs undeletable by code-server) =====
+PROFILES_JSON_DIR="${PROFILE_DIR:-/config/codestrap/profiles}"
+PINNED_BASE="/config/.codestrap/pinned_profiles"
+VSC_PROFILES_BASE="/config/data/User/profiles"
+
+list_profile_names() { # prints one name per line (without .profile.json)
+  [ -d "$PROFILES_JSON_DIR" ] || return 0
+  find "$PROFILES_JSON_DIR" -maxdepth 1 -type f -name '*.profile.json' -printf '%f\n' \
+    | sed 's/\.profile\.json$//' | awk 'NF' | sort -u
+}
+
+is_mounted_here() { # usage: is_mounted_here <dir>
+  mountpoint -q "$1" 2>/dev/null
+}
+
+ensure_bind_mount() { # usage: ensure_bind_mount <src_dir> <dst_dir>
+  src="$1"; dst="$2"
+  ensure_dir "$src"
+  ensure_dir "$dst"
+  # If already a mountpoint, nothing to do
+  if is_mounted_here "$dst"; then return 0; fi
+  # Try bind mount (root required)
+  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+    mount --bind "$src" "$dst" 2>/dev/null || {
+      warn "bind mount failed: $src -> $dst (falling back to symlink)"; goto_symlink=1
+    }
+  else
+    goto_symlink=1
+  fi
+  # Fallback: replace with symlink (recreated on each start)
+  if [ "${goto_symlink:-0}" = "1" ]; then
+    # If a dir exists at dst and isn't empty, don’t destroy user data — move it into pinned src
+    if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+      # Move contents into src (first boot) then replace with symlink
+      find "$dst" -mindepth 1 -maxdepth 1 -exec sh -c 'mv -n "$@" "$0"/ 2>/dev/null || true' "$src" {} +
+      rm -rf "$dst" 2>/dev/null || true
+    fi
+    ln -sfn "$src" "$dst" 2>/dev/null || warn "failed to symlink $dst -> $src"
+  fi
+}
+
+reconcile_pinned_profiles() { # create/refresh mounts/symlinks for all declared profiles
+  ensure_dir "$PINNED_BASE"
+  ensure_dir "$VSC_PROFILES_BASE"
+
+  # Pin all declared profiles
+  list_profile_names | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    src="$PINNED_BASE/$name"
+    dst="$VSC_PROFILES_BASE/$name"
+
+    # Backing dir owned by PUID:PGID so VS Code can read/write
+    ensure_dir "$src"
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
+    chmod 0775 "$src" 2>/dev/null || true
+
+    # Seed common files if missing (VS Code can overwrite them later)
+    for f in settings.json keybindings.json tasks.json extensions.json; do
+      [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
+    done
+
+    ensure_bind_mount "$src" "$dst"
+  done
+
+  # Unpin/remount cleanup: if something remains mounted that no longer has a profile JSON, detach it
+  # (only for real mountpoints; leave symlinks — they’re harmless and get overwritten next run)
+  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+    # Build keep set
+    keep="$(list_profile_names | tr '\n' ' ' )"
+    for mdir in "$VSC_PROFILES_BASE"/*; do
+      [ -d "$mdir" ] || continue
+      base="$(basename "$mdir")"
+      echo " $keep " | grep -q " $base " || {
+        if is_mounted_here "$mdir"; then
+          umount "$mdir" 2>/dev/null || true
+        fi
+      }
+    done
+  fi
+}
+
+# Call this early during init; safe to call multiple times.
+pin_profiles_step() {
+  log "pinning VS Code profiles (protect dirs from deletion)"
+  reconcile_pinned_profiles
+  # Ensure parents are owned for the runtime user
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" 2>/dev/null || true
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$VSC_PROFILES_BASE" 2>/dev/null || true
+}
+
+
 # (Phase-1) No ORIGIN_* tracking; removing env-based bootstrap.
 
 # ===== external preserve store =====
@@ -3307,6 +3398,7 @@ case "${1:-init}" in
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
     safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
+    safe_run "[Pin profiles]"            pin_profiles_step
     #safe_run "[Bootstrap config]"        merge_codestrap_settings
     #safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     #safe_run "[Bootstrap config]"        merge_codestrap_tasks

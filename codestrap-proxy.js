@@ -26,20 +26,6 @@ const net  = require('net');
 const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
-const path = require('path');
-const https = require('https')
-const { spawn, spawnSync } = require('child_process');
-
-const EXTENSIONS_DIR = '/config/extensions';     // where code-server installs extensions
-const USER_DATA_DIR  = '/config/data';           // code-server user data dir
-const CODE_CLI       = process.env.CODE_CLI || 'code-server'; // CLI binary to use
-
-// Read user/group from PUID/PGID env (fallback 1000)
-const CODE_UID = process.env.PUID ? +process.env.PUID : 1000;
-const CODE_GID = process.env.PGID ? +process.env.PGID : 1000;
-
-// Allow disabling chown if you run everything as same user.
-const DO_CHOWN = process.env.DO_CHOWN === '0' ? false : true;
 
 /* ---------- Config paths ---------- */
 const PROFILE_DATA_BASE = '/config/data/User/profiles';  // mkdir target
@@ -53,28 +39,6 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = +(process.env.UP_TIMEOUT_MS || 2500);
 
 const LOG_CAP     = +(process.env.LOG_CAP || 500);
 const DOCKER_SOCK = process.env.DOCKER_SOCK || '/var/run/docker.sock';
-
-// Resolve code-server CLI once (env CODE_CLI or common paths)
-let CODE_CLI_RESOLVED = null;
-function resolveCodeCli() {
-  if (CODE_CLI_RESOLVED !== null) return CODE_CLI_RESOLVED;
-  const candidates = [
-    process.env.CODE_CLI || '',
-    'code-server',
-    '/usr/bin/code-server',
-    '/usr/local/bin/code-server',
-    '/app/bin/code-server',
-  ].filter(Boolean);
-  for (const bin of candidates) {
-    try {
-      const r = spawnSync(bin, ['--version'], { stdio: 'ignore' });
-      if ((r.status|0) === 0) { CODE_CLI_RESOLVED = bin; pushLog(`[ext] using code-server cli: ${bin}`); return bin; }
-    } catch (_) {}
-  }
-  CODE_CLI_RESOLVED = null;
-  pushLog(`[ext] code-server CLI NOT found (will fallback to Open VSX download)`);
-  return null;
-}
 
 function ts(){ return new Date().toISOString().replace('T',' ').replace('Z','Z'); }
 
@@ -342,255 +306,6 @@ function shouldInjectWatchdog(reqUrl){
   return false;
 }
 
-/* ------------------ Extension helpers ------------------ */
-
-// Read a profile's config JSON: /config/codestrap/profiles/<name>.profile.json
-function readProfileConfig(name){
-  try{
-    const p = `${PROFILES_DIR}/${name}.profile.json`;
-    const raw = fs.readFileSync(p, 'utf8');
-    const j = JSON.parse(raw);
-    return j && typeof j === 'object' ? j : null;
-  }catch(_){ return null; }
-}
-
-// Find an installed folder for an extension id (e.g. "ms-python.python")
-function findInstalledFolderFor(id){
-  try{
-    const entries = fs.readdirSync(EXTENSIONS_DIR, { withFileTypes: true });
-    const prefix = `${id}-`; // folders like <id>-<version>-<platform>
-    const candidates = entries
-      .filter(e => e.isDirectory() && e.name.startsWith(prefix))
-      .map(e => e.name)
-      .sort(); // pick last lexically
-    return candidates.length ? candidates[candidates.length - 1] : null;
-  }catch(_){ return null; }
-}
-
-// Build entry for extensions.json from folder "<id>-<version>-<platform>"
-function buildEntryFromFolder(folder){
-  const lastDash = folder.lastIndexOf('-');
-  if (lastDash < 0) return null;
-  const platform = folder.slice(lastDash + 1);
-  const rest = folder.slice(0, lastDash);
-
-  const verDash = rest.lastIndexOf('-');
-  if (verDash < 0) return null;
-  const version = rest.slice(verDash + 1);
-  const id = rest.slice(0, verDash);
-
-  const fullPath = `${EXTENSIONS_DIR}/${folder}`;
-  return {
-    identifier: { id },
-    version,
-    location: { "$mid": 1, "path": fullPath, "scheme": "file" },
-    relativeLocation: folder,
-    metadata: {
-      installedTimestamp: Date.now(),
-      targetPlatform: platform,
-      isPreReleaseVersion: false
-    }
-  };
-}
-
-// Write /config/data/User/profiles/<name>/extensions.json(.js) with correct perms/owner
-function writeProfileExtensionsFile(profileName, extensionIds){
-  const entries = [];
-  for (const id of (extensionIds || [])) {
-    if (!id || typeof id !== 'string') continue;
-    const folder = findInstalledFolderFor(id);
-    if (!folder) continue; // only include installed ones
-    const entry = buildEntryFromFolder(folder);
-    if (entry) entries.push(entry);
-  }
-
-  const base = `${PROFILE_DATA_BASE}/${profileName}`;
-  ensureDir(base);
-
-  const outJson = JSON.stringify(entries, null, 2) + '\n';
-  try { fs.writeFileSync(`${base}/extensions.json`, outJson, { mode: 0o664 }); } catch(_){}
-  try { fs.writeFileSync(`${base}/extensions.js`,  outJson, { mode: 0o664 }); } catch(_){}
-  try { fs.chmodSync(`${base}/extensions.json`, 0o664); } catch(_){}
-  try { fs.chmodSync(`${base}/extensions.js`,  0o664); } catch(_){}
-  chownR(base);  // ensure directory and files owned by PUID:PGID
-
-  return { written: entries.length, requested: (extensionIds||[]).length };
-}
-
-// Install a single extension id via code-server CLI
-async function installOneExtension(id, timeoutMs = 180000){
-  const cli = resolveCodeCli();
-  // Try direct CLI install first (id form: publisher.name)
-  if (cli) {
-    const res = await runCodeCliInstall(cli, ['--install-extension', id], timeoutMs);
-    if (res.ok) return res;
-    pushLog(`[ext] CLI install failed for ${id} (code=${res.code}, timeout=${res.timedOut}). Trying VSIX fallback…`);
-  }
-
-  // Fallback: download VSIX from Open VSX, then install via CLI or unzip
-  const parsed = parseExtensionId(id);
-  if (!parsed) return { id, ok:false, code:null, timedOut:false, out:'', err:'bad id format' };
-
-  const meta = await openVsxLatestMeta(parsed.publisher, parsed.name).catch(e => ({ error: String(e) }));
-  if (!meta || meta.error || !meta.files || !meta.files.download) {
-    return { id, ok:false, code:null, timedOut:false, out:'', err:`OpenVSX meta failed: ${meta && meta.error || 'no meta'}` };
-  }
-
-  const vsixPath = await downloadToFile(meta.files.download, `/tmp/${id}-${meta.version}.vsix`).catch(e => null);
-  if (!vsixPath) return { id, ok:false, code:null, timedOut:false, out:'', err:'VSIX download failed' };
-
-  // Prefer CLI install of the VSIX file
-  const cli2 = resolveCodeCli();
-  if (cli2) {
-    const res2 = await runCodeCliInstall(cli2, ['--install-extension', vsixPath], timeoutMs);
-    if (res2.ok) { safeRemove(vsixPath); return res2; }
-    pushLog(`[ext] VSIX CLI install failed for ${id}: ${res2.err.slice(-200)}`);
-  }
-
-  // As a last resort, unpack VSIX to EXTENSIONS_DIR/<id>-<version>-universal (requires 'unzip' or 'bsdtar')
-  const unpackOk = await tryUnpackVsix(vsixPath, id, meta.version);
-  safeRemove(vsixPath);
-  if (!unpackOk) return { id, ok:false, code:null, timedOut:false, out:'', err:'unpack failed (no unzip/bsdtar?)' };
-
-  return { id, ok:true, code:0, timedOut:false, out:'unpacked', err:'' };
-}
-
-function parseExtensionId(id){
-  if (!id || typeof id !== 'string') return null;
-  const i = id.indexOf('.');
-  if (i <= 0 || i === id.length-1) return null;
-  return { publisher: id.slice(0,i), name: id.slice(i+1) };
-}
-
-function openVsxLatestMeta(publisher, name){
-  // *must* call the API endpoint, not the website; set Accept to JSON
-  const urlStr = `https://open-vsx.org/api/${encodeURIComponent(publisher)}/${encodeURIComponent(name)}/latest`;
-  return httpJson(urlStr, { headers: { 'User-Agent': 'codestrap-proxy', 'Accept': 'application/json' } });
-}
-
-function httpJson(urlStr, { headers } = {}){
-  return new Promise((resolve, reject)=>{
-    const req = https.get(urlStr, { headers }, (res)=>{
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        // follow one redirect
-        return resolve(httpJson(res.headers.location, { headers }));
-      }
-      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', c => data += c);
-      res.on('end', ()=>{
-        try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
-      });
-    });
-    req.on('error', reject);
-  });
-}
-
-function downloadToFile(urlStr, dstPath){
-  return new Promise((resolve, reject)=>{
-    ensureDir(path.dirname(dstPath));
-    const file = fs.createWriteStream(dstPath);
-    const req = https.get(urlStr, { headers: { 'User-Agent': 'codestrap-proxy' } }, (res)=>{
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        // follow one redirect
-        res.resume();
-        return downloadToFile(res.headers.location, dstPath).then(resolve, reject);
-      }
-      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
-      res.pipe(file);
-      res.on('error', err => { try{file.close();}catch(_){} reject(err); });
-      file.on('finish', ()=>{ file.close(()=>{ try{ fs.chmodSync(dstPath, 0o664); }catch(_){} chownR(path.dirname(dstPath)); resolve(dstPath); }); });
-    });
-    req.on('error', err => { try{file.close(); fs.unlinkSync(dstPath);}catch(_){} reject(err); });
-  });
-}
-
-function tryUnpackVsix(vsixPath, id, version){
-  return new Promise((resolve)=>{
-    const folder = `${id}-${version}-universal`;
-    const dest = path.join(EXTENSIONS_DIR, folder);
-    ensureDir(dest);
-
-    // Prefer bsdtar, else unzip, else fail
-    const tryCmd = (cmd, args) => new Promise(r=>{
-      const p = spawn(cmd, args, { stdio: ['ignore','ignore','pipe'] });
-      let err=''; p.stderr.on('data', c=> err+=c.toString());
-      p.on('error', ()=> r({ ok:false, err: 'spawn error' }));
-      p.on('close', code => r({ ok: code===0, err, code }));
-    });
-
-    (async ()=>{
-      let ok = false;
-      if (!ok) {
-        const a = await tryCmd('bsdtar', ['-xvf', vsixPath, '-C', dest]);
-        ok = a.ok;
-      }
-      if (!ok) {
-        const b = await tryCmd('unzip', ['-o', vsixPath, '-d', dest]);
-        ok = b.ok;
-      }
-      if (ok) { chownR(dest); resolve(true); }
-      else resolve(false);
-    })();
-  });
-}
-
-function safeRemove(p){ try{ fs.unlinkSync(p); }catch(_){} }
-
-function runCodeCliInstall(cli, extraArgs, timeoutMs){
-  return new Promise((resolve) => {
-    const args = [
-      ...extraArgs,
-      '--extensions-dir', EXTENSIONS_DIR,
-      '--user-data-dir', USER_DATA_DIR,
-      '--force'
-    ];
-    const child = spawn(cli, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '';
-    const timer = setTimeout(()=>{ try{child.kill('SIGTERM');}catch(_){ } resolve({ ok:false, id:String(extraArgs[1]||''), code:null, timedOut:true, out, err: err+'\n[TIMEOUT]' }); }, timeoutMs);
-    child.stdout.on('data', c => out += c.toString());
-    child.stderr.on('data', c => err += c.toString());
-    child.on('error', e => { clearTimeout(timer); resolve({ ok:false, id:String(extraArgs[1]||''), code:null, timedOut:false, out, err:String(e) }); });
-    child.on('close', code => { clearTimeout(timer); resolve({ ok: code===0, id:String(extraArgs[1]||''), code, timedOut:false, out, err }); });
-  });
-}
-
-// Install missing extensions for a profile, fix perms, then write extensions.json
-async function ensureExtensionsForProfile(profileName, ids){
-  const wanted = Array.isArray(ids) ? ids.filter(s=>typeof s==='string' && s.trim()) : [];
-  const missing = wanted.filter(id => !findInstalledFolderFor(id));
-
-  const results = [];
-  for (const id of missing) {
-    const r = await installOneExtension(id);
-    results.push(r);
-    pushLog(`[ext] ${id} → ok=${r.ok} code=${r.code} timeout=${r.timedOut}`);
-  }
-
-  chownR(EXTENSIONS_DIR);
-
-  const writeRes = writeProfileExtensionsFile(profileName, wanted);
-  pushLog(`[ext] wrote extensions.json for ${profileName}: ${writeRes.written}/${writeRes.requested} entries`);
-  return {
-    profile: profileName,
-    wanted: wanted.length,
-    newlyInstalled: results.filter(r=>r.ok).map(r=>r.id),
-    failed: results.filter(r=>!r.ok).map(r=>({ id:r.id, code:r.code, timedOut:r.timedOut, err: r.err && r.err.slice(-200) })),
-    write: writeRes
-  };
-}
-
-function chownR(p) {
-  if (!DO_CHOWN) return;
-  try { spawnSync('chown', ['-R', `${CODE_UID}:${CODE_GID}`, p]); } catch (_) {}
-}
-function ensureDir(dir) {
-  try { fs.mkdirSync(dir, { recursive: true, mode: 0o775 }); } catch (_){}
-  try { fs.chmodSync(dir, 0o775); } catch (_){}
-  chownR(dir);
-}
-
 /* --------------------- HTTP server --------------------- */
 const server = http.createServer((req,res)=>{
   const u = url.parse(req.url || '/', true);
@@ -780,22 +495,6 @@ const server = http.createServer((req,res)=>{
           }
 
           console.log('[codestrap] seeded profiles:', { added: created.length, total: arr.length, created });
-
-          // Always (re)install missing extensions and rewrite extensions.json for ALL known profiles
-          try {
-            fetch('/__install_profile_exts', {
-              method: 'POST',
-              headers: {'content-type': 'application/json'},
-              body: JSON.stringify({ names: names }),   // "names" from /__profiles
-              credentials: 'same-origin',
-              cache: 'no-store'
-            }).then(r=>r.json()).then(j=>{
-              console.log('[codestrap] install profile exts:', j);
-            }).catch(e=>console.warn('[codestrap] install profile exts failed:', e));
-          } catch(e) {
-            console.warn('[codestrap] ext install bootstrap failed:', e);
-          }
-
         }catch(e){
           console.warn('[codestrap] seed profiles failed:', e);
         }
@@ -825,14 +524,14 @@ const server = http.createServer((req,res)=>{
           if (!name || /[\\/]/.test(name)) continue;
           const p = `${PROFILE_DATA_BASE}/${name}`;
           try {
-            ensureDir(p); // mkdir + chmod + chownR
+            fs.mkdirSync(p, { recursive: true, mode: 0o755 });
             made++;
           } catch (e) {
             pushLog(`[profiles] mkdir failed for ${p}: ${e.message}`);
           }
         }
         res.writeHead(200, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-        return res.end(JSON.stringify({ ok:true, made, base: PROFILE_DATA_BASE, uid: CODE_UID, gid: CODE_GID }));
+        return res.end(JSON.stringify({ ok:true, made, base: PROFILE_DATA_BASE }));
       } catch (e) {
         res.writeHead(400, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
         return res.end(JSON.stringify({ ok:false, error: e.message }));
@@ -895,34 +594,6 @@ fetch('/__profiles',{cache:'no-store'}).then(r=>r.json()).then(j=>{
       } catch(_){}
       res.writeHead(302, {'Location': target});
       return res.end();
-    });
-    return;
-  }
-
-  /* ------------ Install & write extensions.json for profiles ------------ */
-  if (u.pathname === '/__install_profile_exts' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', async ()=>{
-      try {
-        const { names } = JSON.parse(body||'{}');
-        if (!Array.isArray(names)) throw new Error('names must be an array');
-
-        const out = [];
-        for (const name of names) {
-          if (!name || /[\\/]/.test(name)) continue;
-          const conf = readProfileConfig(name);
-          const extIds = (conf && Array.isArray(conf.extensions)) ? conf.extensions : [];
-          const resOne = await ensureExtensionsForProfile(name, extIds);
-          out.push(resOne);
-        }
-
-        res.writeHead(200, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-        return res.end(JSON.stringify({ ok:true, results: out }));
-      } catch (e) {
-        res.writeHead(400, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-        return res.end(JSON.stringify({ ok:false, error: e.message }));
-      }
     });
     return;
   }
