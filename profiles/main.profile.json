@@ -35,7 +35,6 @@
   "extensions": [
     "dbaeumer.vscode-eslint",
     "bierner.docs-view",
-    "linjun.aws-s3-support",
     "zowe.vscode-extension-for-zowe"
   ],
   "github": {
