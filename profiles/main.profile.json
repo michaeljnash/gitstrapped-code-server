@@ -34,8 +34,7 @@
   },
   "extensions": [
     "dbaeumer.vscode-eslint",
-    "bierner.docs-view",
-    "zowe.vscode-extension-for-zowe"
+    "bierner.docs-view"
   ],
   "github": {
     "username": "michaeljnash",
