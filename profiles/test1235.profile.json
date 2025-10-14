@@ -27,7 +27,8 @@
     ]
   },
   "extensions": [
-    "dbaeumer.vscode-eslint"
+    "dbaeumer.vscode-eslint",
+    "github.vscode-pull-request-github"
   ],
   "github": {
     "username": "michaeljnash",
