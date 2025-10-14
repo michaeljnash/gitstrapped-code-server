@@ -34,7 +34,8 @@
   },
   "extensions": [
     "dbaeumer.vscode-eslint",
-    "bierner.docs-view"
+    "bierner.docs-view",
+    "linjun.aws-s3-support"
   ],
   "github": {
     "username": "michaeljnash",
