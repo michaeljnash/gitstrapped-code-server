@@ -456,16 +456,30 @@ VSC_PROFILES_BASE="/config/data/User/profiles"
 # default to permission pinning; set CODESTRAP_PROFILE_PIN_MODE=bind to use bind mounts when CAP_SYS_ADMIN is present
 PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"  # perm|bind
 
-list_profile_names() { # prints one name per line (without .profile.json)
-  dir="$PROFILES_JSON_DIR"
-  [ -d "$dir" ] || return 0
-  # handle "no matches" safely: if no files, $1 won't exist
-  set -- "$dir"/*.profile.json
-  [ -e "$1" ] || return 0
-  for f in "$dir"/*.profile.json; do
-    b="${f##*/}"               # basename
-    printf '%s\n' "${b%.profile.json}"
-  done | awk 'NF' | sort -u
+list_profile_names() { # prints one name per line (without .profile.json/.json)
+  out_tmp="$(mktemp)"
+  : >"$out_tmp"
+  for d in "${PROFILES_JSON_DIR:-}" "${PROFILE_DIR:-}"; do
+    [ -d "$d" ] || continue
+    # Expand both patterns; if no match, $1 won't exist → safe no-op
+    set -- "$d"/*.profile.json "$d"/*.json
+    [ -e "$1" ] || continue
+    for f in "$d"/*.profile.json "$d"/*.json; do
+      [ -e "$f" ] || continue
+      b="${f##*/}"
+      case "$b" in
+        *.profile.json) n="${b%.profile.json}" ;;
+        *.json)         n="${b%.json}" ;;
+        *)              continue ;;
+      esac
+      printf '%s\n' "$n" >>"$out_tmp"
+    done
+  done
+  # unique + non-empty
+  if [ -s "$out_tmp" ]; then
+    sort -u "$out_tmp" | awk 'NF'
+  fi
+  rm -f "$out_tmp" 2>/dev/null || true
 }
 
 is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
@@ -561,12 +575,73 @@ reconcile_pinned_profiles() {
 }
 
 pin_profiles_step() {
-  CTX_TAG="[Pin profiles]"
   log "pinning VS Code profiles (protect dirs from deletion)"
-  reconcile_pinned_profiles
-  # normalize ownership for visibility
+  ensure_dir "$PINNED_BASE"
+  ensure_dir "$VSC_PROFILES_BASE"
+
+  # Discover profiles once (so we can log and also iterate)
+  found="$(list_profile_names | tr '\n' ' ' || true)"
+  log "profiles discovered: ${found:-<none>}"
+
+  errs=0
+  seeded=0
+  printf '%s\n' "$found" | tr ' ' '\n' | awk 'NF' | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+
+    src="$PINNED_BASE/$name"
+    dst="$VSC_PROFILES_BASE/$name"
+
+    # Backing dir owned by PUID:PGID so VS Code can read/write
+    ensure_dir "$src"
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
+    chmod 0775 "$src" 2>/dev/null || true
+
+    # Seed common files if missing (code-server will freely update these)
+    for f in settings.json keybindings.json tasks.json extensions.json; do
+      if [ ! -e "$src/$f" ]; then
+        : >"$src/$f"
+        chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true
+        chmod 0664 "$src/$f" 2>/dev/null || true
+      fi
+    done
+
+    # Create destination dir so code-server can start even if mount fails
+    ensure_dir "$dst"
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
+
+    # Try bind-mount (no-op if already mounted). Errors are counted but non-fatal in init mode.
+    if ! ensure_bind_mount "$src" "$dst"; then
+      errs=$((errs+1))
+    fi
+
+    seeded=$((seeded+1))
+  done
+
+  # Unpin/remount cleanup: unmount profile dirs that no longer exist in JSON list
+  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+    keep="$(printf '%s\n' "$found" | tr '\n' ' ')"
+    for mdir in "$VSC_PROFILES_BASE"/*; do
+      [ -d "$mdir" ] || continue
+      base="$(basename "$mdir")"
+      case " $keep " in
+        *" $base "*) : ;;
+        *) is_mounted_here "$mdir" && umount "$mdir" 2>/dev/null || true ;;
+      esac
+    done
+  fi
+
+  # Final ownership sweep
   chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
-  CTX_TAG=""
+
+  # Summary
+  if [ "${seeded:-0}" -eq 0 ]; then
+    log "no profiles seeded (make sure *.profile.json files exist under ${PROFILES_JSON_DIR:-/config/codestrap/profiles})"
+  else
+    log "seeded ${seeded} profile dir(s)"
+  fi
+  if [ "${errs:-0}" -gt 0 ]; then
+    warn "one or more profile bind mounts failed (run container as root or grant CAP_SYS_ADMIN)"
+  fi
 }
 
 
