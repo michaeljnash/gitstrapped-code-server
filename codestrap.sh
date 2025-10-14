@@ -35,23 +35,12 @@ success(){  printf "%s\n" "$(grn "${CTX_TAG:-[codestrap]}[SUCCESS] $*")" >&2; }
 # Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
 RUN_MODE="${RUN_MODE:-cli}"
 
-# Force non-TTY behavior during container init so logs never touch /dev/tty
-if [ "${RUN_MODE:-cli}" = "init" ]; then
-  CODESTRAP_FORCE_NO_TTY=1
-  export CODESTRAP_FORCE_NO_TTY
-fi
-
 # ----- force NO TTY when called non-interactively (extension spawn path) -----
-# Respect an earlier force=1 (e.g., RUN_MODE=init). Only set when the env var is present.
-if [ "${CODESTRAP_FORCE_NO_TTY:-0}" != "1" ]; then
-  if [ -n "${CODESTRAP_NO_TTY+x}" ]; then
-    case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
-      1|true|yes|y) CODESTRAP_FORCE_NO_TTY=1 ;;
-      *)            CODESTRAP_FORCE_NO_TTY=0 ;;
-    esac
-  fi
-fi
-export CODESTRAP_FORCE_NO_TTY
+# If CODESTRAP_NO_TTY=1|true is set, never attempt to read/write /dev/tty.
+case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|y) CODESTRAP_FORCE_NO_TTY=1 ;;
+  *)            CODESTRAP_FORCE_NO_TTY=0 ;;
+esac
 
 # Run a step safely: in CLI, exit on failure; in INIT, log + continue.
 safe_run(){ # usage: safe_run "<ctx-tag>" <command> [args...]
@@ -452,195 +441,6 @@ REPO_EXT_SRC="${REPO_EXT_SRC:-$CODESTRAP_CONFIG_DIR/extensions.json}"
 REPO_TASKS_SRC="${REPO_TASKS_SRC:-$CODESTRAP_CONFIG_DIR/tasks.json}"
 
 MANAGED_KEYS_FILE="$STATE_DIR/managed-settings-keys.json"
-
-# ===== profile pinning (make profile dirs undeletable by code-server) =====
-PROFILES_JSON_DIR="${PROFILE_DIR:-/config/codestrap/profiles}"
-PINNED_BASE="/config/.codestrap/pinned_profiles"
-VSC_PROFILES_BASE="/config/data/User/profiles"
-
-# default to permission pinning; set CODESTRAP_PROFILE_PIN_MODE=bind to use bind mounts when CAP_SYS_ADMIN is present
-PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"  # perm|bind
-
-list_profile_names() { # prints one name per line (without .profile.json)
-  [ -d "$PROFILES_JSON_DIR" ] || return 0
-  # Busybox/alpine-safe: avoid -printf
-  find "$PROFILES_JSON_DIR" -maxdepth 1 -type f -name '*.profile.json' 2>/dev/null \
-    | sed 's#.*/##' | sed 's/\.profile\.json$//' | awk 'NF' | sort -u
-}
-
-is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
-
-# capability check for bind mounts (root + CAP_SYS_ADMIN)
-can_bind_mount() {
-  [ "$(id -u)" = "0" ] || return 1
-  command -v mount >/dev/null 2>&1 || return 1
-  caphex="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)"
-  [ -n "$caphex" ] && [ $(( 16#$caphex & 0x200000 )) -ne 0 ] || return 1
-  return 0
-}
-
-ensure_bind_mount() { # usage: ensure_bind_mount <src_dir> <dst_dir>
-  src="$1"; dst="$2"
-  ensure_dir "$src"
-  ensure_dir "$dst"
-  is_mounted_here "$dst" && return 0
-  if ! can_bind_mount; then
-    warn "bind mount unavailable (need CAP_SYS_ADMIN); use CODESTRAP_PROFILE_PIN_MODE=perm."
-    return 1
-  fi
-  if ! mount --bind "$src" "$dst" 2>/tmp/codestrap.mount.err; then
-    warn "bind mount failed: $src -> $dst ($(tr '\n' ' ' </tmp/codestrap.mount.err))"
-    return 1
-  fi
-}
-
-# --- permission pinning: no symlinks, no mounts; preserves live updates/inotify
-pin_by_permissions() { # usage: pin_by_permissions <name>
-  name="$1"
-  dst="$VSC_PROFILES_BASE/$name"
-
-  # Parent locked (prevents rename/rmdir of children)
-  ensure_dir "$VSC_PROFILES_BASE"
-  chown root:root "$VSC_PROFILES_BASE" 2>/dev/null || true
-  chmod 0755 "$VSC_PROFILES_BASE" 2>/dev/null || true
-
-  # Profile dir writable by app user (code-server live updates OK)
-  ensure_dir "$dst"
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
-  chmod 0775 "$dst" 2>/dev/null || true
-
-  # seed expected files
-  for f in settings.json keybindings.json tasks.json extensions.json; do
-    [ -e "$dst/$f" ] || { : >"$dst/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true; chmod 0664 "$dst/$f" 2>/dev/null || true; }
-  done
-
-  # harden: sentinel + sticky bit prevents emptying & rmdir by non-root
-  touch "$dst/.pinned.sentinel" 2>/dev/null || true
-  chown root:root "$dst/.pinned.sentinel" 2>/dev/null || true
-  chmod 0444 "$dst/.pinned.sentinel" 2>/dev/null || true
-  chmod 1775 "$dst" 2>/dev/null || true
-}
-
-reconcile_pinned_profiles() {
-  ensure_dir "$PINNED_BASE"
-  ensure_dir "$VSC_PROFILES_BASE"
-  failed=0
-
-  list_profile_names | while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    case "$PIN_MODE" in
-      bind)
-        # maintain separate backing area; VS Code writes to it via bind mount
-        src="$PINNED_BASE/$name"
-        dst="$VSC_PROFILES_BASE/$name"
-        ensure_dir "$src"
-        chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
-        chmod 0775 "$src" 2>/dev/null || true
-        for f in settings.json keybindings.json tasks.json extensions.json; do
-          [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
-        done
-        ensure_bind_mount "$src" "$dst" || failed=$((failed+1))
-        ;;
-      perm|*)
-        pin_by_permissions "$name" || failed=$((failed+1))
-        ;;
-    esac
-  done
-
-  # cleanup mounts for removed profiles (bind mode only)
-  if [ "$PIN_MODE" = "bind" ] && can_bind_mount; then
-    keep="$(list_profile_names | tr '\n' ' ')"
-    for mdir in "$VSC_PROFILES_BASE"/*; do
-      [ -d "$mdir" ] || continue
-      base="$(basename "$mdir")"
-      echo " $keep " | grep -q " $base " || { is_mounted_here "$mdir" && umount "$mdir" 2>/dev/null || true; }
-    done
-  fi
-
-  [ "$failed" -eq 0 ] || warn "one or more profile pins failed ($failed)"
-}
-
-pin_profiles_step() {
-  CTX_TAG="[Pin profiles]"
-  log "pinning VS Code profiles (protect dirs from deletion)"
-
-  ensure_dir "$PINNED_BASE"
-  ensure_dir "$VSC_PROFILES_BASE"
-
-  # Default to perm mode unless explicitly overridden
-  PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"
-
-  # Collect profile names (busybox-safe)
-  names="$(list_profile_names 2>/dev/null || true)"
-  if [ -z "$names" ]; then
-    log "no profiles seeded (make sure *.profile.json files exist under ${PROFILES_JSON_DIR})"
-    CTX_TAG=""
-    return 0
-  fi
-
-  log "profiles discovered: $(printf '%s' "$names" | tr '\n' ' ')"
-
-  # Iterate WITHOUT a pipeline/subshell
-  seeded=0
-  # shellcheck disable=SC2086
-  set -- $names
-  for name in "$@"; do
-    [ -n "$name" ] || continue
-    src="$PINNED_BASE/$name"
-    dst="$VSC_PROFILES_BASE/$name"
-
-    # Backing dir (canonical copy)
-    ensure_dir "$src"
-    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
-    chmod 0775 "$src" 2>/dev/null || true
-
-    # Seed backing files if missing
-    for f in settings.json keybindings.json tasks.json extensions.json; do
-      if [ ! -e "$src/$f" ]; then
-        : >"$src/$f"
-        chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true
-        chmod 0664 "$src/$f" 2>/dev/null || true
-      fi
-    done
-
-    # Destination profile dir (real dir, no symlink, no mount)
-    ensure_dir "$dst"
-    chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
-
-    case "$PIN_MODE" in
-      perm|*)
-        # Only create missing files; never clobber user’s existing files.
-        for f in settings.json keybindings.json tasks.json extensions.json; do
-          if [ ! -e "$dst/$f" ]; then
-            : >"$dst/$f"
-            chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true
-            chmod 0664 "$dst/$f" 2>/dev/null || true
-          fi
-        done
-        # Marker to make verification easy
-        : >"$dst/.codestrap-pinned"
-        ;;
-      bind)
-        # Still supported, but won’t run without CAP_SYS_ADMIN; we’re not using it.
-        warn "bind mode requested but discouraged; set CODESTRAP_PROFILE_PIN_MODE=perm"
-        ;;
-    esac
-
-    log "seeded '$name' → $dst"
-    seeded=$((seeded+1))
-  done
-
-  # Final ownership sweep
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
-
-  # Quick visibility log of what now exists (busybox-safe; no -printf)
-  existing="$(find "$VSC_PROFILES_BASE" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort | tr '\n' ' ')"
-  log "existing profile dirs under ${VSC_PROFILES_BASE}: ${existing:-<none>}"
-
-  log "seeded ${seeded} profile dir(s) in ${VSC_PROFILES_BASE} (mode=${PIN_MODE})"
-  CTX_TAG=""
-}
-
 
 # (Phase-1) No ORIGIN_* tracking; removing env-based bootstrap.
 
@@ -2526,6 +2326,25 @@ emit_installed_exts_with_versions(){
   "$CODE_BIN" --list-extensions --show-versions 2>/dev/null | awk 'NF' | awk '!seen[$0]++'
 }
 
+# Emit union of "extensions" from all /config/codestrap/profiles/*.profile.json
+emit_profile_superset_exts(){
+  local dir="/config/codestrap/profiles"
+  [ -d "$dir" ] || return 0
+  command -v jq >/dev/null 2>&1 || { warn "jq not available; cannot read profile extensions"; return 0; }
+
+  # find all *.profile.json, parse extensions, emit unique IDs (one per line)
+  # - tolerate missing/empty "extensions"
+  # - skip non-files
+  # - dedupe while preserving discovery order
+  find "$dir" -maxdepth 1 -type f -name '*.profile.json' -print 2>/dev/null \
+    | sort \
+    | while IFS= read -r f; do
+        jq -r '.extensions // [] | .[] | strings' "$f" 2>/dev/null || true
+      done \
+    | awk 'NF' | awk '!seen[$0]++'
+}
+
+
 snapshot_extensions_state(){
   local out="$1"
   : >"$out"
@@ -2627,9 +2446,17 @@ EHELP
   [ -n "$CODE_BIN" ] || { CTX_TAG="[Extensions]"; warn "code-server/VS Code CLI not found; cannot manage extensions"; CTX_TAG=""; exit 0; }
 
   tmp_recs="$(mktemp)"; tmp_installed="$(mktemp)"
-  # Filter out protected ID from both the recommendations and installed sets
-  emit_recommended_exts | grep -Ev "$PROTECTED_RE" >"$tmp_recs" || true
-  emit_installed_exts  | grep -Ev "$PROTECTED_RE" >"$tmp_installed" || true
+
+  # Prefer superset from profiles; fallback to extensions.json if none found
+  if emit_profile_superset_exts | grep -q . 2>/dev/null; then
+    emit_profile_superset_exts | grep -Ev "$PROTECTED_RE" >"$tmp_recs" || true
+    CTX_TAG="[Extensions]"; log "using superset of profile extensions (from /config/codestrap/profiles)"; CTX_TAG=""
+  else
+    emit_recommended_exts       | grep -Ev "$PROTECTED_RE" >"$tmp_recs" || true
+    CTX_TAG="[Extensions]"; log "no profile extensions found; falling back to extensions.json recommendations"; CTX_TAG=""
+  fi
+
+  emit_installed_exts | grep -Ev "$PROTECTED_RE" >"$tmp_installed" || true
 
   # Build sets
   tmp_missing="$(mktemp)"; : >"$tmp_missing"         # in recs but not installed
@@ -3507,7 +3334,6 @@ case "${1:-init}" in
     safe_run "[Sudo default password]"   init_default_sudo_password_if_env
     safe_run "[Sudo password policy]"    enforce_policy_permissions
     safe_run "[Apply sudo hash]"         apply_sudo_hash_if_present
-    safe_run "[Pin profiles]"            pin_profiles_step
     #safe_run "[Bootstrap config]"        merge_codestrap_settings
     #safe_run "[Bootstrap config]"        merge_codestrap_keybindings
     #safe_run "[Bootstrap config]"        merge_codestrap_tasks

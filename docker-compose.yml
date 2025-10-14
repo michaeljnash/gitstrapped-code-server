@@ -2,7 +2,7 @@ services:
   code:
     image: lscr.io/linuxserver/code-server:4.101.1
     labels:
-      - "recreate-tag=12dd3f4fud5f6fdffdfddegdgdfdfdgfeffddcddjfddugrydfhfdhddrddvvugyyrdddddcdfdeedddddhdddddgddhvrdddddffdfddeddccddsddf ddddg7fdddddvdfd scdbddfdDdcdddddeddgfde4fd48rEdtyuydfedef dsre8ederd4frerdd6ededrdfgfefdg5rertddgregeftyteFrd4eeyd3eee3er4egee3edddeeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=12dd3f4fud5f6fdffdfdgdegdgdfdfdgfeffddcddjfddugrydfhfdhddrddvvugyyrdddddcdfdeedddddhdddddgddhvrdddddffdfddeddccddsddf ddddg7fdddddvdfd scdbddfdDdcdddddeddgfde4fd48rEdtyuydfedef dsre8ederd4frerdd6ededrdfgfefdg5rertddgregeftyteFrd4eeyd3eee3er4egee3edddeeedddd7eedfeddd4dsddder37re89544"
     environment:
       FILE__HASHED_PASSWORD: /config/.codestrap/password.hash
       FILE__SUDO_PASSWORD_HASH: /config/.codestrap/sudo_password.hash
@@ -40,7 +40,7 @@ services:
 
   splash:
     labels:
-      - "recreate-tag=12345d6efdfereuddfddd4efjdyg5dfdgdgddfddydddrfgyuddffchgdhfdfueddvrevffccddhrdddeddhdddgvddddddddddddfdrfffdddffddeddddcdd 8dddddgfcdbvsdDfddscddcddd dddyddddfdgfdded4Efedgu7dedydfgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
+      - "recreate-tag=12345d6efdfereuddfdddg4efjdyg5dfdgdgddfddydddrfgyuddffchgdhfdfueddvrevffccddhrdddeddhdddgvddddddddddddfdrfffdddffddeddddcdd 8dddddgfcdbvsdDfddscddcddd dddyddddfdgfdded4Efedgu7dedydfgsdefrfdeheeeer6ded4ddtrddgfreydefferetrd4egtrtred3eFeggee8f3eyr4eee3edddeedddd7eedfeddd4dsddder37re89544"
     image: node:20-alpine
     command: ["node","/app/codestrap-proxy.js"]
     environment:
