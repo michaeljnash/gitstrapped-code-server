@@ -28,7 +28,7 @@ const fs   = require('fs');
 const zlib = require('zlib');
 
 /* ---------- Config paths ---------- */
-const PROFILE_DATA_BASE = '/config/codestrap/profile_data';  // mkdir target
+const PROFILE_DATA_BASE = '/config/data/User/profiles';  // mkdir target
 const PROFILES_DIR = '/config/codestrap/profiles';
 
 /* ---------- Core config ---------- */
@@ -445,7 +445,7 @@ const server = http.createServer((req,res)=>{
       'cache-control': 'no-store, no-cache, must-revalidate, max-age=0'
     });
     return res.end(`(function(){
-      const BASE = '/config/codestrap/profile_data/';
+      const BASE = '/config/data/User/profiles/';
 
       function readProfiles(){
         try{
@@ -745,4 +745,4 @@ server.listen(PROXY_PORT, '0.0.0.0', ()=>{
     pushLog(`docker logs disabled (socket not mounted at ${DOCKER_SOCK})`);
   }
 });
-//WORKING MARKER!!!
+//WORKING MARKER OCT 13 10:42 WWW!!!
