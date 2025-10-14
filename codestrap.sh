@@ -563,35 +563,38 @@ reconcile_pinned_profiles() {
 pin_profiles_step() {
   CTX_TAG="[Pin profiles]"
   log "pinning VS Code profiles (protect dirs from deletion)"
+
   ensure_dir "$PINNED_BASE"
   ensure_dir "$VSC_PROFILES_BASE"
 
-  # Discover once and log it
-  names="$(list_profile_names | tr '\n' ' ' || true)"
-  log "profiles discovered: ${names:-<none>}"
+  # Default to perm mode unless explicitly overridden
+  PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"
 
-  # If nothing discovered, bail early with a clear message
-  if [ -z "${names// /}" ]; then
+  # Collect profile names (busybox-safe)
+  names="$(list_profile_names 2>/dev/null || true)"
+  if [ -z "$names" ]; then
     log "no profiles seeded (make sure *.profile.json files exist under ${PROFILES_JSON_DIR})"
     CTX_TAG=""
     return 0
   fi
 
-  errs=0
+  log "profiles discovered: $(printf '%s' "$names" | tr '\n' ' ')"
+
+  # Iterate WITHOUT a pipeline/subshell
   seeded=0
-
-  # Iterate robustly (newline-delimited)
-  printf '%s\n' "$names" | tr ' ' '\n' | awk 'NF' | while IFS= read -r name; do
+  # shellcheck disable=SC2086
+  set -- $names
+  for name in "$@"; do
     [ -n "$name" ] || continue
-
     src="$PINNED_BASE/$name"
     dst="$VSC_PROFILES_BASE/$name"
 
-    # Seed a backing dir (we keep this even in perm mode so we have a canonical copy to rehydrate from)
+    # Backing dir (canonical copy)
     ensure_dir "$src"
     chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
     chmod 0775 "$src" 2>/dev/null || true
 
+    # Seed backing files if missing
     for f in settings.json keybindings.json tasks.json extensions.json; do
       if [ ! -e "$src/$f" ]; then
         : >"$src/$f"
@@ -600,60 +603,43 @@ pin_profiles_step() {
       fi
     done
 
-    # Ensure destination exists
+    # Destination profile dir (real dir, no symlink, no mount)
     ensure_dir "$dst"
     chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
 
     case "$PIN_MODE" in
-      bind)
-        # Only try a bind mount if we actually have CAP_SYS_ADMIN; otherwise warn once
-        if [ "$(id -u)" != "0" ] || ! command -v mount >/dev/null 2>&1; then
-          warn "bind mount unavailable (need CAP_SYS_ADMIN); use CODESTRAP_PROFILE_PIN_MODE=perm."
-        else
-          if ! is_mounted_here "$dst"; then
-            if ! mount --bind "$src" "$dst" 2>/dev/null; then
-              warn "bind mount failed: $src -> $dst"
-              errs=$((errs+1))
-            fi
-          fi
-        fi
-        ;;
       perm|*)
-        # No mounts, no symlinks. We keep normal folders so code-server watchers behave.
-        # Only create missing files; never clobber existing files to avoid stomping user changes.
+        # Only create missing files; never clobber user’s existing files.
         for f in settings.json keybindings.json tasks.json extensions.json; do
-          [ -e "$dst/$f" ] || { : >"$dst/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true; chmod 0664 "$dst/$f" 2>/dev/null || true; }
+          if [ ! -e "$dst/$f" ]; then
+            : >"$dst/$f"
+            chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true
+            chmod 0664 "$dst/$f" 2>/dev/null || true
+          fi
         done
+        # Marker to make verification easy
+        : >"$dst/.codestrap-pinned"
+        ;;
+      bind)
+        # Still supported, but won’t run without CAP_SYS_ADMIN; we’re not using it.
+        warn "bind mode requested but discouraged; set CODESTRAP_PROFILE_PIN_MODE=perm"
         ;;
     esac
 
+    log "seeded '$name' → $dst"
     seeded=$((seeded+1))
   done
 
-  # Cleanup stale bind-mounts only if we were in bind mode and running as root
-  if [ "$PIN_MODE" = "bind" ] && command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    keep="$(printf '%s\n' "$names" | tr '\n' ' ')"
-    for mdir in "$VSC_PROFILES_BASE"/*; do
-      [ -d "$mdir" ] || continue
-      base="$(basename "$mdir")"
-      case " $keep " in
-        *" $base "*) : ;;
-        *) is_mounted_here "$mdir" && umount "$mdir" 2>/dev/null || true ;;
-      esac
-    done
-  fi
-
+  # Final ownership sweep
   chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
 
-  if [ "${seeded:-0}" -gt 0 ]; then
-    log "seeded ${seeded} profile dir(s) in ${VSC_PROFILES_BASE} (mode=${PIN_MODE})"
-  fi
-  if [ "${errs:-0}" -gt 0 ]; then
-    warn "one or more profile bind mounts failed"
-  fi
+  # Quick visibility log of what now exists (busybox-safe; no -printf)
+  existing="$(find "$VSC_PROFILES_BASE" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort | tr '\n' ' ')"
+  log "existing profile dirs under ${VSC_PROFILES_BASE}: ${existing:-<none>}"
+
+  log "seeded ${seeded} profile dir(s) in ${VSC_PROFILES_BASE} (mode=${PIN_MODE})"
   CTX_TAG=""
 }
-
 
 
 # (Phase-1) No ORIGIN_* tracking; removing env-based bootstrap.
