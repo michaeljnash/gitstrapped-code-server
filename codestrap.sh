@@ -453,6 +453,9 @@ PROFILES_JSON_DIR="${PROFILE_DIR:-/config/codestrap/profiles}"
 PINNED_BASE="/config/.codestrap/pinned_profiles"
 VSC_PROFILES_BASE="/config/data/User/profiles"
 
+# default to permission pinning; set CODESTRAP_PROFILE_PIN_MODE=bind to use bind mounts when CAP_SYS_ADMIN is present
+PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"  # perm|bind
+
 list_profile_names() { # prints one name per line (without .profile.json)
   [ -d "$PROFILES_JSON_DIR" ] || return 0
   find "$PROFILES_JSON_DIR" -maxdepth 1 -type f -name '*.profile.json' -printf '%f\n' \
@@ -461,99 +464,86 @@ list_profile_names() { # prints one name per line (without .profile.json)
 
 is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
 
+# capability check for bind mounts (root + CAP_SYS_ADMIN)
+can_bind_mount() {
+  [ "$(id -u)" = "0" ] || return 1
+  command -v mount >/dev/null 2>&1 || return 1
+  caphex="$(awk '/^CapEff:/ {print $2}' /proc/self/status 2>/dev/null)"
+  [ -n "$caphex" ] && [ $(( 16#$caphex & 0x200000 )) -ne 0 ] || return 1
+  return 0
+}
+
 ensure_bind_mount() { # usage: ensure_bind_mount <src_dir> <dst_dir>
   src="$1"; dst="$2"
   ensure_dir "$src"
   ensure_dir "$dst"
-
-  # Already mounted? done.
-  if is_mounted_here "$dst"; then return 0; fi
-
-  # Must be root (or have CAP_SYS_ADMIN) to bind mount
-  if [ "$(id -u)" != "0" ]; then
-    warn "bind mount requested but not running as root: $src -> $dst"
+  is_mounted_here "$dst" && return 0
+  if ! can_bind_mount; then
+    warn "bind mount unavailable (need CAP_SYS_ADMIN); use CODESTRAP_PROFILE_PIN_MODE=perm."
     return 1
   fi
-
-  # Try bind mount (overlay is fine even if dst has content)
-  if command -v mount >/dev/null 2>&1; then
-    if ! mount --bind "$src" "$dst" 2>/dev/null; then
-      warn "bind mount failed: $src -> $dst"
-      return 1
-    fi
-  else
-    warn "'mount' command not found; cannot bind mount $src -> $dst"
+  if ! mount --bind "$src" "$dst" 2>/tmp/codestrap.mount.err; then
+    warn "bind mount failed: $src -> $dst ($(tr '\n' ' ' </tmp/codestrap.mount.err))"
     return 1
   fi
 }
 
-reconcile_pinned_profiles() { # create/refresh mounts/symlinks for all declared profiles
-  ensure_dir "$PINNED_BASE"
+# --- permission pinning: no symlinks, no mounts; preserves live updates/inotify
+pin_by_permissions() { # usage: pin_by_permissions <name>
+  name="$1"
+  dst="$VSC_PROFILES_BASE/$name"
+
+  # Parent locked (prevents rename/rmdir of children)
   ensure_dir "$VSC_PROFILES_BASE"
+  chown root:root "$VSC_PROFILES_BASE" 2>/dev/null || true
+  chmod 0755 "$VSC_PROFILES_BASE" 2>/dev/null || true
 
-  # Pin all declared profiles
-  list_profile_names | while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    src="$PINNED_BASE/$name"
-    dst="$VSC_PROFILES_BASE/$name"
+  # Profile dir writable by app user (code-server live updates OK)
+  ensure_dir "$dst"
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$dst" 2>/dev/null || true
+  chmod 0775 "$dst" 2>/dev/null || true
 
-    # Backing dir owned by PUID:PGID so VS Code can read/write
-    ensure_dir "$src"
-    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
-    chmod 0775 "$src" 2>/dev/null || true
-
-    # Seed common files if missing (VS Code can overwrite them later)
-    for f in settings.json keybindings.json tasks.json extensions.json; do
-      [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
-    done
-
-    ensure_bind_mount "$src" "$dst"
+  # seed expected files
+  for f in settings.json keybindings.json tasks.json extensions.json; do
+    [ -e "$dst/$f" ] || { : >"$dst/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$dst/$f" 2>/dev/null || true; chmod 0664 "$dst/$f" 2>/dev/null || true; }
   done
 
-  # Unpin/remount cleanup: if something remains mounted that no longer has a profile JSON, detach it
-  # (only for real mountpoints; leave symlinks — they’re harmless and get overwritten next run)
-  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    # Build keep set
-    keep="$(list_profile_names | tr '\n' ' ' )"
-    for mdir in "$VSC_PROFILES_BASE"/*; do
-      [ -d "$mdir" ] || continue
-      base="$(basename "$mdir")"
-      echo " $keep " | grep -q " $base " || {
-        if is_mounted_here "$mdir"; then
-          umount "$mdir" 2>/dev/null || true
-        fi
-      }
-    done
-  fi
+  # harden: sentinel + sticky bit prevents emptying & rmdir by non-root
+  touch "$dst/.pinned.sentinel" 2>/dev/null || true
+  chown root:root "$dst/.pinned.sentinel" 2>/dev/null || true
+  chmod 0444 "$dst/.pinned.sentinel" 2>/dev/null || true
+  chmod 1775 "$dst" 2>/dev/null || true
 }
 
-# Call this early during init; safe to call multiple times.
-pin_profiles_step() {
-  log "pinning VS Code profiles (protect dirs from deletion)"
+reconcile_pinned_profiles() {
   ensure_dir "$PINNED_BASE"
   ensure_dir "$VSC_PROFILES_BASE"
+  failed=0
 
-  errs=0
   list_profile_names | while IFS= read -r name; do
     [ -n "$name" ] || continue
-    src="$PINNED_BASE/$name"
-    dst="$VSC_PROFILES_BASE/$name"
-
-    ensure_dir "$src"
-    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
-    chmod 0775 "$src" 2>/dev/null || true
-    for f in settings.json keybindings.json tasks.json extensions.json; do
-      [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
-    done
-
-    if ! ensure_bind_mount "$src" "$dst"; then
-      errs=$((errs+1))
-    fi
+    case "$PIN_MODE" in
+      bind)
+        # maintain separate backing area; VS Code writes to it via bind mount
+        src="$PINNED_BASE/$name"
+        dst="$VSC_PROFILES_BASE/$name"
+        ensure_dir "$src"
+        chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
+        chmod 0775 "$src" 2>/dev/null || true
+        for f in settings.json keybindings.json tasks.json extensions.json; do
+          [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
+        done
+        ensure_bind_mount "$src" "$dst" || failed=$((failed+1))
+        ;;
+      perm|*)
+        pin_by_permissions "$name" || failed=$((failed+1))
+        ;;
+    esac
   done
 
-  # cleanup mounts for profiles that no longer exist
-  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    keep="$(list_profile_names | tr '\n' ' ' )"
+  # cleanup mounts for removed profiles (bind mode only)
+  if [ "$PIN_MODE" = "bind" ] && can_bind_mount; then
+    keep="$(list_profile_names | tr '\n' ' ')"
     for mdir in "$VSC_PROFILES_BASE"/*; do
       [ -d "$mdir" ] || continue
       base="$(basename "$mdir")"
@@ -561,11 +551,16 @@ pin_profiles_step() {
     done
   fi
 
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
+  [ "$failed" -eq 0 ] || warn "one or more profile pins failed ($failed)"
+}
 
-  if [ "$errs" -gt 0 ]; then
-    warn "one or more profile bind mounts failed (run container as root or grant CAP_SYS_ADMIN)"
-  fi
+pin_profiles_step() {
+  CTX_TAG="[Pin profiles]"
+  log "pinning VS Code profiles (protect dirs from deletion)"
+  reconcile_pinned_profiles
+  # normalize ownership for visibility
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
+  CTX_TAG=""
 }
 
 
