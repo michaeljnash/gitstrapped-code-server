@@ -27,11 +27,18 @@ const url  = require('url');
 const fs   = require('fs');
 const zlib = require('zlib');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 
 const EXTENSIONS_DIR = '/config/extensions';     // where code-server installs extensions
 const USER_DATA_DIR  = '/config/data';           // code-server user data dir
 const CODE_CLI       = process.env.CODE_CLI || 'code-server'; // CLI binary to use
+
+// Read user/group from PUID/PGID env (fallback 1000)
+const CODE_UID = process.env.PUID ? +process.env.PUID : 1000;
+const CODE_GID = process.env.PGID ? +process.env.PGID : 1000;
+
+// Allow disabling chown if you run everything as same user.
+const DO_CHOWN = process.env.DO_CHOWN === '0' ? false : true;
 
 /* ---------- Config paths ---------- */
 const PROFILE_DATA_BASE = '/config/data/User/profiles';  // mkdir target
@@ -328,16 +335,16 @@ function readProfileConfig(name){
 function findInstalledFolderFor(id){
   try{
     const entries = fs.readdirSync(EXTENSIONS_DIR, { withFileTypes: true });
-    const prefix = `${id}-`; // folders look like: <id>-<version>-<platform>
+    const prefix = `${id}-`; // folders like <id>-<version>-<platform>
     const candidates = entries
       .filter(e => e.isDirectory() && e.name.startsWith(prefix))
       .map(e => e.name)
-      .sort(); // pick latest lexically
+      .sort(); // pick last lexically
     return candidates.length ? candidates[candidates.length - 1] : null;
   }catch(_){ return null; }
 }
 
-// Build entry for extensions.json from a folder "<id>-<version>-<platform>"
+// Build entry for extensions.json from folder "<id>-<version>-<platform>"
 function buildEntryFromFolder(folder){
   const lastDash = folder.lastIndexOf('-');
   if (lastDash < 0) return null;
@@ -353,11 +360,7 @@ function buildEntryFromFolder(folder){
   return {
     identifier: { id },
     version,
-    location: {
-      "$mid": 1,
-      "path": fullPath,
-      "scheme": "file"
-    },
+    location: { "$mid": 1, "path": fullPath, "scheme": "file" },
     relativeLocation: folder,
     metadata: {
       installedTimestamp: Date.now(),
@@ -367,7 +370,7 @@ function buildEntryFromFolder(folder){
   };
 }
 
-// Write /config/data/User/profiles/<name>/extensions.json(.js)
+// Write /config/data/User/profiles/<name>/extensions.json(.js) with correct perms/owner
 function writeProfileExtensionsFile(profileName, extensionIds){
   const entries = [];
   for (const id of (extensionIds || [])) {
@@ -379,11 +382,14 @@ function writeProfileExtensionsFile(profileName, extensionIds){
   }
 
   const base = `${PROFILE_DATA_BASE}/${profileName}`;
-  try { fs.mkdirSync(base, { recursive: true, mode: 0o755 }); } catch(_){}
+  ensureDir(base);
 
   const outJson = JSON.stringify(entries, null, 2) + '\n';
-  try { fs.writeFileSync(`${base}/extensions.json`, outJson, 'utf8'); } catch(_){}
-  try { fs.writeFileSync(`${base}/extensions.js`,  outJson, 'utf8'); } catch(_){}
+  try { fs.writeFileSync(`${base}/extensions.json`, outJson, { mode: 0o664 }); } catch(_){}
+  try { fs.writeFileSync(`${base}/extensions.js`,  outJson, { mode: 0o664 }); } catch(_){}
+  try { fs.chmodSync(`${base}/extensions.json`, 0o664); } catch(_){}
+  try { fs.chmodSync(`${base}/extensions.js`,  0o664); } catch(_){}
+  chownR(base);  // ensure directory and files owned by PUID:PGID
 
   return { written: entries.length, requested: (extensionIds||[]).length };
 }
@@ -407,18 +413,12 @@ function installOneExtension(id, timeoutMs = 180000){
 
     child.stdout.on('data', c => out += c.toString());
     child.stderr.on('data', c => err += c.toString());
-    child.on('error', e => {
-      clearTimeout(timer);
-      resolve({ id, ok:false, code:null, timedOut:false, out, err: String(e) });
-    });
-    child.on('close', code => {
-      clearTimeout(timer);
-      resolve({ id, ok: code === 0, code, timedOut:false, out, err });
-    });
+    child.on('error', e => { clearTimeout(timer); resolve({ id, ok:false, code:null, timedOut:false, out, err: String(e) }); });
+    child.on('close', code => { clearTimeout(timer); resolve({ id, ok: code === 0, code, timedOut:false, out, err }); });
   });
 }
 
-// Install all missing extensions for a profile, then write extensions.json
+// Install missing extensions for a profile, fix perms, then write extensions.json
 async function ensureExtensionsForProfile(profileName, ids){
   const wanted = Array.isArray(ids) ? ids.filter(s=>typeof s==='string' && s.trim()) : [];
   const missing = wanted.filter(id => !findInstalledFolderFor(id));
@@ -428,6 +428,9 @@ async function ensureExtensionsForProfile(profileName, ids){
     const r = await installOneExtension(id);
     results.push(r);
   }
+
+  // Ensure extensions directory is owned by code-server user (PUID/PGID)
+  chownR(EXTENSIONS_DIR);
 
   // After installs, write the profile's extensions.json
   const writeRes = writeProfileExtensionsFile(profileName, wanted);
@@ -439,6 +442,16 @@ async function ensureExtensionsForProfile(profileName, ids){
     failed: results.filter(r=>!r.ok).map(r=>({ id:r.id, code:r.code, timedOut:r.timedOut, err: r.err.slice(-400) })),
     write: writeRes
   };
+}
+
+function chownR(p) {
+  if (!DO_CHOWN) return;
+  try { spawnSync('chown', ['-R', `${CODE_UID}:${CODE_GID}`, p]); } catch (_) {}
+}
+function ensureDir(dir) {
+  try { fs.mkdirSync(dir, { recursive: true, mode: 0o775 }); } catch (_){}
+  try { fs.chmodSync(dir, 0o775); } catch (_){}
+  chownR(dir);
 }
 
 /* --------------------- HTTP server --------------------- */
@@ -636,7 +649,7 @@ const server = http.createServer((req,res)=>{
             fetch('/__install_profile_exts', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
-              body: JSON.stringify({ names: names }),   // "names" is the full list returned by /__profiles
+              body: JSON.stringify({ names: names }),   // "names" from /__profiles
               credentials: 'same-origin',
               cache: 'no-store'
             }).then(r=>r.json()).then(j=>{
@@ -675,14 +688,14 @@ const server = http.createServer((req,res)=>{
           if (!name || /[\\/]/.test(name)) continue;
           const p = `${PROFILE_DATA_BASE}/${name}`;
           try {
-            fs.mkdirSync(p, { recursive: true, mode: 0o755 });
+            ensureDir(p); // mkdir + chmod + chownR
             made++;
           } catch (e) {
             pushLog(`[profiles] mkdir failed for ${p}: ${e.message}`);
           }
         }
         res.writeHead(200, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-        return res.end(JSON.stringify({ ok:true, made, base: PROFILE_DATA_BASE }));
+        return res.end(JSON.stringify({ ok:true, made, base: PROFILE_DATA_BASE, uid: CODE_UID, gid: CODE_GID }));
       } catch (e) {
         res.writeHead(400, {'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
         return res.end(JSON.stringify({ ok:false, error: e.message }));
