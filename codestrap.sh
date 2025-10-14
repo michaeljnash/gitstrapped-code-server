@@ -35,6 +35,12 @@ success(){  printf "%s\n" "$(grn "${CTX_TAG:-[codestrap]}[SUCCESS] $*")" >&2; }
 # Will be set in entrypoint: RUN_MODE=init|cli  (default cli for safety)
 RUN_MODE="${RUN_MODE:-cli}"
 
+# Force non-TTY behavior during container init so logs never touch /dev/tty
+if [ "${RUN_MODE:-cli}" = "init" ]; then
+  CODESTRAP_FORCE_NO_TTY=1
+  export CODESTRAP_FORCE_NO_TTY
+fi
+
 # ----- force NO TTY when called non-interactively (extension spawn path) -----
 # If CODESTRAP_NO_TTY=1|true is set, never attempt to read/write /dev/tty.
 case "$(printf '%s' "${CODESTRAP_NO_TTY:-}" | tr '[:upper:]' '[:lower:]')" in
