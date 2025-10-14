@@ -457,9 +457,15 @@ VSC_PROFILES_BASE="/config/data/User/profiles"
 PIN_MODE="${CODESTRAP_PROFILE_PIN_MODE:-perm}"  # perm|bind
 
 list_profile_names() { # prints one name per line (without .profile.json)
-  [ -d "$PROFILES_JSON_DIR" ] || return 0
-  find "$PROFILES_JSON_DIR" -maxdepth 1 -type f -name '*.profile.json' -printf '%f\n' \
-    | sed 's/\.profile\.json$//' | awk 'NF' | sort -u
+  dir="$PROFILES_JSON_DIR"
+  [ -d "$dir" ] || return 0
+  # handle "no matches" safely: if no files, $1 won't exist
+  set -- "$dir"/*.profile.json
+  [ -e "$1" ] || return 0
+  for f in "$dir"/*.profile.json; do
+    b="${f##*/}"               # basename
+    printf '%s\n' "${b%.profile.json}"
+  done | awk 'NF' | sort -u
 }
 
 is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
