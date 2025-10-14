@@ -453,33 +453,31 @@ list_profile_names() { # prints one name per line (without .profile.json)
     | sed 's/\.profile\.json$//' | awk 'NF' | sort -u
 }
 
-is_mounted_here() { # usage: is_mounted_here <dir>
-  mountpoint -q "$1" 2>/dev/null
-}
+is_mounted_here() { mountpoint -q "$1" 2>/dev/null; }
 
 ensure_bind_mount() { # usage: ensure_bind_mount <src_dir> <dst_dir>
   src="$1"; dst="$2"
   ensure_dir "$src"
   ensure_dir "$dst"
-  # If already a mountpoint, nothing to do
+
+  # Already mounted? done.
   if is_mounted_here "$dst"; then return 0; fi
-  # Try bind mount (root required)
-  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-    mount --bind "$src" "$dst" 2>/dev/null || {
-      warn "bind mount failed: $src -> $dst (falling back to symlink)"; goto_symlink=1
-    }
-  else
-    goto_symlink=1
+
+  # Must be root (or have CAP_SYS_ADMIN) to bind mount
+  if [ "$(id -u)" != "0" ]; then
+    warn "bind mount requested but not running as root: $src -> $dst"
+    return 1
   fi
-  # Fallback: replace with symlink (recreated on each start)
-  if [ "${goto_symlink:-0}" = "1" ]; then
-    # If a dir exists at dst and isn't empty, don’t destroy user data — move it into pinned src
-    if [ -d "$dst" ] && [ ! -L "$dst" ]; then
-      # Move contents into src (first boot) then replace with symlink
-      find "$dst" -mindepth 1 -maxdepth 1 -exec sh -c 'mv -n "$@" "$0"/ 2>/dev/null || true' "$src" {} +
-      rm -rf "$dst" 2>/dev/null || true
+
+  # Try bind mount (overlay is fine even if dst has content)
+  if command -v mount >/dev/null 2>&1; then
+    if ! mount --bind "$src" "$dst" 2>/dev/null; then
+      warn "bind mount failed: $src -> $dst"
+      return 1
     fi
-    ln -sfn "$src" "$dst" 2>/dev/null || warn "failed to symlink $dst -> $src"
+  else
+    warn "'mount' command not found; cannot bind mount $src -> $dst"
+    return 1
   fi
 }
 
@@ -526,10 +524,42 @@ reconcile_pinned_profiles() { # create/refresh mounts/symlinks for all declared 
 # Call this early during init; safe to call multiple times.
 pin_profiles_step() {
   log "pinning VS Code profiles (protect dirs from deletion)"
-  reconcile_pinned_profiles
-  # Ensure parents are owned for the runtime user
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" 2>/dev/null || true
-  chown -R "${PUID:-1000}:${PGID:-1000}" "$VSC_PROFILES_BASE" 2>/dev/null || true
+  ensure_dir "$PINNED_BASE"
+  ensure_dir "$VSC_PROFILES_BASE"
+
+  errs=0
+  list_profile_names | while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    src="$PINNED_BASE/$name"
+    dst="$VSC_PROFILES_BASE/$name"
+
+    ensure_dir "$src"
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$src" 2>/dev/null || true
+    chmod 0775 "$src" 2>/dev/null || true
+    for f in settings.json keybindings.json tasks.json extensions.json; do
+      [ -e "$src/$f" ] || { : >"$src/$f"; chown "${PUID:-1000}:${PGID:-1000}" "$src/$f" 2>/dev/null || true; chmod 0664 "$src/$f" 2>/dev/null || true; }
+    done
+
+    if ! ensure_bind_mount "$src" "$dst"; then
+      errs=$((errs+1))
+    fi
+  done
+
+  # cleanup mounts for profiles that no longer exist
+  if command -v mount >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+    keep="$(list_profile_names | tr '\n' ' ' )"
+    for mdir in "$VSC_PROFILES_BASE"/*; do
+      [ -d "$mdir" ] || continue
+      base="$(basename "$mdir")"
+      echo " $keep " | grep -q " $base " || { is_mounted_here "$mdir" && umount "$mdir" 2>/dev/null || true; }
+    done
+  fi
+
+  chown -R "${PUID:-1000}:${PGID:-1000}" "$PINNED_BASE" "$VSC_PROFILES_BASE" 2>/dev/null || true
+
+  if [ "$errs" -gt 0 ]; then
+    warn "one or more profile bind mounts failed (run container as root or grant CAP_SYS_ADMIN)"
+  fi
 }
 
 
